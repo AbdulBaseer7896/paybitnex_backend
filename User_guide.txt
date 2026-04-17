@@ -1,0 +1,90 @@
+PayBitnex — Quick User Guide
+=============================
+
+This backend powers a banking-style CRM for cross-border remittance.
+
+ROLES
+-----
+  admin       — owner / operator. Full control.
+  accountant  — verifies transactions and pushes PKR.
+  customer    — receives foreign currency, gets PKR in PK bank.
+
+TYPICAL FLOW
+------------
+  1. Admin creates a customer account (email + temp password).
+  2. Customer logs in, completes profile (name, CNIC, address, CNIC photos).
+  3. Customer adds their Pakistani bank account(s) and
+     foreign merchant account(s) (USA/UK/EU).
+  4. When an overseas payment arrives, the customer submits a new
+     incoming payment in the app with:
+       - sender name / company / bank / last-4
+       - transaction ID
+       - amount + currency
+       - screenshot of the transaction
+       - optional email screenshot
+  5. Accountant sees the submission, verifies the proofs.
+  6. Accountant applies:
+       - exchange rate (live or manual override)
+       - service fee percentage
+     The system computes net PKR automatically.
+  7. Accountant sends PKR to customer's PK bank account,
+     records the bank transaction ID + receipt.
+  8. On save, the payment auto-completes and partners receive
+     their profit shares in the ledger.
+  9. Customer sees "PKR Received" with full breakdown.
+
+MULTI-CURRENCY VIEW
+-------------------
+  Dashboard shows totals separated by currency — exactly like Payoneer.
+  USD totals, EUR totals, GBP totals, and PKR-received are all tracked
+  independently so customers always see clean per-currency balances.
+
+PARTNER PROFIT
+--------------
+  Example:
+    Customer receives $100, fee = 15% = $15
+    Partners: A = 5%, B = 2%, C = 6%, D = 2%   (total 15%)
+    A gets   $5 × 1/3 of the $15 fee? — NO.
+    Shares are of the FEE POOL, not of transaction amount:
+      A.cut = $15 × 5/15 = $5.00
+      B.cut = $15 × 2/15 = $2.00
+      C.cut = $15 × 6/15 = $6.00
+      D.cut = $15 × 2/15 = $2.00
+  But PartnerShare stores shares as PERCENTAGES of the total fee
+  collected, so config is simpler:
+    A.percentage = 33.333
+    B.percentage = 13.333
+    C.percentage = 40.000
+    D.percentage = 13.333   (sum = 99.999 ≈ 100%)
+  Adjust to taste. Remaining % (if any) stays with PayBitnex.
+
+SENSITIVE OPERATIONS
+--------------------
+  Every change to: rates, fees, partner shares, KYC status,
+  transaction status — is recorded with user + timestamp +
+  before/after snapshot in /core/audit-log/.
+
+BACKUPS
+-------
+  - Daily database dumps recommended (pg_dump).
+  - Cloudinary keeps uploads safe independently.
+  - Export reports monthly from /reports/monthly/ for archiving.
+
+
+
+
+
+
+
+
+
+
+unzip paybitnex_backend.zip
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                              # fill in Cloudinary + DB
+python manage.py migrate
+python manage.py seed_initial_data
+python manage.py createadmin --email admin@gmail.com --password pass1234
+python manage.py runserver                         # or: daphne paybitnex.asgi:application
