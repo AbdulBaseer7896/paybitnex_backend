@@ -1,17 +1,20 @@
 """
 Exchange rate fetching — runs every hour via Celery Beat.
 
+**Multi-provider fallback chain.** We try the first provider; if it fails
+(network error, non-200, missing rate), we move on to the next. This makes
+the rate pipeline robust against any single provider going down.
+
+Providers, in order:
+    1. jsdelivr-fawazahmed       (https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api)
+    2. hexarate                  (https://hexarate.paikama.co)
+    3. moneyconvert              (https://cdn.moneyconvert.net)
+    4. open-erapi                (https://open.er-api.com) — original fallback
+
+No provider in the list requires an API key.
+
 Respects manual overrides: if a currency has manual_override_until set
 and that datetime is in the future, we skip overwriting it.
-
-Supported providers:
-    - open-erapi          (https://open.er-api.com) — FREE, no key required.
-    - exchangerate-api    (https://www.exchangerate-api.com) — requires API key.
-    - exchangerate-host   (https://api.exchangerate.host) — free tier, no key.
-
-Default provider is `open-erapi` and requires no credentials.
-
-To add another provider, add a parser entry to `_PROVIDERS` below.
 """
 import logging
 from decimal import Decimal
@@ -19,135 +22,144 @@ from typing import Optional
 
 import httpx
 from celery import shared_task
-from django.conf import settings
 from django.utils import timezone
 
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Parsers
+# Per-provider single-pair fetchers.
+# Each returns Decimal PKR-per-unit, or None on any failure.
 # ---------------------------------------------------------------------------
 
-def _parse_open_erapi(data: dict, wanted: list[str]) -> dict[str, Decimal]:
+async def _try_jsdelivr_fawazahmed(client: httpx.AsyncClient, code: str) -> Optional[Decimal]:
     """
-    open.er-api.com response:
-        {
-          "result": "success",
-          "base_code": "PKR",
-          "rates": {"USD": 0.0036, "EUR": 0.0033, ...}
-        }
-    The `rates` field tells us "1 base = X target". When we query with
-    base=PKR, `rates["USD"]` is "1 PKR = 0.0036 USD" — invert to get
-    "1 USD = 277.77 PKR".
+    https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/usd/pkr.json
+    Response: {"date": "...", "pkr": 278.23}
     """
-    if data.get("result") not in (None, "success"):
-        log.warning("open-erapi returned non-success: %s", data.get("result"))
-        return {}
-    base = data.get("base_code") or data.get("base") or "PKR"
-    rates = data.get("rates") or {}
-    out: dict[str, Decimal] = {}
-    for code in wanted:
-        if code == base:
-            out[code] = Decimal("1")
-            continue
-        r = rates.get(code)
-        if r is None or r == 0:
-            continue
-        if base == "PKR":
-            out[code] = (Decimal("1") / Decimal(str(r))).quantize(Decimal("0.000001"))
-        else:
-            out[code] = Decimal(str(r))
-    return out
+    lc = code.lower()
+    url = f"https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/{lc}/pkr.json"
+    try:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        val = data.get("pkr")
+        if val is None or val == 0:
+            return None
+        return Decimal(str(val)).quantize(Decimal("0.000001"))
+    except Exception as e:
+        log.info("jsdelivr-fawazahmed failed for %s: %s", code, e)
+        return None
 
 
-def _parse_exchangerate_api(data: dict, wanted: list[str]) -> dict[str, Decimal]:
+async def _try_hexarate(client: httpx.AsyncClient, code: str) -> Optional[Decimal]:
     """
-    v6.exchangerate-api.com response:
-        {"base_code": "PKR", "conversion_rates": {"USD": 0.0036, ...}}
+    https://hexarate.paikama.co/api/rates/USD/PKR/latest
+    Response: {"status_code": 200, "data": {"mid": 278.35, ...}}
     """
-    base = data.get("base_code") or data.get("base")
-    rates = data.get("conversion_rates") or data.get("rates") or {}
-    out: dict[str, Decimal] = {}
-    for code in wanted:
-        if code == base:
-            out[code] = Decimal("1")
-            continue
-        r = rates.get(code)
-        if r is None or r == 0:
-            continue
-        if base == "PKR":
-            out[code] = (Decimal("1") / Decimal(str(r))).quantize(Decimal("0.000001"))
-        else:
-            out[code] = Decimal(str(r))
-    return out
+    url = f"https://hexarate.paikama.co/api/rates/{code.upper()}/PKR/latest"
+    try:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        rates = data.get("data") or {}
+        val = rates.get("mid") or rates.get("rate") or rates.get("value")
+        if val is None or val == 0:
+            return None
+        return Decimal(str(val)).quantize(Decimal("0.000001"))
+    except Exception as e:
+        log.info("hexarate failed for %s: %s", code, e)
+        return None
 
 
-def _parse_exchangerate_host(data: dict, wanted: list[str]) -> dict[str, Decimal]:
+async def _try_moneyconvert(client: httpx.AsyncClient, code: str) -> Optional[Decimal]:
     """
-    api.exchangerate.host response:
-        {"base": "PKR", "rates": {"USD": 0.0036, ...}}
+    https://cdn.moneyconvert.net/api/latest.json
+    Response: {"base": "USD", "rates": {"PKR": 278.12, "EUR": 0.92, ...}}
+    We request this endpoint once per currency — API is keyed on 'base'.
     """
-    return _parse_open_erapi(data, wanted)  # same shape
+    url = f"https://cdn.moneyconvert.net/api/latest.json?base={code.upper()}"
+    try:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        rates = data.get("rates") or {}
+        val = rates.get("PKR")
+        if val is None or val == 0:
+            # Some mirrors only publish USD base — derive via USD when possible
+            if code.upper() != "USD":
+                return None
+            return None
+        return Decimal(str(val)).quantize(Decimal("0.000001"))
+    except Exception as e:
+        log.info("moneyconvert failed for %s: %s", code, e)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Provider registry
-# ---------------------------------------------------------------------------
-
-_PROVIDERS = {
-    # Free, no credentials required. This is the default.
-    "open-erapi": {
-        "url": "https://open.er-api.com/v6/latest/PKR",
-        "needs_key": False,
-        "parser": _parse_open_erapi,
-    },
-    # Free tier, no credentials required.
-    "exchangerate-host": {
-        "url": "https://api.exchangerate.host/latest?base=PKR",
-        "needs_key": False,
-        "parser": _parse_exchangerate_host,
-    },
-    # Paid — requires EXCHANGE_RATE_API_KEY.
-    "exchangerate-api": {
-        "url": "https://v6.exchangerate-api.com/v6/{key}/latest/PKR",
-        "needs_key": True,
-        "parser": _parse_exchangerate_api,
-    },
-}
+async def _try_open_erapi(client: httpx.AsyncClient, code: str) -> Optional[Decimal]:
+    """
+    https://open.er-api.com/v6/latest/USD → {"rates": {"PKR": 278.1, ...}}
+    """
+    url = f"https://open.er-api.com/v6/latest/{code.upper()}"
+    try:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("result") not in (None, "success"):
+            return None
+        rates = data.get("rates") or {}
+        val = rates.get("PKR")
+        if val is None or val == 0:
+            return None
+        return Decimal(str(val)).quantize(Decimal("0.000001"))
+    except Exception as e:
+        log.info("open-erapi failed for %s: %s", code, e)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Fetch
-# ---------------------------------------------------------------------------
+# Ordered chain — top = tried first
+_PROVIDER_CHAIN = [
+    ("jsdelivr-fawazahmed", _try_jsdelivr_fawazahmed),
+    ("hexarate",            _try_hexarate),
+    ("moneyconvert",        _try_moneyconvert),
+    ("open-erapi",          _try_open_erapi),
+]
+
+
+async def _fetch_one_with_fallback(client: httpx.AsyncClient, code: str) -> Optional[tuple[Decimal, str]]:
+    """
+    Try each provider in order for a single currency. Return (rate, provider_name)
+    on first success, or None if ALL providers fail.
+    """
+    for name, fn in _PROVIDER_CHAIN:
+        rate = await fn(client, code)
+        if rate is not None and rate > 0:
+            return (rate, name)
+    return None
+
 
 async def _fetch_from_provider(wanted_codes: list[str]) -> Optional[dict[str, Decimal]]:
-    provider_name = getattr(settings, "EXCHANGE_RATE_PROVIDER", "open-erapi")
-    api_key = getattr(settings, "EXCHANGE_RATE_API_KEY", "") or ""
-
-    provider = _PROVIDERS.get(provider_name)
-    if not provider:
-        log.warning("Unknown rate provider %r, falling back to open-erapi.", provider_name)
-        provider = _PROVIDERS["open-erapi"]
-
-    if provider["needs_key"] and not api_key:
-        log.warning(
-            "Provider %r requires an API key but none configured — "
-            "falling back to open-erapi (credential-free).", provider_name,
-        )
-        provider = _PROVIDERS["open-erapi"]
-
-    url = provider["url"].format(key=api_key) if provider["needs_key"] else provider["url"]
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
-        return provider["parser"](data, wanted_codes)
-    except Exception as e:
-        log.exception("Rate fetch failed (%s): %s", provider_name, e)
-        return None
+    """
+    Fetch every wanted code, using the provider chain per-currency.
+    A single currency failing on every provider is logged but doesn't
+    prevent the others from being returned.
+    """
+    if not wanted_codes:
+        return {}
+    out: dict[str, Decimal] = {}
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        for code in wanted_codes:
+            if code == "PKR":
+                out[code] = Decimal("1")
+                continue
+            result = await _fetch_one_with_fallback(client, code)
+            if result is None:
+                log.warning("All providers failed for currency %s", code)
+                continue
+            rate, source = result
+            out[code] = rate
+            log.info("Rate for %s = %s PKR (via %s)", code, rate, source)
+    return out or None
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +170,6 @@ async def fetch_market_quote(codes: list[str]) -> dict[str, Decimal]:
     """
     Return a best-effort dict of `{code: Decimal PKR_per_unit}` for the
     given currency codes, without touching the DB.
-
-    Used by the Rates page to show today's live market rate as a reference
-    even when our local ExchangeRate row is stale or manually overridden.
     """
     if not codes:
         return {}

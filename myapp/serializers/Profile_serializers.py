@@ -11,6 +11,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     kyc_reviewed_by_email = serializers.CharField(
         source="kyc_reviewed_by.email", read_only=True, default=None,
     )
+    is_locked = serializers.BooleanField(read_only=True)
 
     # Declare cnic_number WITHOUT the auto UniqueValidator (it's sync
     # and would crash async views). We check uniqueness manually below.
@@ -28,6 +29,8 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             "address", "city",
             "kyc_status", "kyc_notes", "kyc_reviewed_at",
             "kyc_reviewed_by_email",
+            "kyc_objections", "kyc_objection_round", "kyc_approved_at",
+            "is_locked",
             "rating_tier", "rating_score",
             "completed_count", "rejected_count", "total_volume_pkr",
             "created_at", "updated_at",
@@ -36,6 +39,8 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             "id", "user", "user_email",
             "kyc_status", "kyc_notes", "kyc_reviewed_at",
             "kyc_reviewed_by_email",
+            "kyc_objections", "kyc_objection_round", "kyc_approved_at",
+            "is_locked",
             "cnic_front_url", "cnic_back_url", "selfie_url",
             "rating_tier", "rating_score",
             "completed_count", "rejected_count", "total_volume_pkr",
@@ -44,8 +49,6 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "cnic_front": {"write_only": True, "required": True},
             "cnic_back":  {"write_only": True, "required": True},
-            # Selfie is enforced as required at serializer level (model
-            # keeps it nullable so old rows migrate cleanly).
             "selfie":     {"write_only": True, "required": True,
                            "allow_null": False},
         }
@@ -59,6 +62,14 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
                 "This CNIC is already registered to another account."
             )
         return value
+
+    def validate(self, attrs):
+        # Once KYC is approved, profile is locked — no edits allowed.
+        if self.instance and self.instance.is_locked:
+            raise serializers.ValidationError(
+                "Profile is locked after KYC approval and cannot be edited."
+            )
+        return attrs
 
     def get_cnic_front_url(self, obj):
         return obj.cnic_front.url if obj.cnic_front else None
@@ -76,6 +87,21 @@ class KYCReviewSerializer(serializers.Serializer):
         CustomerProfile.KYC_REJECTED,
         CustomerProfile.KYC_PENDING,
     ])
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class KYCObjectionItemSerializer(serializers.Serializer):
+    """Single objection entry: which field, what's wrong."""
+    field = serializers.CharField(
+        max_length=60,
+        help_text="e.g. 'selfie', 'cnic_front', 'cnic_back', 'address', 'full_name', 'general'",
+    )
+    message = serializers.CharField(max_length=500)
+
+
+class KYCRaiseObjectionsSerializer(serializers.Serializer):
+    """Admin raises one or more objections against a KYC profile."""
+    objections = KYCObjectionItemSerializer(many=True, required=True, min_length=1)
     notes = serializers.CharField(required=False, allow_blank=True)
 
 

@@ -101,6 +101,21 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 {"detail": "Only customers can submit payments."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Gate: require KYC-approved profile before any payment can be submitted.
+        from myapp.Models.Profile_models import CustomerProfile
+        profile = CustomerProfile.objects.filter(user=request.user).first()
+        if not profile or profile.kyc_status != CustomerProfile.KYC_APPROVED:
+            return Response(
+                {
+                    "detail": (
+                        "Your profile must be KYC-approved before you can submit "
+                        "payments. Please complete your profile and wait for admin "
+                        "approval."
+                    ),
+                    "kyc_status": profile.kyc_status if profile else "none",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
         s = IncomingPaymentCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         with dbtx.atomic():

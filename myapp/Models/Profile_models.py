@@ -37,10 +37,14 @@ class CustomerProfile(models.Model):
     KYC_PENDING = "pending"
     KYC_APPROVED = "approved"
     KYC_REJECTED = "rejected"
+    KYC_OBJECTIONS = "objections"   # admin raised fixable issues
+    KYC_RESUBMITTED = "resubmitted" # customer fixed and returned for re-review
     KYC_CHOICES = [
         (KYC_PENDING, "Pending Review"),
         (KYC_APPROVED, "Approved"),
         (KYC_REJECTED, "Rejected"),
+        (KYC_OBJECTIONS, "Objections Raised"),
+        (KYC_RESUBMITTED, "Resubmitted for Review"),
     ]
     kyc_status = models.CharField(
         max_length=20, choices=KYC_CHOICES, default=KYC_PENDING, db_index=True,
@@ -51,6 +55,19 @@ class CustomerProfile(models.Model):
     )
     kyc_reviewed_at = models.DateTimeField(null=True, blank=True)
     kyc_notes = models.TextField(blank=True)
+    # Objection workflow
+    kyc_objections = models.JSONField(
+        default=list, blank=True,
+        help_text="List of active objection entries: [{field, message, raised_at, raised_by}]",
+    )
+    kyc_objection_round = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Number of objection rounds this profile has gone through.",
+    )
+    kyc_approved_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Set when KYC moves to APPROVED. Profile becomes locked after this.",
+    )
 
     # Customer scoring / rating — updated by signals on transaction completion.
     RATING_NEW = "new"
@@ -83,3 +100,8 @@ class CustomerProfile(models.Model):
 
     def __str__(self):
         return f"Profile: {self.full_name} ({self.user.email})"
+
+    @property
+    def is_locked(self):
+        """True once KYC is approved — profile details cannot be edited."""
+        return self.kyc_status == self.KYC_APPROVED

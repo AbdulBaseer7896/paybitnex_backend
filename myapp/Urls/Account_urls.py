@@ -4,8 +4,9 @@ from rest_framework.routers import DefaultRouter
 
 from myapp.Views.Account_views import (
     UserAdminViewSet, CustomerProfileView,
-    KYCReviewView, PendingKYCListView,
+    KYCReviewView, PendingKYCListView, KYCRaiseObjectionsView,
     CustomerScoreView, CustomerOnboardingListView,
+    onboarding_counts,
 )
 
 router = DefaultRouter()
@@ -18,7 +19,10 @@ urlpatterns = [
     path("score/<int:user_id>/", CustomerScoreView.as_view(), name="user-score"),
     path("kyc/pending/", PendingKYCListView.as_view(), name="kyc-pending"),
     path("kyc/<uuid:profile_id>/review/", KYCReviewView.as_view(), name="kyc-review"),
+    path("kyc/<uuid:profile_id>/objections/",
+         KYCRaiseObjectionsView.as_view(), name="kyc-objections"),
     path("onboarding/", CustomerOnboardingListView.as_view(), name="onboarding-list"),
+    path("onboarding/counts/", onboarding_counts, name="onboarding-counts"),
     # Alias kept for frontend code that uses the older path.
     path("customers/onboarded/", CustomerOnboardingListView.as_view(),
          name="onboarding-list-alias"),

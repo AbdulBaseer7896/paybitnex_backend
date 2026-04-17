@@ -24,6 +24,7 @@ from myapp.serializers.User_serializers import (
 )
 from myapp.serializers.Profile_serializers import (
     CustomerProfileSerializer, KYCReviewSerializer,
+    KYCRaiseObjectionsSerializer,
 )
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.async_helpers import async_is_valid, async_save
@@ -202,12 +203,36 @@ class CustomerProfileView(AsyncAPIView):
             return Response({"detail": "Profile not set up."},
                             status=status.HTTP_404_NOT_FOUND)
 
+        # Locked profiles (approved KYC) cannot be edited at all.
+        if profile.is_locked:
+            return Response(
+                {"detail": "Profile is locked after KYC approval and cannot be edited."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         s = CustomerProfileSerializer(
             profile, data=request.data, partial=True,
             context={"request": request},
         )
         await async_is_valid(s, raise_exception=True)
         profile = await async_save(s)
+
+        # If the customer was responding to objections, flip status to RESUBMITTED.
+        if profile.kyc_status in (
+            CustomerProfile.KYC_OBJECTIONS,
+            CustomerProfile.KYC_REJECTED,
+        ):
+            profile.kyc_status = CustomerProfile.KYC_RESUBMITTED
+            await profile.asave(update_fields=["kyc_status", "updated_at"])
+            await AuditLog.arecord(
+                user=request.user, action=AuditLog.ACTION_UPDATE, target=profile,
+                description=(
+                    f"Customer resubmitted KYC for {profile.full_name} "
+                    f"(round {profile.kyc_objection_round})"
+                ),
+                after={"kyc_status": profile.kyc_status},
+            )
+
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data
         )
@@ -257,13 +282,23 @@ class KYCReviewView(AsyncAPIView):
         await async_is_valid(s, raise_exception=True)
 
         before = profile.kyc_status
-        profile.kyc_status = s.validated_data["status"]
+        new_status = s.validated_data["status"]
+        profile.kyc_status = new_status
         profile.kyc_notes = s.validated_data.get("notes", "")
         profile.kyc_reviewed_by = request.user
         profile.kyc_reviewed_at = timezone.now()
-        await profile.asave(update_fields=[
+
+        update_fields = [
             "kyc_status", "kyc_notes", "kyc_reviewed_by", "kyc_reviewed_at",
-        ])
+        ]
+
+        # On approval: lock the profile, clear any outstanding objections.
+        if new_status == CustomerProfile.KYC_APPROVED:
+            profile.kyc_approved_at = timezone.now()
+            profile.kyc_objections = []
+            update_fields += ["kyc_approved_at", "kyc_objections"]
+
+        await profile.asave(update_fields=update_fields)
         await AuditLog.arecord(
             user=request.user, action=AuditLog.ACTION_KYC_REVIEW, target=profile,
             description=f"KYC {before} → {profile.kyc_status} for {profile.full_name}",
@@ -273,12 +308,83 @@ class KYCReviewView(AsyncAPIView):
         return Response(CustomerProfileSerializer(profile).data)
 
 
+class KYCRaiseObjectionsView(AsyncAPIView):
+    """
+    POST /accounts/kyc/<profile_id>/objections/
+
+    Admin/accountant raises one or more objections on a KYC submission.
+    The customer then receives these in their profile view and can edit
+    specific fields to address them, which flips status to RESUBMITTED.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrAccountant]
+
+    async def post(self, request, profile_id):
+        try:
+            profile = await CustomerProfile.objects.select_related(
+                "user", "kyc_reviewed_by"
+            ).aget(pk=profile_id)
+        except CustomerProfile.DoesNotExist:
+            return Response({"detail": "Not found."},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if profile.kyc_status == CustomerProfile.KYC_APPROVED:
+            return Response(
+                {"detail": "Cannot raise objections — profile is already approved."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        s = KYCRaiseObjectionsSerializer(data=request.data)
+        await async_is_valid(s, raise_exception=True)
+
+        now = timezone.now()
+        raised_by_email = getattr(request.user, "email", "")
+        new_items = [
+            {
+                "field": item["field"],
+                "message": item["message"],
+                "raised_at": now.isoformat(),
+                "raised_by": raised_by_email,
+            }
+            for item in s.validated_data["objections"]
+        ]
+
+        before_status = profile.kyc_status
+        profile.kyc_objections = new_items
+        profile.kyc_objection_round = (profile.kyc_objection_round or 0) + 1
+        profile.kyc_status = CustomerProfile.KYC_OBJECTIONS
+        profile.kyc_notes = s.validated_data.get("notes", profile.kyc_notes or "")
+        profile.kyc_reviewed_by = request.user
+        profile.kyc_reviewed_at = now
+        await profile.asave(update_fields=[
+            "kyc_objections", "kyc_objection_round", "kyc_status",
+            "kyc_notes", "kyc_reviewed_by", "kyc_reviewed_at",
+        ])
+
+        await AuditLog.arecord(
+            user=request.user, action=AuditLog.ACTION_KYC_REVIEW, target=profile,
+            description=(
+                f"KYC objections raised (round {profile.kyc_objection_round}) "
+                f"for {profile.full_name}: {len(new_items)} item(s)"
+            ),
+            before={"kyc_status": before_status},
+            after={
+                "kyc_status": profile.kyc_status,
+                "objections": new_items,
+            },
+        )
+
+        return Response(CustomerProfileSerializer(profile).data)
+
+
 class PendingKYCListView(AsyncAPIView):
     permission_classes = [IsAuthenticated, IsAdminOrAccountant]
 
     async def get(self, request):
         qs = CustomerProfile.objects.filter(
-            kyc_status=CustomerProfile.KYC_PENDING,
+            kyc_status__in=[
+                CustomerProfile.KYC_PENDING,
+                CustomerProfile.KYC_RESUBMITTED,
+            ],
         ).select_related("user", "kyc_reviewed_by").order_by("created_at")
         results = [
             CustomerProfileSerializer(p, context={"request": request}).data
@@ -309,7 +415,16 @@ class CustomerOnboardingListView(ListAPIView):
         # Accept either `kyc_status` or the shorter `kyc` from older UIs.
         kyc_val = p.get("kyc_status") or p.get("kyc")
         if kyc_val and kyc_val != "all":
-            qs = qs.filter(kyc_status=kyc_val)
+            # "pending" is a meta-bucket that also covers resubmitted profiles
+            # — both need admin attention. The dedicated "resubmitted" tab is
+            # still available to filter them out if needed.
+            if kyc_val == "pending":
+                qs = qs.filter(kyc_status__in=[
+                    CustomerProfile.KYC_PENDING,
+                    CustomerProfile.KYC_RESUBMITTED,
+                ])
+            else:
+                qs = qs.filter(kyc_status=kyc_val)
         q = p.get("q")
         if q:
             from django.db.models import Q
@@ -339,3 +454,43 @@ class CustomerOnboardingListView(ListAPIView):
         else:
             response.data = results
         return response
+
+
+# =====================================================================
+#  ONBOARDING COUNTS (for sidebar badge)
+# =====================================================================
+from rest_framework.decorators import api_view, permission_classes as perm_classes
+
+
+@api_view(["GET"])
+@perm_classes([IsAuthenticated, IsAdminOrAccountant])
+def onboarding_counts(request):
+    """
+    Lightweight endpoint that returns counts for each KYC bucket plus
+    submitted-transaction count. The sidebar polls this to show badges.
+    """
+    from django.db.models import Count, Q
+    from myapp.Models.Transaction_models import IncomingPayment, TransactionStatus
+
+    agg = CustomerProfile.objects.aggregate(
+        pending=Count("pk", filter=Q(kyc_status=CustomerProfile.KYC_PENDING)),
+        resubmitted=Count("pk", filter=Q(kyc_status=CustomerProfile.KYC_RESUBMITTED)),
+        objections=Count("pk", filter=Q(kyc_status=CustomerProfile.KYC_OBJECTIONS)),
+        approved=Count("pk", filter=Q(kyc_status=CustomerProfile.KYC_APPROVED)),
+        rejected=Count("pk", filter=Q(kyc_status=CustomerProfile.KYC_REJECTED)),
+    )
+    # KYC badge: anything awaiting an admin decision
+    agg["awaiting_review"] = (agg.get("pending") or 0) + (agg.get("resubmitted") or 0)
+
+    # Transactions that still need accountant / admin attention
+    tx_agg = IncomingPayment.objects.aggregate(
+        submitted=Count("pk", filter=Q(status=TransactionStatus.SUBMITTED)),
+        under_review=Count("pk", filter=Q(status=TransactionStatus.UNDER_REVIEW)),
+    )
+    agg["submitted_transactions"] = tx_agg.get("submitted") or 0
+    agg["under_review_transactions"] = tx_agg.get("under_review") or 0
+    # Combined badge for the Transactions nav item — everything still in the pipeline
+    agg["pending_transactions"] = (
+        (tx_agg.get("submitted") or 0) + (tx_agg.get("under_review") or 0)
+    )
+    return Response(agg)
