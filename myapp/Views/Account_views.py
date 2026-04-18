@@ -29,6 +29,7 @@ from myapp.serializers.Profile_serializers import (
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.async_helpers import async_is_valid, async_save
 from myapp.Utils.customer_scoring import compute_score
+from myapp.Utils.email_tasks import send_email_async
 
 
 # =====================================================================
@@ -305,6 +306,25 @@ class KYCReviewView(AsyncAPIView):
             before={"kyc_status": before},
             after={"kyc_status": profile.kyc_status},
         )
+
+        # Customer-facing email on approval ONLY (objections are handled
+        # by the separate KYCRaiseObjectionsView below). No admin/accountant
+        # addresses are in this email — customer-only.
+        if (new_status == CustomerProfile.KYC_APPROVED
+                and before != CustomerProfile.KYC_APPROVED):
+            try:
+                customer_email = profile.user.email
+                customer_name = profile.user.full_name or profile.full_name or ""
+                send_email_async(
+                    to=[customer_email],
+                    subject="Your PayBitnex account has been verified",
+                    template="kyc/approved",
+                    context={"name": customer_name},
+                )
+            except Exception:
+                # Email failure must not block the verification response.
+                pass
+
         return Response(CustomerProfileSerializer(profile).data)
 
 

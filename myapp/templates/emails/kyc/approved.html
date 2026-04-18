@@ -1,0 +1,34 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  Great news — your {{ company_name }} account has been <b>verified</b>.
+  You can now submit payments for processing.
+</p>
+
+<div style="background:#E7F1EC; border-left:3px solid #0F3D30;
+            padding:14px 18px; border-radius:4px; margin:20px 0;">
+  <div style="font-weight:600; color:#0F3D30; margin-bottom:4px;">
+    What's next?
+  </div>
+  <div style="color:#3a3d44; font-size:14px; line-height:1.6;">
+    Sign in to your account and head to the payments page to record your
+    first transaction. Our team reviews and processes payments within 24
+    hours during business days.
+  </div>
+</div>
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ frontend_url }}/app"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    Go to dashboard
+  </a>
+</p>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  Thanks for choosing {{ company_name }}.
+</p>
+{% endblock %}

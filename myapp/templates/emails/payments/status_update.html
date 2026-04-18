@@ -1,0 +1,66 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  The status of your payment <b>{{ reference }}</b> has been updated.
+</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:20px 0; border:1px solid #eeeff2; border-radius:8px;">
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Reference
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-family:'Courier New', monospace; font-size:14px;
+               text-align:right;">
+      {{ reference }}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Amount
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:14px; text-align:right;">
+      {{ amount }} {{ currency }}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:14px 18px;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      New status
+    </td>
+    <td style="padding:14px 18px;
+               font-size:14px; text-align:right;">
+      <b style="color:#0F3D30;">{{ status_label }}</b>
+    </td>
+  </tr>
+</table>
+
+{% if next_step %}
+<p style="margin:16px 0; font-size:14px;">
+  <b>What's next:</b> {{ next_step }}
+</p>
+{% endif %}
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ frontend_url }}/app/payments"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    View payment
+  </a>
+</p>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If you have any questions, please refer to the reference number above
+  when contacting support.
+</p>
+{% endblock %}

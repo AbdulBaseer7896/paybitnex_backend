@@ -41,7 +41,32 @@ from myapp.Utils.references import next_reference
 from myapp.Utils.partner_ledger import distribute_fee_for_payment
 
 
+from myapp.Utils.email_tasks import send_email_async
+
+
 # ---------- helpers ----------
+
+# Human-readable labels for email display — keys must match TransactionStatus
+STATUS_DISPLAY = {
+    "submitted":    "Submitted — under initial review",
+    "under_review": "Under review by our team",
+    "verified":     "Verified — awaiting rate & fee application",
+    "pkr_sent":     "PKR sent to your account",
+    "completed":    "Completed",
+    "on_hold":      "On hold — additional review needed",
+    "rejected":     "Rejected",
+}
+
+# Brief "what's next" copy for customer reassurance in the email.
+STATUS_NEXT_STEP = {
+    "under_review": "Our team is reviewing the payment details. No action needed from you.",
+    "verified":     "Your payment has been verified. We're applying the final rate and fee.",
+    "pkr_sent":     "Funds have been transferred to your PKR account. Please allow a short time for them to appear.",
+    "completed":    "This payment is now complete. Thanks for using PayBitnex.",
+    "on_hold":      "We need to recheck some details — we'll follow up if we need anything from you.",
+    "rejected":     "Unfortunately we were unable to process this payment. Please contact support for details.",
+}
+
 
 def _record_status_change(payment, from_status, to_status, user, note=""):
     TransactionStatusHistory.objects.create(
@@ -56,6 +81,34 @@ def _record_status_change(payment, from_status, to_status, user, note=""):
         description=f"{payment.reference}: {from_status} → {to_status}",
         before={"status": from_status}, after={"status": to_status},
     )
+
+    # Customer-facing email — ONLY sent when a staff member changed the
+    # status, not when the payment was first submitted (from_status="").
+    # The email is addressed to the customer alone; no admin/accountant
+    # addresses are in `to` or `cc`, so their emails are never exposed
+    # to customers.
+    if from_status and to_status != from_status:
+        try:
+            customer = payment.customer
+            if customer and customer.email:
+                send_email_async(
+                    to=[customer.email],
+                    subject=f"Payment {payment.reference}: status updated",
+                    template="payments/status_update",
+                    context={
+                        "name": customer.full_name or "",
+                        "reference": payment.reference,
+                        "amount": f"{payment.amount}",
+                        "currency": payment.currency_id,
+                        "status_label": STATUS_DISPLAY.get(
+                            to_status, to_status.replace("_", " ").title(),
+                        ),
+                        "next_step": STATUS_NEXT_STEP.get(to_status, ""),
+                    },
+                )
+        except Exception:
+            # Never let email failure block the status-change response.
+            pass
 
 
 # ---------- viewsets ----------
