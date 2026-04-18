@@ -128,6 +128,11 @@ class SignupRequestOTPView(APIView):
     so the frontend can redirect to login. Otherwise mint a 6-digit OTP,
     email it, and return 200. The OTP expires in 60 seconds.
     """
+    # Disable auth entirely — this endpoint is publicly reachable. Without
+    # this, DRF's JWT auth class rejects any stale Authorization header
+    # the frontend may still be sending, returning 401 before AllowAny
+    # has a chance to kick in.
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -173,6 +178,7 @@ class SignupVerifyOTPView(APIView):
     user info so the frontend can sign the user in immediately and send
     them to onboarding.
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -258,6 +264,7 @@ class ForgotPasswordRequestOTPView(APIView):
     this prevents email-enumeration attacks. The OTP is only actually
     sent if a user exists with this email.
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -296,6 +303,7 @@ class ForgotPasswordResetView(APIView):
     existing refresh tokens the user had active (blacklist pattern),
     forcing a fresh login everywhere.
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):

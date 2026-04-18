@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('myapp', '0005_merge_20260417_0638'),
+        ('myapp', '0004_payment_verification_fields'),
     ]
 
     operations = [

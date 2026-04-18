@@ -89,9 +89,6 @@ python manage.py seed_initial_data
 python manage.py createadmin --email admin@gmail.com --password pass1234
 python manage.py runserver                         # or: daphne paybitnex.asgi:application
 
+   python manage.py seed_initial_data
 
-celery -A paybitnex worker -l info --pool=solo
-
-or 
-
-python -m celery -A paybitnex worker -l info --pool=solo
+    python -m celery -A paybitnex worker -l info --pool=solo
