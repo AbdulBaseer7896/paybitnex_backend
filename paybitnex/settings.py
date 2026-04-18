@@ -74,22 +74,31 @@ DATABASES = {
 }
 
 # SQLite production tuning — only applied when we're actually using SQLite.
-# - WAL journal mode lets readers proceed while a writer is writing.
-# - `synchronous=NORMAL` is still crash-safe in WAL mode but much faster
-#   than the default FULL.
-# - busy_timeout makes Django wait instead of immediately erroring when
-#   the database is briefly locked (Celery + web workers can both write).
+# Django's SQLite backend doesn't accept `init_command` in OPTIONS (that's
+# MySQL-only), so we wire PRAGMAs via the connection_created signal which
+# fires once per new connection.
 if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    # 20s timeout at the Python sqlite3 driver level handles brief lock
+    # contention (Celery + web workers occasionally racing).
     DATABASES["default"].setdefault("OPTIONS", {})
-    DATABASES["default"]["OPTIONS"]["init_command"] = (
-        "PRAGMA journal_mode=WAL; "
-        "PRAGMA synchronous=NORMAL; "
-        "PRAGMA busy_timeout=5000; "
-        "PRAGMA foreign_keys=ON; "
-    )
-    # 20s timeout at the Python sqlite3 driver level — belt-and-suspenders
-    # for the occasional write collision.
     DATABASES["default"]["OPTIONS"]["timeout"] = 20
+
+    from django.db.backends.signals import connection_created
+
+    def _apply_sqlite_pragmas(sender, connection, **kwargs):
+        if connection.vendor != "sqlite":
+            return
+        with connection.cursor() as cursor:
+            # WAL journal mode: readers don't block writers and vice versa.
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            # Still crash-safe in WAL mode, much faster than FULL.
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+            # Wait up to 5s for a lock instead of erroring immediately.
+            cursor.execute("PRAGMA busy_timeout=5000;")
+            # Enforce referential integrity (Django usually sets this too).
+            cursor.execute("PRAGMA foreign_keys=ON;")
+
+    connection_created.connect(_apply_sqlite_pragmas)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "myapp.User"
