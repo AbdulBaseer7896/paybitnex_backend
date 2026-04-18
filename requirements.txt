@@ -19,3 +19,4 @@ python-dateutil==2.9.0
 drf-spectacular==0.28.0
 django-extensions==3.2.3
 gunicorn==23.0.0
+reportlab==4.2.5

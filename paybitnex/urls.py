@@ -15,6 +15,7 @@ api_v1 = [
     path("rates/", include("myapp.Urls.Rate_urls")),
     path("fees/", include("myapp.Urls.Fee_urls")),
     path("partners/", include("myapp.Urls.Partner_urls")),
+    path("expenses/", include("myapp.Urls.Expense_urls")),
     path("reports/", include("myapp.Urls.Report_urls")),
     path("core/", include("myapp.Urls.Core_urls")),
 ]
