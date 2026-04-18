@@ -31,7 +31,13 @@ class UserSerializer(serializers.ModelSerializer):
         ]
 
     def get_profile_picture_url(self, obj):
-        # The selfie doubles as the profile picture for customers.
+        # Explicit profile picture takes priority.
+        if getattr(obj, "profile_picture", None):
+            try:
+                return obj.profile_picture.url
+            except Exception:
+                pass
+        # Fallback: for customers, use their selfie from the KYC profile.
         try:
             profile = obj.profile
             if profile and profile.selfie:

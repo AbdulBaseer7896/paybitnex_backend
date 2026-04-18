@@ -45,12 +45,46 @@ class LogoutView(AsyncAPIView):
 
 
 class MeView(AsyncAPIView):
-    """GET current user info."""
+    """GET current user info / PATCH limited self-editable fields."""
     permission_classes = [IsAuthenticated]
 
     async def get(self, request):
         data = UserSerializer(request.user).data
         return Response(data)
+
+    async def patch(self, request):
+        user = request.user
+        # Whitelisted fields the user may edit on their own account
+        before = {
+            "full_name": user.full_name,
+            "phone": user.phone,
+            "had_picture": bool(user.profile_picture),
+        }
+        updated_fields = []
+        if "full_name" in request.data:
+            user.full_name = request.data["full_name"]
+            updated_fields.append("full_name")
+        if "phone" in request.data:
+            user.phone = request.data["phone"]
+            updated_fields.append("phone")
+        # File upload
+        if "profile_picture" in request.FILES:
+            user.profile_picture = request.FILES["profile_picture"]
+            updated_fields.append("profile_picture")
+        if updated_fields:
+            updated_fields.append("updated_at")
+            await user.asave(update_fields=updated_fields)
+            await AuditLog.arecord(
+                user=user, action=AuditLog.ACTION_UPDATE, target=user,
+                description=f"Self-updated profile fields: {', '.join(updated_fields)}",
+                before=before,
+                after={
+                    "full_name": user.full_name,
+                    "phone": user.phone,
+                    "had_picture": bool(user.profile_picture),
+                },
+            )
+        return Response(UserSerializer(user).data)
 
 
 class ChangePasswordView(AsyncAPIView):

@@ -49,6 +49,9 @@ class User(AbstractBaseUser, PermissionsMixin):
         max_length=20, choices=UserRole.choices, default=UserRole.CUSTOMER, db_index=True,
     )
     phone = models.CharField(max_length=20, blank=True)
+    profile_picture = models.ImageField(
+        upload_to="avatars/", null=True, blank=True,
+    )
 
     # customer onboarding — must complete profile before accessing dashboard
     is_profile_complete = models.BooleanField(default=False)
