@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "cloudinary_storage",
     "drf_spectacular",
     "django_extensions",
+    "anymail",
     # local
     "myapp",
 ]
@@ -71,6 +72,24 @@ DATABASES = {
         conn_max_age=600,
     )
 }
+
+# SQLite production tuning — only applied when we're actually using SQLite.
+# - WAL journal mode lets readers proceed while a writer is writing.
+# - `synchronous=NORMAL` is still crash-safe in WAL mode but much faster
+#   than the default FULL.
+# - busy_timeout makes Django wait instead of immediately erroring when
+#   the database is briefly locked (Celery + web workers can both write).
+if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    DATABASES["default"].setdefault("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"]["init_command"] = (
+        "PRAGMA journal_mode=WAL; "
+        "PRAGMA synchronous=NORMAL; "
+        "PRAGMA busy_timeout=5000; "
+        "PRAGMA foreign_keys=ON; "
+    )
+    # 20s timeout at the Python sqlite3 driver level — belt-and-suspenders
+    # for the occasional write collision.
+    DATABASES["default"]["OPTIONS"]["timeout"] = 20
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "myapp.User"
@@ -186,6 +205,12 @@ DEFAULT_FROM_EMAIL = config(
     default=EMAIL_HOST_USER or "no-reply@paybitnex.com",
 )
 EMAIL_TIMEOUT      = config("EMAIL_TIMEOUT", default=20, cast=int)
+
+# Anymail (Resend) — used when hosting providers block SMTP ports 25/465/587.
+# Set EMAIL_BACKEND=anymail.backends.resend.EmailBackend in .env to switch.
+ANYMAIL = {
+    "RESEND_API_KEY": config("RESEND_API_KEY", default=""),
+}
 
 # Human-readable sender display: "PayBitnex <no-reply@paybitnex.com>"
 EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PayBitnex")
