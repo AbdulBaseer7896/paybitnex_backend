@@ -41,11 +41,12 @@ class IncomingPayment(models.Model):
 
     # Sender details (entered by customer)
     sender_name = models.CharField(max_length=150)
-    sender_company = models.CharField(max_length=150, blank=True)
-    sender_bank_name = models.CharField(max_length=150)
-    sender_account_last4 = models.CharField(max_length=10)
+    sender_company = models.CharField(max_length=150)
+    sender_bank_name = models.CharField(max_length=150, blank=True)
+    sender_account_last4 = models.CharField(max_length=10, blank=True)
     external_transaction_id = models.CharField(
-        max_length=100, help_text="Unique ID from sender's bank / platform",
+        max_length=100, unique=True, db_index=True,
+        help_text="Unique ID from sender's bank / platform — unique across all transactions",
     )
 
     # Amount received

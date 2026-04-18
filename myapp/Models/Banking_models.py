@@ -59,8 +59,13 @@ class CustomerBankAccount(models.Model):
     )
     bank = models.ForeignKey(PakistaniBank, on_delete=models.PROTECT)
     holder_name = models.CharField(max_length=150)
-    account_number = models.CharField(max_length=50)
-    iban = models.CharField(max_length=50, blank=True, help_text="IBAN (PK..)")
+    account_number = models.CharField(
+        max_length=50, unique=True, db_index=True,
+        help_text="Must be unique across the whole system.",
+    )
+    iban = models.CharField(
+        max_length=50, blank=True, help_text="IBAN (PK..) — unique if provided.",
+    )
 
     is_primary = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
@@ -84,8 +89,14 @@ class CustomerMerchantAccount(models.Model):
     )
     bank = models.ForeignKey(ForeignBank, on_delete=models.PROTECT)
     holder_name = models.CharField(max_length=150)
-    account_number = models.CharField(max_length=80)
-    iban = models.CharField(max_length=80, blank=True, help_text="IBAN / routing / SWIFT")
+    account_number = models.CharField(
+        max_length=80, unique=True, db_index=True,
+        help_text="Must be unique across the whole system.",
+    )
+    iban = models.CharField(
+        max_length=80, blank=True,
+        help_text="IBAN / routing / SWIFT — unique if provided.",
+    )
     routing_number = models.CharField(max_length=40, blank=True)
     swift_code = models.CharField(max_length=20, blank=True)
 

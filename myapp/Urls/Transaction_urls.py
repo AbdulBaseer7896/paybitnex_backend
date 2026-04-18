@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 
 from myapp.Views.Transaction_views import (
     IncomingPaymentViewSet, OutgoingTransferViewSet,
+    customers_with_tx_counts,
 )
 
 router = DefaultRouter()
@@ -12,4 +13,8 @@ router.register(r"transfers", OutgoingTransferViewSet, basename="transfers")
 
 urlpatterns = [
     path("", include(router.urls)),
+    path(
+        "customers-summary/", customers_with_tx_counts,
+        name="customers-summary",
+    ),
 ]

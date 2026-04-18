@@ -353,3 +353,116 @@ class OutgoingTransferViewSet(
             OutgoingTransferSerializer(transfer).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+# ---------------------------------------------------------------------
+# CUSTOMERS WITH TRANSACTION COUNTS
+#   GET /transactions/customers-summary/
+#
+# Used by the "User Transactions" page (admin + accountant). Returns one row
+# per customer who has at least one profile, with counts for each status
+# bucket. Optional ?q= filters by email/full_name/cnic. Always includes only
+# role=customer.
+# ---------------------------------------------------------------------
+from rest_framework.decorators import api_view, permission_classes as perm_classes
+from myapp.Utils.permissions import IsAdminOrAccountant
+
+
+@api_view(["GET"])
+@perm_classes([IsAuthenticated, IsAdminOrAccountant])
+def customers_with_tx_counts(request):
+    from django.db.models import Count, Sum, Q, Max
+    from myapp.Models.Auth_models import User
+
+    # NOTE: The reverse relation from IncomingPayment.customer is
+    # "incoming_payments" (defined via related_name), NOT the default
+    # "incomingpayment". Using the wrong name throws FieldError at query time.
+    qs = (User.objects
+          .filter(role=UserRole.CUSTOMER)
+          .select_related("profile")
+          .annotate(
+              total_tx=Count("incoming_payments"),
+              pending_tx=Count(
+                  "incoming_payments",
+                  filter=Q(incoming_payments__status__in=[
+                      TransactionStatus.SUBMITTED,
+                      TransactionStatus.UNDER_REVIEW,
+                  ]),
+              ),
+              verified_tx=Count(
+                  "incoming_payments",
+                  filter=Q(incoming_payments__status=TransactionStatus.VERIFIED),
+              ),
+              completed_tx=Count(
+                  "incoming_payments",
+                  filter=Q(incoming_payments__status=TransactionStatus.COMPLETED),
+              ),
+              rejected_tx=Count(
+                  "incoming_payments",
+                  filter=Q(incoming_payments__status=TransactionStatus.REJECTED),
+              ),
+              last_tx_at=Max("incoming_payments__created_at"),
+              total_pkr=Sum(
+                  "incoming_payments__net_pkr",
+                  filter=Q(incoming_payments__status=TransactionStatus.COMPLETED),
+              ),
+          )
+          .order_by("-last_tx_at", "-created_at"))
+
+    q = request.query_params.get("q", "").strip()
+    if q:
+        qs = qs.filter(
+            Q(email__icontains=q) |
+            Q(full_name__icontains=q) |
+            Q(profile__cnic_number__icontains=q)
+        )
+
+    kyc = request.query_params.get("kyc", "").strip()
+    if kyc:
+        qs = qs.filter(profile__kyc_status=kyc)
+
+    only_active = request.query_params.get("only_active")
+    if only_active == "true":
+        qs = qs.filter(total_tx__gt=0)
+
+    def _safe_file_url(file_field):
+        """ImageField/FileField .url raises ValueError when the file is
+        empty. Check .name first — empty strings mean 'no file'."""
+        try:
+            if file_field and getattr(file_field, "name", ""):
+                return file_field.url
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    rows = []
+    for u in qs[:500]:
+        prof = None
+        try:
+            prof = u.profile
+        except Exception:
+            prof = None
+
+        picture_url = (
+            _safe_file_url(getattr(prof, "selfie", None)) if prof else None
+        ) or _safe_file_url(getattr(u, "profile_picture", None))
+
+        rows.append({
+            "id": str(u.id),
+            "email": u.email,
+            "full_name": u.full_name or "",
+            "is_active": u.is_active,
+            "profile_picture_url": picture_url,
+            "kyc_status": getattr(prof, "kyc_status", None),
+            "cnic_number": getattr(prof, "cnic_number", None),
+            "total_tx": u.total_tx or 0,
+            "pending_tx": u.pending_tx or 0,
+            "verified_tx": u.verified_tx or 0,
+            "completed_tx": u.completed_tx or 0,
+            "rejected_tx": u.rejected_tx or 0,
+            "last_tx_at": u.last_tx_at.isoformat() if u.last_tx_at else None,
+            "total_pkr_received": str(u.total_pkr or 0),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        })
+
+    return Response({"count": len(rows), "results": rows})

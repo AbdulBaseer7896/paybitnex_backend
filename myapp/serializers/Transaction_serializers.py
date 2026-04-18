@@ -27,6 +27,22 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
             "extra_document",
         ]
 
+    def validate_external_transaction_id(self, value):
+        if not value:
+            return value
+        if IncomingPayment.objects.filter(external_transaction_id=value).exists():
+            raise serializers.ValidationError(
+                "This external transaction ID is already recorded on another payment. "
+                "Each sender-bank reference must be used only once."
+            )
+        return value
+
+    def validate_sender_company(self, value):
+        # UI lists this as required but model still has default; enforce here.
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Sender company is required.")
+        return value
+
 
 class TransactionStatusHistorySerializer(serializers.ModelSerializer):
     changed_by_email = serializers.CharField(source="changed_by.email", read_only=True)

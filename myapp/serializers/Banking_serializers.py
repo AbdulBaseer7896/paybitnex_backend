@@ -20,6 +20,24 @@ class ForeignBankSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+def _check_unique_or_blank(model, field, value, instance):
+    """
+    If `value` is non-blank, ensure no other row in `model` has this value
+    on `field`. Used for conditional-unique fields like IBAN where blank is
+    allowed for many rows but populated values must be globally unique.
+    """
+    if not value:
+        return value
+    qs = model.objects.filter(**{field: value})
+    if instance is not None:
+        qs = qs.exclude(pk=instance.pk)
+    if qs.exists():
+        raise serializers.ValidationError(
+            f"This {field.replace('_', ' ')} is already registered in our system."
+        )
+    return value
+
+
 class CustomerBankAccountSerializer(serializers.ModelSerializer):
     bank_name = serializers.CharField(source="bank.name", read_only=True)
 
@@ -32,6 +50,16 @@ class CustomerBankAccountSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
         read_only_fields = ["id", "customer", "bank_name", "created_at", "updated_at"]
+
+    def validate_account_number(self, value):
+        return _check_unique_or_blank(
+            CustomerBankAccount, "account_number", value, self.instance,
+        )
+
+    def validate_iban(self, value):
+        return _check_unique_or_blank(
+            CustomerBankAccount, "iban", value, self.instance,
+        )
 
 
 class CustomerMerchantAccountSerializer(serializers.ModelSerializer):
@@ -51,3 +79,13 @@ class CustomerMerchantAccountSerializer(serializers.ModelSerializer):
             "id", "customer", "bank_name", "bank_country",
             "created_at", "updated_at",
         ]
+
+    def validate_account_number(self, value):
+        return _check_unique_or_blank(
+            CustomerMerchantAccount, "account_number", value, self.instance,
+        )
+
+    def validate_iban(self, value):
+        return _check_unique_or_blank(
+            CustomerMerchantAccount, "iban", value, self.instance,
+        )
