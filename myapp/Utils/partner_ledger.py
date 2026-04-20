@@ -24,7 +24,31 @@ def distribute_fee_for_payment(payment) -> list:
     Create PartnerLedgerEntry rows for the given IncomingPayment.
     Returns the list of created entries.
 
+    Distribution model: the fee IS the profit pool, and the partners SHARE
+    that entire pool pro-rata by their share_percentage.
+
+        Example: $100 payment, 10% fee = $10 profit.
+                 Partners A=5%, B=4%, C=3% (pool = 12%).
+                 A receives $10 × (5/12) = $4.17
+                 B receives $10 × (4/12) = $3.33
+                 C receives $10 × (3/12) = $2.50
+                 Total distributed = $10.00 (entire fee).
+
+    Historically this code multiplied by `share_percentage / 100`, which
+    interpreted shares as "percent of the fee" rather than "percent of the
+    profit pool". For the example above that incorrectly produced
+    A=$0.50, B=$0.40, C=$0.30 — leaving $8.80 of the fee unaccounted for.
+    The pool-based calculation here is the business rule Bitnex confirmed.
+
     Idempotent: if entries already exist for this payment, does nothing.
+
+    The `share_snapshot` still records each partner's raw share_percentage
+    at the time of the payment, so reports can display "Partner A's share
+    was 5%" even after shares are later re-balanced. The stored snapshot
+    is NOT used as a direct multiplier on the fee during reporting — the
+    snapshot is purely informational; the authoritative payout is in
+    `amount_foreign` / `amount_pkr` which were computed at distribution
+    time using the pool-based math.
     """
     from myapp.Models.Partner_models import Partner, PartnerLedgerEntry
 
@@ -45,16 +69,46 @@ def distribute_fee_for_payment(payment) -> list:
             .select_related("share")
         )
 
-        created = []
+        # First pass: collect every active partner with a positive share,
+        # and compute the total "pool" (sum of all active shares). If no
+        # partners have a share we short-circuit — the company retains
+        # the entire fee and there are no ledger entries to create.
+        eligible = []
+        pool = Decimal("0")
         for p in partners:
             share = getattr(p, "share", None)
             if share is None or share.percentage <= 0:
                 continue
-            share_pct = share.percentage
-            share_frac = share_pct / Decimal("100")
+            eligible.append((p, Decimal(share.percentage)))
+            pool += Decimal(share.percentage)
 
-            amt_foreign = _q(fee_foreign * share_frac)
-            amt_pkr = _q(fee_pkr * share_frac)
+        if not eligible or pool <= 0:
+            log.info(
+                "No eligible partners for %s — full fee retained by PayBitnex.",
+                payment.reference,
+            )
+            return []
+
+        # Second pass: allocate each partner's pro-rata slice of the fee
+        # relative to the pool. We track the running total and assign the
+        # remainder to the last partner, which prevents cumulative rounding
+        # error from leaving a few paisa unaccounted for (or over-allocated).
+        created = []
+        allocated_foreign = Decimal("0")
+        allocated_pkr = Decimal("0")
+        last_idx = len(eligible) - 1
+
+        for i, (p, share_pct) in enumerate(eligible):
+            if i == last_idx:
+                # Final partner takes whatever's left so the sum is exact.
+                amt_foreign = _q(fee_foreign - allocated_foreign)
+                amt_pkr = _q(fee_pkr - allocated_pkr)
+            else:
+                share_frac = share_pct / pool
+                amt_foreign = _q(fee_foreign * share_frac)
+                amt_pkr = _q(fee_pkr * share_frac)
+                allocated_foreign += amt_foreign
+                allocated_pkr += amt_pkr
 
             entry = PartnerLedgerEntry.objects.create(
                 partner=p,
@@ -69,8 +123,8 @@ def distribute_fee_for_payment(payment) -> list:
             created.append(entry)
 
         log.info(
-            "Created %d partner ledger entries for %s (fee=%s %s)",
-            len(created), payment.reference, fee_foreign, payment.currency_id,
+            "Created %d partner ledger entries for %s (fee=%s %s, pool=%s%%)",
+            len(created), payment.reference, fee_foreign, payment.currency_id, pool,
         )
         return created
 

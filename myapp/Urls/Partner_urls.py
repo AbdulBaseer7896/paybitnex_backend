@@ -18,12 +18,16 @@ partner_detail = PartnerViewSet.as_view({
 partner_ledger_action = PartnerViewSet.as_view({"get": "ledger"})
 partner_balance_action = PartnerViewSet.as_view({"get": "balance"})
 partner_bulk_shares = PartnerViewSet.as_view({"post": "bulk_update_shares"})
+partner_recompute = PartnerViewSet.as_view({"post": "recompute_ledger"})
+partner_report_pdf_action = PartnerViewSet.as_view({"get": "report_pdf"})
 
 urlpatterns = [
     path("", include(router.urls)),
     path("list/", partner_list, name="partners-list"),
     path("shares/bulk/", partner_bulk_shares, name="partners-shares-bulk"),
+    path("recompute-ledger/", partner_recompute, name="partners-recompute-ledger"),
     path("<uuid:pk>/", partner_detail, name="partners-detail"),
     path("<uuid:pk>/ledger/", partner_ledger_action, name="partners-ledger"),
     path("<uuid:pk>/balance/", partner_balance_action, name="partners-balance"),
+    path("<uuid:pk>/report.pdf", partner_report_pdf_action, name="partners-report-pdf"),
 ]

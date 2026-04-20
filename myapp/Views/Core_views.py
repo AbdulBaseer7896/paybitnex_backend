@@ -132,31 +132,38 @@ def dashboard_summary(request):
 @permission_classes([IsAuthenticated])
 def bank_balances(request):
     """
-    Admin/accountant view: how much money we're currently holding in each
-    foreign-currency bank account, plus how much PKR we've disbursed.
+    Admin/accountant view of our money across currencies.
 
-    For each non-base currency:
-        received       = sum of `amount` on all non-rejected incoming payments
-        completed      = sum of `amount` on COMPLETED payments (money already disbursed to customer)
-        on_hand_est    = received − completed  (rough estimate of cash we still hold)
-        fees_collected = sum of `fee_amount_foreign` on completed payments
-        pkr_disbursed  = sum of `net_pkr` on completed payments in that currency
-        live_rate      = latest stored rate, if any
-        on_hand_pkr    = on_hand_est × live_rate (for quick comparison)
+    Business flow:
+      - Customer sends us X USD → it arrives in our USD bank account.
+      - We convert externally and send PKR out of our PKR bank account.
+      - We DO NOT send USD back out of the USD account.
 
-    For PKR: total PKR we've paid out to customers.
+    So for each foreign currency the full received `amount` stays on hand
+    until we manually withdraw/transfer it out (which is not tracked in the
+    app yet, hence only received – rejected counts as on-hand here).
+
+    Per foreign currency we return:
+        received          = sum of `amount` on all non-rejected payments
+        on_hand_est       = received (everything received stays in our bank)
+        fees_collected    = sum of `fee_amount_foreign` on completed payments
+                            — this is the profit portion we retain in this currency
+        disbursed_foreign = sum of `amount` on completed payments where the
+                            foreign was "matched" by outgoing PKR (informational)
+        pkr_disbursed     = sum of `net_pkr` on completed payments (PKR we paid out)
+        live_rate         = latest stored rate, if any
+        on_hand_pkr       = on_hand_est × live_rate (quick PKR comparison)
+        profit_pkr        = fees_collected × live_rate (our fee earnings in PKR)
     """
     if request.user.role not in (UserRole.ADMIN, UserRole.ACCOUNTANT):
         return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
 
     from myapp.Models.Rate_models import ExchangeRate
 
-    # Latest stored rates keyed by currency
     rates = {}
     for r in ExchangeRate.objects.all():
         rates[r.currency_id] = Decimal(r.rate_to_pkr or 0)
 
-    # Aggregate per foreign currency
     per_currency = {}
     active_codes = list(
         Currency.objects.filter(is_active=True, is_base=False).values_list("code", flat=True)
@@ -173,47 +180,53 @@ def bank_balances(request):
             currency_id=code, status=TransactionStatus.COMPLETED,
         )
         completed_agg = completed_qs.aggregate(
-            disbursed_gross=Sum("amount"),
-            disbursed_net=Sum("net_amount_foreign"),
+            matched_foreign=Sum("amount"),
             fees=Sum("fee_amount_foreign"),
             pkr_out=Sum("net_pkr"),
             count=Count("id"),
         )
         received = Decimal(agg["received"] or 0)
-        disbursed_gross = Decimal(completed_agg["disbursed_gross"] or 0)
+        matched_foreign = Decimal(completed_agg["matched_foreign"] or 0)
         fees_collected = Decimal(completed_agg["fees"] or 0)
         pkr_disbursed = Decimal(completed_agg["pkr_out"] or 0)
 
-        # "On hand" is an estimate: everything we've received but haven't paid out yet.
-        # For payments that are still pending/verified/on-hold we still physically hold
-        # the foreign currency, and we retain the fees portion on completed ones.
-        on_hand_est = (received - disbursed_gross) + fees_collected
+        # Foreign cash we still physically hold in this currency's bank account.
+        # Everything received stays with us until withdrawn externally — the
+        # customer is paid in PKR, not in foreign currency.
+        on_hand_est = received
+
         live_rate = rates.get(code) or Decimal(0)
         on_hand_pkr = (on_hand_est * live_rate).quantize(Decimal("0.01")) if live_rate else Decimal(0)
+        profit_pkr = (fees_collected * live_rate).quantize(Decimal("0.01")) if live_rate else Decimal(0)
 
         per_currency[code] = {
-            "received":        str(received),
-            "disbursed_gross": str(disbursed_gross),
-            "fees_collected":  str(fees_collected),
-            "pkr_disbursed":   str(pkr_disbursed),
-            "on_hand_est":     str(on_hand_est.quantize(Decimal("0.01"))),
-            "on_hand_pkr":     str(on_hand_pkr),
-            "live_rate":       str(live_rate) if live_rate else None,
-            "received_count":  agg["count"] or 0,
-            "completed_count": completed_agg["count"] or 0,
+            "received":           str(received),
+            "disbursed_foreign":  str(matched_foreign),  # informational only
+            "fees_collected":     str(fees_collected),
+            "pkr_disbursed":      str(pkr_disbursed),
+            "on_hand_est":        str(on_hand_est.quantize(Decimal("0.01"))),
+            "on_hand_pkr":        str(on_hand_pkr),
+            "profit_pkr":         str(profit_pkr),
+            "live_rate":          str(live_rate) if live_rate else None,
+            "received_count":     agg["count"] or 0,
+            "completed_count":    completed_agg["count"] or 0,
         }
 
-    # PKR side
+    # PKR side: total disbursed + total fees (in PKR)
     pkr_out_total = IncomingPayment.objects.filter(
         status=TransactionStatus.COMPLETED,
     ).aggregate(total=Sum("net_pkr"))["total"] or Decimal(0)
 
+    total_fees_pkr_estimate = sum(
+        Decimal(c["profit_pkr"]) for c in per_currency.values()
+    )
     total_on_hand_pkr = sum(
         Decimal(c["on_hand_pkr"]) for c in per_currency.values()
     )
 
     return Response({
         "currencies": per_currency,
-        "pkr_disbursed_total": str(pkr_out_total),
-        "total_on_hand_pkr":   str(total_on_hand_pkr),
+        "pkr_disbursed_total":   str(pkr_out_total),
+        "total_on_hand_pkr":     str(total_on_hand_pkr),
+        "total_profit_pkr_est":  str(total_fees_pkr_estimate),
     })

@@ -112,7 +112,11 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=["post"], url_path="reset_password")
+    # NOTE: url_path uses dashes ("reset-password") to match the REST-API
+    # convention the frontend expects. Without this, DRF auto-generates the
+    # url_path from the method name ("reset_password") which produces a 404
+    # from the /reset-password/ URL the UI calls.
+    @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
         user = self.get_object()
         s = AdminResetPasswordSerializer(data=request.data)
@@ -133,7 +137,7 @@ class UserAdminViewSet(viewsets.ModelViewSet):
             "temporary_password": new_pw,
         })
 
-    @action(detail=True, methods=["post"], url_path="toggle_active")
+    @action(detail=True, methods=["post"], url_path="toggle-active")
     def toggle_active(self, request, pk=None):
         user = self.get_object()
         if user == request.user:

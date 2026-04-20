@@ -27,6 +27,137 @@ def _short(value, code=None):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Shared profit-analysis section (gross vs net side-by-side with breakdown)
+# ─────────────────────────────────────────────────────────────────────
+def compose_profit_analysis(report):
+    """
+    Dedicated gross-vs-net profit analysis section.
+
+    Under the pool-based fee distribution model:
+      - Total fees are split between the partner pool and the company.
+      - If active partner shares sum to P% of the pool, partners get P% and
+        the company retains (100 - P)% of the fees.
+      - Net profit = company-retained fees - expenses.
+
+    Partner payouts are NOT subtracted again from net profit — they are
+    already not part of the company's retained slice.
+    """
+    from decimal import Decimal
+    from myapp.Models.Partner_models import Partner
+
+    totals = report["totals"]
+    expense_totals = report.get("expense_totals", {})
+    partner_rollup = report.get("partner_rollup", [])
+
+    fees_pkr = Decimal(str(totals.get("total_fees_pkr") or 0))
+    net_profit_pkr = Decimal(str(totals.get("net_profit_pkr") or 0))
+    partner_total_pkr = sum(
+        (Decimal(str(p.get("total_pkr") or 0)) for p in partner_rollup),
+        Decimal(0),
+    )
+    expense_total_pkr = Decimal(str(expense_totals.get("total_pkr_only") or 0))
+
+    # Resolve the active partner pool so we can show the company's retained
+    # slice transparently in the derivation table.
+    pool_pct = Decimal("0")
+    for p in Partner.objects.filter(is_active=True).select_related("share"):
+        share = getattr(p, "share", None)
+        if share and share.percentage and share.percentage > 0:
+            pool_pct += Decimal(str(share.percentage))
+    if pool_pct > Decimal("100"):
+        pool_pct = Decimal("100")
+    company_pct = Decimal("100") - pool_pct
+    company_retained = (fees_pkr * company_pct / Decimal("100")).quantize(Decimal("0.01"))
+
+    sections = []
+    sections.append({"type": "heading", "text": "Profit Analysis — Gross vs Net"})
+    sections.append({"type": "paragraph", "text":
+        f"Fee pool split: partners own <b>{pool_pct:,.2f}%</b> of each fee; "
+        f"PayBitnex retains <b>{company_pct:,.2f}%</b>. "
+        f"Net profit is the company-retained slice minus expenses."})
+
+    # Side-by-side KPI grid
+    sections.append({
+        "type": "kpi_grid",
+        "items": [
+            {"label": "Gross profit (total fees)",    "value": _money(fees_pkr)},
+            {"label": f"Partners ({pool_pct:,.2f}% of fee)",
+                                                       "value": _money(partner_total_pkr)},
+            {"label": f"Company retains ({company_pct:,.2f}%)",
+                                                       "value": _money(company_retained)},
+            {"label": "Net profit (after expenses)",   "value": _money(net_profit_pkr)},
+        ],
+    })
+    sections.append({"type": "spacer", "height": 10})
+
+    # Breakdown table — line-by-line derivation
+    sections.append({"type": "heading", "text": "Derivation"})
+    sections.append({
+        "type": "table",
+        "headers": ["Line item", "Amount (PKR)", "Running"],
+        "rows": [
+            ["Gross fees collected",                   _money(fees_pkr),           _money(fees_pkr)],
+            [f"Less: Partner payouts ({pool_pct:,.2f}% of fees)",
+                                                       "-" + _money(partner_total_pkr),
+                                                         _money(company_retained)],
+            [f"Company retained ({company_pct:,.2f}%)", "",                        _money(company_retained)],
+            ["Less: Expenses (PKR-denominated)",       "-" + _money(expense_total_pkr),
+                                                         _money(net_profit_pkr)],
+        ],
+        "col_widths": [3.5, 1.4, 1.4],
+        "align": ["left", "right", "right"],
+        "total_row": ["Net profit (bottom line)", "", _money(net_profit_pkr)],
+    })
+
+    # Expense breakdown by currency (non-PKR shown for reference; they're
+    # excluded from the net calculation above since the composer uses
+    # total_pkr_only by design).
+    by_currency = expense_totals.get("by_currency") or []
+    if by_currency:
+        sections.append({"type": "spacer", "height": 10})
+        sections.append({"type": "heading", "text": "Expenses by currency"})
+        rows = [
+            [row["currency"], str(row["count"]),
+             _money(row["total"], row["currency"])]
+            for row in by_currency
+        ]
+        sections.append({
+            "type": "table",
+            "headers": ["Currency", "Count", "Total"],
+            "rows": rows,
+            "col_widths": [1.0, 0.8, 1.8],
+            "align": ["left", "right", "right"],
+        })
+        sections.append({"type": "paragraph", "text":
+            "<i>Only PKR-denominated expenses are subtracted from the net "
+            "profit above. Non-PKR expenses would need to be converted "
+            "at the prevailing rate on the day of spend to be included.</i>"})
+
+    # Partner payout detail — who got paid, how much, and their share
+    if partner_rollup:
+        sections.append({"type": "spacer", "height": 10})
+        sections.append({"type": "heading", "text": "Partner payouts (gross)"})
+        rows = []
+        for p in partner_rollup:
+            rows.append([
+                p.get("partner_name") or "—",
+                f'{Decimal(str(p.get("current_share_pct") or 0)):,.3f}%',
+                str(p.get("tx_count") or 0),
+                _money(p.get("total_pkr") or 0),
+            ])
+        sections.append({
+            "type": "table",
+            "headers": ["Partner", "Share %", "Tx", "PKR paid"],
+            "rows": rows,
+            "col_widths": [2.5, 1.0, 0.7, 1.8],
+            "align": ["left", "right", "right", "right"],
+            "total_row": ["Total", "", "", _money(partner_total_pkr)],
+        })
+
+    return sections
+
+
+# ─────────────────────────────────────────────────────────────────────
 # 1. SIMPLE GENERAL — minimal top-line summary, in/out/profit only
 # ─────────────────────────────────────────────────────────────────────
 def compose_simple_general(report):
@@ -328,12 +459,18 @@ def compose_comprehensive(report):
     sections.append({"type": "paragraph", "text":
         "This comprehensive report includes <b>all available breakdowns</b> "
         "for the selected date range: top-line summary, period-by-period "
-        "movements, per-customer rollup, per-partner payouts, and expenses. "
+        "movements, per-customer rollup, per-partner payouts, expenses, "
+        "and a dedicated gross-vs-net profit analysis. "
         "Use this when you want a single document covering the whole picture."
     })
 
     # Reuse the complete-general composition
     for s in compose_general_full(report)[1:]:
+        sections.append(s)
+
+    # Dedicated profit analysis page (gross vs net + derivation + breakdowns)
+    sections.append({"type": "page_break"})
+    for s in compose_profit_analysis(report):
         sections.append(s)
 
     # Page break before customer rollup
@@ -361,5 +498,6 @@ REPORT_TYPES = {
     "customers":       ("Customer-wise Report",     compose_customer_wise),
     "partners":        ("Partner-wise Report",      compose_partner_wise),
     "expenses":        ("Expenses Report",          compose_expenses),
+    "profit-analysis": ("Profit Analysis",          compose_profit_analysis),
     "comprehensive":   ("Comprehensive Closing Report", compose_comprehensive),
 }

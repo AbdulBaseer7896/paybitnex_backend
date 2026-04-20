@@ -39,6 +39,18 @@ class PartnerViewSet(viewsets.ModelViewSet):
     search_fields = ["name", "email"]
     filterset_fields = ["is_active"]
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # Default to active partners only on the list action. Admin can
+        # pass ?is_active=false to see deactivated ones. Without this the
+        # soft-deleted partners stay visible with no indication, making
+        # the Deactivate button appear broken.
+        if self.action == "list":
+            raw = self.request.query_params.get("is_active")
+            if raw is None:
+                qs = qs.filter(is_active=True)
+        return qs
+
     def get_serializer_class(self):
         if self.action == "create":
             return PartnerCreateSerializer
@@ -76,7 +88,9 @@ class PartnerViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def ledger(self, request, pk=None):
         partner = self.get_object()
-        qs = PartnerLedgerEntry.objects.filter(partner=partner).select_related("payment")
+        qs = (PartnerLedgerEntry.objects
+              .filter(partner=partner)
+              .select_related("payment", "payment__customer"))
         page = self.paginate_queryset(qs)
         ser = PartnerLedgerEntrySerializer(page or qs, many=True)
         if page is not None:
@@ -101,6 +115,408 @@ class PartnerViewSet(viewsets.ModelViewSet):
         })
 
     @action(
+        detail=False, methods=["post"], url_path="recompute-ledger",
+        permission_classes=[IsAuthenticated, IsAdmin],
+    )
+    def recompute_ledger(self, request):
+        """
+        One-shot admin fix: re-run pool-based distribution on every historical
+        payment. Use this after a partner-share rebalance, or after upgrading
+        to the pool-based distribution formula, to bring historical ledger
+        entries in sync with the new math.
+
+        The old formula computed `fee × (share / 100)`, which only paid out a
+        fraction of each fee. The correct pool-based formula pays the ENTIRE
+        fee out to partners pro-rata of their share of the pool.
+
+        Returns `{updated, affected_payments}`.
+        """
+        from decimal import Decimal, ROUND_HALF_UP
+        from myapp.Models.Transaction_models import IncomingPayment, TransactionStatus
+        from django.db.models import Q
+
+        QUANT = Decimal("0.01")
+        def _q(x):
+            return Decimal(x).quantize(QUANT, rounding=ROUND_HALF_UP)
+
+        qs = IncomingPayment.objects.filter(
+            status__in=[TransactionStatus.COMPLETED, TransactionStatus.PKR_SENT],
+        ).exclude(fee_amount_foreign__isnull=True).exclude(exchange_rate__isnull=True)
+
+        active_partners = list(
+            Partner.objects.filter(is_active=True).select_related("share"),
+        )
+
+        updated = 0
+        affected = []
+        for payment in qs:
+            fee_foreign = _q(payment.fee_amount_foreign)
+            fee_pkr = _q(fee_foreign * payment.exchange_rate)
+
+            existing = list(PartnerLedgerEntry.objects.filter(payment=payment))
+            # Reuse historical share snapshots; fall back to current active
+            # partners if none exist.
+            if existing:
+                pool_rows = [
+                    (e.partner_id, Decimal(e.share_snapshot))
+                    for e in existing if Decimal(e.share_snapshot) > 0
+                ]
+            else:
+                pool_rows = [
+                    (p.id, Decimal(p.share.percentage))
+                    for p in active_partners
+                    if getattr(p, "share", None) and p.share.percentage > 0
+                ]
+
+            if not pool_rows:
+                continue
+            pool = sum((pct for _, pct in pool_rows), start=Decimal("0"))
+            if pool <= 0:
+                continue
+
+            # Compute new pool-based allocations
+            last_idx = len(pool_rows) - 1
+            alloc_f, alloc_p = Decimal("0"), Decimal("0")
+            new_rows = []
+            for idx, (pid, pct) in enumerate(pool_rows):
+                if idx == last_idx:
+                    amt_f = _q(fee_foreign - alloc_f)
+                    amt_p = _q(fee_pkr - alloc_p)
+                else:
+                    frac = pct / pool
+                    amt_f = _q(fee_foreign * frac)
+                    amt_p = _q(fee_pkr * frac)
+                    alloc_f += amt_f
+                    alloc_p += amt_p
+                new_rows.append((pid, pct, amt_f, amt_p))
+
+            # Skip if nothing actually changed
+            existing_map = {e.partner_id: e for e in existing}
+            changed = False
+            for pid, pct, amt_f, amt_p in new_rows:
+                ex = existing_map.get(pid)
+                if (not ex
+                        or Decimal(ex.amount_foreign) != amt_f
+                        or Decimal(ex.amount_pkr) != amt_p):
+                    changed = True
+                    break
+            if not changed and len(existing) == len(new_rows):
+                continue
+
+            with dbtx.atomic():
+                PartnerLedgerEntry.objects.filter(payment=payment).delete()
+                for pid, pct, amt_f, amt_p in new_rows:
+                    PartnerLedgerEntry.objects.create(
+                        partner_id=pid,
+                        payment=payment,
+                        share_snapshot=pct,
+                        fee_total_foreign=fee_foreign,
+                        fee_total_pkr=fee_pkr,
+                        amount_foreign=amt_f,
+                        amount_pkr=amt_p,
+                        currency_code=payment.currency_id,
+                    )
+            updated += 1
+            affected.append(payment.reference)
+
+        AuditLog.record(
+            user=request.user, action=AuditLog.ACTION_UPDATE,
+            description=f"Recomputed partner ledger for {updated} payments",
+            after={"affected_references": affected[:50]},  # cap log size
+        )
+        return Response({
+            "updated": updated,
+            "scanned": qs.count(),
+            "affected_payments": affected,
+        })
+
+    @action(
+        detail=True, methods=["get"], url_path="report.pdf",
+        permission_classes=[IsAuthenticated, IsAdmin],
+    )
+    def report_pdf(self, request, pk=None):
+        """
+        Downloadable branded PDF report for a single partner.
+
+        Query params (all optional; all match the frontend filter bar):
+            date_from, date_to      — ISO YYYY-MM-DD bounds on ledger created_at
+            currency                — USD/EUR/GBP/… limit ledger to one currency
+            profit_type             — gross (default) | net
+            expense_split           — equal | by-share (only used in net mode)
+            range_label             — human-readable label for report subtitle
+
+        The response is a PDF attachment. On success the Content-Disposition
+        header ensures the browser triggers a download (matching the Closing
+        Reports pattern — no new-tab, no manual Ctrl+P).
+        """
+        from datetime import datetime, date
+        from decimal import Decimal, ROUND_HALF_UP
+        from django.http import HttpResponse
+        from myapp.Utils.pdf_report import PDFReportBuilder
+
+        partner = self.get_object()
+
+        # ── Parse filters from query string ───────────────────────────
+        def _parse_date(s):
+            if not s:
+                return None
+            try:
+                return datetime.strptime(s, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+        date_from = _parse_date(request.query_params.get("date_from"))
+        date_to = _parse_date(request.query_params.get("date_to"))
+        currency = (request.query_params.get("currency") or "").strip() or None
+        profit_type = (request.query_params.get("profit_type") or "gross").lower()
+        expense_split = (request.query_params.get("expense_split") or "by-share").lower()
+        range_label = (request.query_params.get("range_label") or "").strip()
+        if profit_type not in ("gross", "net"):
+            profit_type = "gross"
+        if expense_split not in ("equal", "by-share"):
+            expense_split = "by-share"
+
+        # ── Ledger for this partner, within date range ────────────────
+        ledger_qs = (
+            PartnerLedgerEntry.objects
+            .filter(partner=partner)
+            .select_related("payment", "payment__customer")
+        )
+        if date_from:
+            ledger_qs = ledger_qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            ledger_qs = ledger_qs.filter(created_at__date__lte=date_to)
+        if currency:
+            ledger_qs = ledger_qs.filter(currency_code=currency)
+        ledger = list(ledger_qs.order_by("-created_at"))
+
+        # ── Aggregate by customer for the per-customer breakdown ──────
+        from collections import defaultdict
+        per_customer = defaultdict(
+            lambda: {"name": "", "email": "", "count": 0, "pkr": Decimal("0")},
+        )
+        total_gross_pkr = Decimal("0")
+        for e in ledger:
+            cust = getattr(e.payment, "customer", None)
+            cid = str(cust.id) if cust else "unknown"
+            bucket = per_customer[cid]
+            bucket["name"] = cust.full_name or (cust.email if cust else "Unknown")
+            bucket["email"] = cust.email if cust else ""
+            bucket["count"] += 1
+            amt = Decimal(e.amount_pkr or 0)
+            bucket["pkr"] += amt
+            total_gross_pkr += amt
+
+        # ── Expense deduction (net mode only) ─────────────────────────
+        expense_deduction = Decimal("0")
+        if profit_type == "net":
+            # Fetch total expenses in PKR for this date range — reuse the
+            # live-rate conversion from the Expense view's logic.
+            from myapp.Models.Expense_models import Expense
+            from myapp.Models.Rate_models import ExchangeRate
+            from django.db.models import Sum
+            exp_qs = Expense.objects.all()
+            if date_from:
+                exp_qs = exp_qs.filter(spent_on__gte=date_from)
+            if date_to:
+                exp_qs = exp_qs.filter(spent_on__lte=date_to)
+            rates = {r.currency_id: Decimal(str(r.rate_to_pkr or 0))
+                     for r in ExchangeRate.objects.all()}
+            rates["PKR"] = Decimal("1")
+            total_expenses_pkr = Decimal("0")
+            for row in exp_qs.values("currency_id").annotate(t=Sum("amount")):
+                amt = Decimal(str(row["t"] or 0))
+                total_expenses_pkr += (amt * rates.get(row["currency_id"], Decimal("0")))
+
+            # This partner's slice of those expenses. Matches the frontend
+            # logic exactly — sum across all active partners equals the
+            # total expenses, with this partner taking their share.
+            active_partners = list(
+                Partner.objects.filter(is_active=True).select_related("share"),
+            )
+            n = len(active_partners)
+            if n > 0 and total_expenses_pkr > 0:
+                if expense_split == "equal":
+                    expense_deduction = (
+                        total_expenses_pkr / n
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                else:
+                    # by-share
+                    pool = sum(
+                        (Decimal(str(p.share.percentage))
+                         for p in active_partners
+                         if getattr(p, "share", None) and p.share.percentage),
+                        Decimal("0"),
+                    )
+                    my_share = Decimal(
+                        str(partner.share.percentage)
+                        if getattr(partner, "share", None) else 0,
+                    )
+                    if pool > 0:
+                        expense_deduction = (
+                            total_expenses_pkr * (my_share / pool)
+                        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    else:
+                        # Fall back to equal split
+                        expense_deduction = (
+                            total_expenses_pkr / n
+                        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        net_pkr = total_gross_pkr - expense_deduction
+
+        # ── Build the PDF ─────────────────────────────────────────────
+        def money_pkr(v):
+            try:
+                return f"Rs {Decimal(str(v)):,.2f}"
+            except Exception:
+                return str(v)
+
+        def money(v, code):
+            return f"{code} {Decimal(str(v)):,.2f}"
+
+        subtitle_parts = []
+        if range_label:
+            subtitle_parts.append(range_label)
+        elif date_from or date_to:
+            subtitle_parts.append(
+                f"{date_from or 'all time'} — {date_to or 'today'}"
+            )
+        else:
+            subtitle_parts.append("All time")
+        subtitle_parts.append(
+            "Net profit" if profit_type == "net" else "Gross profit"
+        )
+        if profit_type == "net":
+            subtitle_parts.append(
+                f"expenses split: {'equal' if expense_split == 'equal' else 'by share'}"
+            )
+
+        share_pct_display = (
+            getattr(getattr(partner, "share", None), "percentage", 0) or 0
+        )
+        metadata = {
+            "Partner":     partner.name,
+            "Email":       partner.email or "—",
+            "Share %":     f"{share_pct_display}%",
+            "Distributions": str(len(ledger)),
+            "Generated By":  request.user.full_name or request.user.email,
+            "Generated On":  datetime.now().strftime("%b %d, %Y at %H:%M"),
+        }
+
+        sections = []
+
+        # KPI grid
+        kpi_items = [
+            {"label": "Gross PKR earned", "value": money_pkr(total_gross_pkr)},
+            {"label": "Distributions",    "value": str(len(ledger))},
+        ]
+        if profit_type == "net":
+            kpi_items.append({
+                "label": f"Expense deduction ({expense_split})",
+                "value": "-" + money_pkr(expense_deduction),
+            })
+            kpi_items.append({
+                "label": "Net PKR earned",
+                "value": money_pkr(net_pkr),
+            })
+        sections.append({"type": "kpi_grid", "items": kpi_items})
+        sections.append({"type": "spacer", "height": 12})
+
+        # Per-customer breakdown
+        if per_customer:
+            sections.append({"type": "heading", "text": "Per-customer breakdown"})
+            rows = []
+            sorted_customers = sorted(
+                per_customer.values(), key=lambda c: c["pkr"], reverse=True,
+            )
+            for c in sorted_customers:
+                share_of_total = (
+                    (c["pkr"] / total_gross_pkr * 100)
+                    if total_gross_pkr > 0 else Decimal("0")
+                )
+                rows.append([
+                    c["name"],
+                    c["email"] or "—",
+                    str(c["count"]),
+                    money_pkr(c["pkr"]),
+                    f"{share_of_total:.2f}%",
+                ])
+            sections.append({
+                "type": "table",
+                "headers": ["Customer", "Email", "Tx", "PKR earned", "Share of total"],
+                "rows": rows,
+                "col_widths": [1.8, 2.0, 0.6, 1.4, 1.1],
+                "align": ["left", "left", "right", "right", "right"],
+                "total_row": [
+                    "Total", "", str(sum(c["count"] for c in sorted_customers)),
+                    money_pkr(total_gross_pkr), "100.00%",
+                ],
+            })
+            sections.append({"type": "spacer", "height": 12})
+
+        # Per-transaction ledger
+        if ledger:
+            sections.append({"type": "heading", "text": "Per-transaction ledger"})
+            rows = []
+            for e in ledger[:500]:   # cap printed rows to keep PDF manageable
+                cust = getattr(e.payment, "customer", None)
+                rows.append([
+                    e.created_at.strftime("%Y-%m-%d") if e.created_at else "—",
+                    e.payment.reference or "—",
+                    cust.full_name if cust else "—",
+                    e.currency_code or "—",
+                    money(e.amount_foreign or 0, e.currency_code or ""),
+                    f"{e.share_snapshot}%",
+                    money_pkr(e.amount_pkr or 0),
+                ])
+            sections.append({
+                "type": "table",
+                "headers": ["Date", "Ref", "Customer", "Cur", "Your cut", "Share", "PKR"],
+                "rows": rows,
+                "col_widths": [0.9, 0.9, 1.7, 0.5, 1.1, 0.7, 1.1],
+                "align": ["left", "left", "left", "left", "right", "right", "right"],
+            })
+            if len(ledger) > 500:
+                sections.append({
+                    "type": "paragraph",
+                    "text": f"(showing first 500 of {len(ledger)} entries — export CSV for full list)",
+                })
+
+        if profit_type == "net":
+            sections.append({"type": "spacer", "height": 10})
+            sections.append({"type": "heading", "text": "Profit calculation"})
+            split_label = ("Expenses divided equally among active partners"
+                           if expense_split == "equal"
+                           else "Expenses pro-rata by partner share %")
+            sections.append({
+                "type": "paragraph",
+                "text": (
+                    f"{split_label}. This partner's slice of total expenses "
+                    f"for the selected range: {money_pkr(expense_deduction)}. "
+                    f"Gross earnings {money_pkr(total_gross_pkr)} − expense "
+                    f"deduction {money_pkr(expense_deduction)} = net earnings "
+                    f"{money_pkr(net_pkr)}."
+                ),
+            })
+
+        builder = PDFReportBuilder(
+            title=f"Partner report — {partner.name}",
+            subtitle=" · ".join(subtitle_parts),
+            metadata=metadata,
+        )
+        pdf_bytes = builder.build(sections)
+
+        safe_name = "".join(
+            c if c.isalnum() or c in ("-", "_") else "_" for c in partner.name
+        ) or "partner"
+        range_slug = (
+            f"{date_from}_to_{date_to}" if (date_from or date_to) else "all-time"
+        )
+        filename = f"paybitnex-partner-{safe_name}-{profit_type}-{range_slug}.pdf"
+        resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+
+    @action(
         detail=False, methods=["post"], url_path="shares/bulk",
         permission_classes=[IsAuthenticated, IsAdmin],
     )
@@ -119,10 +535,20 @@ class PartnerViewSet(viewsets.ModelViewSet):
                 share.updated_by = request.user
                 share.save(update_fields=["percentage", "updated_by", "updated_at"])
                 results.append(PartnerShareSerializer(share).data)
+            # AuditLog.after is a JSONField — Django's default JSON encoder
+            # doesn't know how to serialize UUID objects, and DRF's
+            # PrimaryKeyRelatedField returns raw UUIDs (not strings). So we
+            # flatten to plain-JSON-compatible types before storing.
+            json_safe_shares = [
+                {k: str(v) if hasattr(v, "hex") else
+                     str(v) if hasattr(v, "as_tuple") else v  # Decimal → str
+                 for k, v in dict(row).items()}
+                for row in results
+            ]
             AuditLog.record(
                 user=request.user, action=AuditLog.ACTION_UPDATE,
                 description=f"Bulk share update: {len(results)} partners",
-                after={"shares": [dict(r) for r in results]},
+                after={"shares": json_safe_shares},
             )
         return Response({"updated": len(results), "shares": results})
 
@@ -132,7 +558,8 @@ class PartnerLedgerListView(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated, IsAdminOrAccountant]
     queryset = (
         PartnerLedgerEntry.objects
-        .select_related("partner", "payment").order_by("-created_at")
+        .select_related("partner", "payment", "payment__customer")
+        .order_by("-created_at")
     )
     serializer_class = PartnerLedgerEntrySerializer
     filterset_fields = ["partner", "currency_code", "payment"]

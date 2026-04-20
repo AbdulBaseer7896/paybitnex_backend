@@ -11,5 +11,7 @@ router.register(r"customer-configs", CustomerFeeConfigViewSet, basename="fee-cus
 urlpatterns = [
     path("", include(router.urls)),
     path("my-rate/", my_effective_fee, name="fee-my-rate"),
-    path("user/<int:user_id>/rate/", customer_effective_fee, name="fee-user-rate"),
+    # User PK is a UUID — using <int:...> here would make this endpoint
+    # unreachable and the frontend-applied-rate default to the hardcoded 5%.
+    path("user/<uuid:user_id>/rate/", customer_effective_fee, name="fee-user-rate"),
 ]

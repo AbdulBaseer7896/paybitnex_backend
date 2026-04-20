@@ -47,6 +47,13 @@ class PartnerCreateSerializer(serializers.ModelSerializer):
 class PartnerLedgerEntrySerializer(serializers.ModelSerializer):
     partner_name = serializers.CharField(source="partner.name", read_only=True)
     payment_reference = serializers.CharField(source="payment.reference", read_only=True)
+    # Customer details on the underlying payment — exposed so the Partner
+    # Detail page can show a per-customer breakdown in its report without
+    # a second round-trip per row.
+    customer_id = serializers.SerializerMethodField()
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.SerializerMethodField()
+    payment_amount = serializers.SerializerMethodField()
 
     class Meta:
         model = PartnerLedgerEntry
@@ -54,12 +61,35 @@ class PartnerLedgerEntrySerializer(serializers.ModelSerializer):
             "id",
             "partner", "partner_name",
             "payment", "payment_reference",
+            "customer_id", "customer_name", "customer_email",
+            "payment_amount",
             "share_snapshot",
             "fee_total_foreign", "fee_total_pkr",
             "amount_foreign", "amount_pkr", "currency_code",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_customer_id(self, obj):
+        return str(obj.payment.customer_id) if obj.payment_id else None
+
+    def get_customer_name(self, obj):
+        cust = getattr(obj.payment, "customer", None)
+        if not cust:
+            return None
+        return cust.full_name or cust.email or str(cust.id)
+
+    def get_customer_email(self, obj):
+        cust = getattr(obj.payment, "customer", None)
+        return cust.email if cust else None
+
+    def get_payment_amount(self, obj):
+        pay = obj.payment
+        return {
+            "amount": str(pay.amount),
+            "currency": pay.currency_id,
+            "net_pkr": str(pay.net_pkr) if pay.net_pkr is not None else None,
+        }
 
 
 class SharesBulkUpdateSerializer(serializers.Serializer):

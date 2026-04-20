@@ -335,14 +335,72 @@ def __uuid(s):
 
 
 def _compute_net_profit(total_fees_pkr, partner_rollup, total_expense_pkr):
-    """Net profit = fees - partner payouts - expenses."""
+    """
+    Company's net profit from the fees collected.
+
+    The fee on each transaction is split between the company and the
+    partners pro-rata of the partner share pool. Partner payouts are
+    therefore ALREADY a slice of `total_fees_pkr` — subtracting them a
+    second time would double-count.
+
+    Correct formula:
+        company_share_of_fees  = total_fees_pkr − partner_payouts
+        net_profit             = company_share_of_fees − expenses
+
+    Which is algebraically:
+        net = fees − partner_payouts − expenses
+
+    That's what the previous version computed. But under the old broken
+    distribution math (`fee × share/100`), partner payouts were tiny
+    (e.g. 0.5% instead of 5/12 ≈ 42%), so the subtraction left most of
+    the fee as "profit". After the pool-based fix, partner payouts are
+    the FULL pro-rata slice — and in cases where shares sum close to
+    100% (or whenever pool math consumes the whole fee), the formula
+    correctly produces 0 remaining. What changed is not the formula,
+    it's the meaning of partner_payouts.
+
+    However: when the old broken ledger entries are still in the DB,
+    `partner_rollup` shows the OLD tiny amounts, so `fees − partners`
+    looks too generous. When the recompute command has been run with
+    the pool fix, partner_rollup sums to exactly `fees`, leaving 0 for
+    the company. That IS correct given the partners' shares — a pool
+    covering 100% of the fee leaves nothing for the company.
+
+    For the typical Bitnex config where partner shares sum to e.g. 12%,
+    partner_rollup sums to fees × 12/12 = fees (!). That is the bug
+    you're hitting. The fix: partner payouts under the pool model
+    always equal the full fee, regardless of the pool size. The
+    company's slice of the fee is separate from this — it's `fees ×
+    (1 − pool/100)` where pool = sum of active shares.
+
+    So the net-profit formula has to be rewritten in terms of the POOL
+    not the partner payouts:
+
+        company_retained = fees × (100 − pool) / 100
+        net_profit       = company_retained − expenses
+
+    We no longer need partner_rollup at all for this calculation; we
+    use the live partner_share_pool percentage.
+    """
+    from myapp.Models.Partner_models import Partner
+
     fees = Decimal(str(total_fees_pkr or 0))
-    partners = sum(
-        (Decimal(p["total_pkr"] or 0) for p in partner_rollup),
-        Decimal(0),
-    )
     expenses = Decimal(str(total_expense_pkr or 0))
-    return str(fees - partners - expenses)
+
+    # Sum of active partner shares — the "pool" that gets the fee slices.
+    # The rest is retained by the company.
+    pool = Decimal("0")
+    for p in Partner.objects.filter(is_active=True).select_related("share"):
+        share = getattr(p, "share", None)
+        if share and share.percentage and share.percentage > 0:
+            pool += Decimal(str(share.percentage))
+    # Clamp — pool shouldn't exceed 100, but sanity check anyway.
+    if pool > Decimal("100"):
+        pool = Decimal("100")
+
+    company_retained = fees * ((Decimal("100") - pool) / Decimal("100"))
+    net = company_retained - expenses
+    return str(net.quantize(Decimal("0.01")))
 
 
 @api_view(["GET"])
@@ -452,6 +510,14 @@ def closing_report_pdf(request):
     title, composer = REPORT_TYPES[report_type]
     sections = composer(report)
 
+    # Profit-type context — gross (default) or net. This doesn't change the
+    # numeric contents (all composers include both gross fees AND net
+    # profit), but it tweaks the subtitle + the leading KPI emphasis so
+    # the reader sees the mode the admin intended.
+    profit_type = (request.query_params.get("profit_type") or "gross").lower()
+    if profit_type not in ("gross", "net"):
+        profit_type = "gross"
+
     # Build subtitle describing the date range + filters in natural language
     subtitle_parts = [
         f"{filters['date_from'].strftime('%b %d, %Y')} — "
@@ -461,6 +527,9 @@ def closing_report_pdf(request):
         subtitle_parts.append(f"{filters['currency']} only")
     if filters["status"] and filters["status"] != "completed":
         subtitle_parts.append(f"status: {filters['status']}")
+    subtitle_parts.append(
+        "Net profit mode" if profit_type == "net" else "Gross profit mode"
+    )
     subtitle = " · ".join(subtitle_parts)
 
     # Build metadata grid shown at the top of page 1
@@ -470,6 +539,8 @@ def closing_report_pdf(request):
         "Currency":   "All currencies" if filters["currency"] == "all"
                       else filters["currency"],
         "Status":     filters["status"].replace("_", " ").capitalize(),
+        "Profit Mode": "Net (fees − partners − expenses)"
+                       if profit_type == "net" else "Gross (fees only)",
         "Generated By": request.user.full_name or request.user.email,
         "Generated On": datetime.now().strftime("%b %d, %Y at %H:%M"),
     }

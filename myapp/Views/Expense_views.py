@@ -114,15 +114,20 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         filters as the list endpoint.
         """
         qs = self.filter_queryset(self.get_queryset())
+        # Strip default ordering (see total_pkr action below for the detailed
+        # explanation) before grouping — this action replaces the ordering
+        # via its own .order_by() calls so it happens to work, but being
+        # explicit here matches the safer pattern.
+        grouping_qs = qs.order_by()
 
         by_currency = list(
-            qs.values("currency_id")
+            grouping_qs.values("currency_id")
               .annotate(total=Sum("amount"), count=Count("id"))
               .order_by("currency_id")
         )
 
         by_category = list(
-            qs.values("category")
+            grouping_qs.values("category")
               .annotate(count=Count("id"), total_pkr=Sum(
                   "amount", filter=Q(currency_id="PKR"),
               ))
@@ -141,4 +146,48 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                  "total_pkr": str(r["total_pkr"] or 0)}
                 for r in by_category
             ],
+        })
+
+    @action(detail=False, methods=["get"], url_path="total-pkr")
+    def total_pkr(self, request):
+        """
+        Returns a single scalar: total expenses converted to PKR over the
+        date-range window specified by `?date_from=...&date_to=...`.
+
+        For PKR-denominated expenses we use the amount as-is. For USD/EUR/GBP
+        expenses we multiply by the latest stored ExchangeRate for that
+        currency (best-effort estimate). Used by the "net profit" calculation
+        across the app (profit = fees_collected_pkr – total_expenses_pkr).
+        """
+        from decimal import Decimal
+        from myapp.Models.Rate_models import ExchangeRate
+
+        qs = self.filter_queryset(self.get_queryset())
+        rates = {}
+        for r in ExchangeRate.objects.all():
+            rates[r.currency_id] = Decimal(str(r.rate_to_pkr or 0))
+        rates["PKR"] = Decimal("1")
+
+        total = Decimal("0")
+        breakdown = {}
+        # IMPORTANT: strip the model's default ordering before `.values().annotate()`.
+        # Expense.Meta.ordering = ["-spent_on", "-created_at"] — Django includes
+        # those columns in the GROUP BY clause when a default ordering is present,
+        # which means each expense becomes its own group instead of being
+        # aggregated by currency. Explicit .order_by() (no args) clears that.
+        grouping_qs = qs.order_by().values("currency_id").annotate(total=Sum("amount"))
+        for row in grouping_qs:
+            code = row["currency_id"]
+            amt = Decimal(str(row["total"] or 0))
+            rate = rates.get(code) or Decimal("0")
+            pkr = (amt * rate).quantize(Decimal("0.01"))
+            total += pkr
+            breakdown[code] = {
+                "amount": str(amt),
+                "rate": str(rate) if rate else None,
+                "pkr": str(pkr),
+            }
+        return Response({
+            "total_pkr": str(total.quantize(Decimal("0.01"))),
+            "breakdown": breakdown,
         })
