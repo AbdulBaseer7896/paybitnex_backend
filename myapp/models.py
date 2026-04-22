@@ -8,7 +8,7 @@ from myapp.Models.Banking_models import (
     PakistaniBank,
     ForeignBank,
     CustomerBankAccount,
-    CustomerMerchantAccount,
+    CustomerMerchantAccount,   # kept for legacy admin / historical data; not used by new flows
 )
 from myapp.Models.Transaction_models import (
     IncomingPayment,
@@ -19,8 +19,10 @@ from myapp.Models.Rate_models import ExchangeRate, ExchangeRateHistory
 from myapp.Models.Fee_models import CustomerFeeConfig
 from myapp.Models.Partner_models import Partner, PartnerShare, PartnerLedgerEntry
 from myapp.Models.Report_models import DailyReport, WeeklyReport, MonthlyReport
-from myapp.Models.Core_models import SystemSetting, Currency
+from myapp.Models.Core_models import SystemSetting, Currency, PaymentMethod
 from myapp.Models.Audit_models import AuditLog
+from myapp.Models.Expense_models import Expense, ExpenseCategory
+from myapp.Models.EmailOTP_models import EmailOTP
 
 __all__ = [
     "User", "UserRole",
@@ -32,6 +34,8 @@ __all__ = [
     "CustomerFeeConfig",
     "Partner", "PartnerShare", "PartnerLedgerEntry",
     "DailyReport", "WeeklyReport", "MonthlyReport",
-    "SystemSetting", "Currency",
+    "SystemSetting", "Currency", "PaymentMethod",
     "AuditLog",
+    "Expense", "ExpenseCategory",
+    "EmailOTP",
 ]

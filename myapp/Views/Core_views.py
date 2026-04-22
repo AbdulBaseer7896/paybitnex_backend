@@ -11,11 +11,12 @@ from rest_framework.generics import ListAPIView
 
 from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Auth_models import UserRole
-from myapp.Models.Core_models import Currency, SystemSetting
+from myapp.Models.Core_models import Currency, SystemSetting, PaymentMethod
 from myapp.Models.Transaction_models import IncomingPayment, TransactionStatus
 from myapp.serializers.Core_serializers import (
     CurrencySerializer, SystemSettingSerializer, AuditLogSerializer,
 )
+from myapp.serializers.Transaction_serializers import PaymentMethodSerializer
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 
 
@@ -29,6 +30,33 @@ class CurrencyViewSet(viewsets.ModelViewSet):
         if self.request.method == "GET":
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdmin()]
+
+
+class PaymentMethodViewSet(viewsets.ModelViewSet):
+    """
+    Admin-managed list of payment methods (Zelle, Cash App, ACH/Wire, etc.).
+
+    - GET list/detail: any authenticated user (customer sees active ones on
+      the New Payment form; the client filters for is_active=True).
+    - POST / PATCH / DELETE: admin only.
+
+    `?active_only=true` filters to active methods (used by customer UI).
+    """
+    queryset = PaymentMethod.objects.all().order_by("sort_order", "label")
+    serializer_class = PaymentMethodSerializer
+    lookup_field = "code"
+    pagination_class = None
+
+    def get_permissions(self):
+        if self.request.method == "GET":
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsAdmin()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get("active_only") in ("1", "true", "True", "yes"):
+            qs = qs.filter(is_active=True)
+        return qs
 
 
 class SystemSettingViewSet(viewsets.ModelViewSet):

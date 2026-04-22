@@ -86,5 +86,14 @@ pip install -r requirements.txt
 cp .env.example .env                              # fill in Cloudinary + DB
 python manage.py migrate
 python manage.py seed_initial_data
-python manage.py createadmin --email admin@gmail.com --password pass1234
+python manage.py createadmin --email abdulbasirqazi@gmail.com --password pass1234
 python manage.py runserver                         # or: daphne paybitnex.asgi:application
+
+
+
+sudo systemctl restart paybitnex paybitnex-celery paybitnex-beat
+
+sudo systemctl status paybitnex
+
+sudo journalctl -u paybitnex-celery -f
+sudo journalctl -u paybitnex -f

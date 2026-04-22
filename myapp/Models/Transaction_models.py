@@ -1,10 +1,19 @@
 """
-Transaction flow:
-1. Customer submits IncomingPayment (USD/EUR/GBP received in their merchant account).
-2. Accountant VERIFIES documents → saves verification note + optional pic (status → under_review/verified).
+Transaction flow (revised):
+1. Customer submits IncomingPayment (USD only now; EUR/GBP deprecated).
+   Customer picks a `payment_method` (Zelle / Cash App / ACH-Wire / custom).
+2. Accountant VERIFIES documents → status becomes VERIFIED internally (but the
+   customer-facing timeline treats verification as "Under processing").
 3. Accountant applies rate → sets fee % → calculates net PKR.
-4. Accountant creates OutgoingPKRTransfer → marks transaction complete.
-5. Every state change logged in TransactionStatusHistory.
+4. Accountant records OutgoingPKRTransfer → status becomes PKR_SENT. At this
+   point the customer sees the PKR transfer receipt and can click
+   "I received my PKR" to mark COMPLETED.
+5. If customer doesn't confirm within N days (see SystemSetting
+   `stale_payment_days`, default 3), a daily Celery-beat task flags the
+   payment `is_stale=True`. Stale payments are hidden from the main staff
+   transactions list and appear in the "Awaiting customer confirmation"
+   section, where admin can force-complete them.
+6. Every state change logged in TransactionStatusHistory.
 
 ALL amounts are Decimal. Never floats.
 """
@@ -25,7 +34,7 @@ class TransactionStatus(models.TextChoices):
 
 
 class IncomingPayment(models.Model):
-    """Payment received by customer in foreign currency (USD/EUR/GBP)."""
+    """Payment received by customer (USD). EUR/GBP retained only for legacy rows."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     # Human-readable reference e.g. "PBX-2026-000123"
@@ -34,12 +43,22 @@ class IncomingPayment(models.Model):
     customer = models.ForeignKey(
         "myapp.User", on_delete=models.PROTECT, related_name="incoming_payments",
     )
-    merchant_account = models.ForeignKey(
-        "myapp.CustomerMerchantAccount", on_delete=models.PROTECT,
+    # Merchant account was removed — the customer's received-funds account is
+    # no longer tracked on the payment itself. `merchant_account_id` column is
+    # kept in the DB for legacy rows but the FK constraint is dropped via
+    # migration (it's now just an opaque historical UUID string).
+
+    # Payment method — string FK to PaymentMethod.code for resilience against
+    # method additions/removals managed by admin in Settings.
+    payment_method = models.ForeignKey(
+        "myapp.PaymentMethod", on_delete=models.PROTECT, to_field="code",
         related_name="incoming_payments",
+        null=True, blank=True,   # nullable so legacy rows (which predate this) still work
     )
 
-    # Sender details (entered by customer)
+    # Sender details (entered by customer). `sender_bank_name` and
+    # `sender_account_last4` are kept as columns for historical rows but are
+    # no longer collected on the New Payment form.
     sender_name = models.CharField(max_length=150)
     sender_company = models.CharField(max_length=150)
     sender_bank_name = models.CharField(max_length=150, blank=True)
@@ -59,15 +78,13 @@ class IncomingPayment(models.Model):
         validators=[MinValueValidator(Decimal("0.01"))],
     )
 
-    # Proof uploads (Cloudinary)
+    # Proof uploads (Cloudinary). `screenshot_email` kept as column for
+    # historical rows but new submissions don't require it.
     screenshot_transaction = models.ImageField(upload_to="proofs/txn/")
     screenshot_email = models.ImageField(upload_to="proofs/email/", null=True, blank=True)
     extra_document = models.FileField(upload_to="proofs/docs/", null=True, blank=True)
 
     # ----- Verification step (BEFORE rate/fee) -----
-    # The accountant confirms the uploaded proofs are genuine. This is a
-    # separate stage from applying rate + fee — completed verifications are
-    # immutable and appear as an audit item on the payment.
     verified_note = models.TextField(
         blank=True,
         help_text="Short note the accountant writes when verifying documents.",
@@ -122,6 +139,26 @@ class IncomingPayment(models.Model):
         related_name="handled_payments",
     )
 
+    # ----- Customer confirmation + staleness tracking -----
+    # Set when the customer clicks "I received my PKR" on their portal after
+    # PKR_SENT. Triggers final COMPLETED status + partner fee distribution.
+    customer_confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    # `is_stale` is toggled by a daily Celery-beat task when a payment has been
+    # in PKR_SENT for longer than SystemSetting `stale_payment_days` without
+    # the customer confirming. Stale payments drop out of the main staff
+    # transactions list and appear in the "Awaiting customer confirmation"
+    # section, where admin can force-complete.
+    is_stale = models.BooleanField(default=False, db_index=True)
+
+    # If admin force-completed this payment on behalf of an unresponsive
+    # customer, track who did it (for the activity log).
+    force_completed_by = models.ForeignKey(
+        "myapp.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="force_completed_payments",
+    )
+    force_completed_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -132,6 +169,7 @@ class IncomingPayment(models.Model):
         indexes = [
             models.Index(fields=["customer", "status"]),
             models.Index(fields=["currency", "created_at"]),
+            models.Index(fields=["status", "is_stale"]),
         ]
 
     def __str__(self):
@@ -141,6 +179,13 @@ class IncomingPayment(models.Model):
     def is_verified(self):
         """True once an accountant has confirmed the uploaded documents."""
         return self.verified_at is not None
+
+    @property
+    def is_rate_fee_applied(self):
+        """True once the accountant has filled exchange_rate AND fee_percentage.
+        Required before any downstream step (PKR transfer, status change beyond
+        UNDER_REVIEW). Used by permission checks in the views."""
+        return self.exchange_rate is not None and self.fee_percentage is not None
 
     def calculate_amounts(self):
         """Recompute fee + net amounts (idempotent). Returns a dict of amounts."""

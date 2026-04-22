@@ -36,7 +36,7 @@ from myapp.serializers.Transaction_serializers import (
     OutgoingTransferSerializer, StatusUpdateSerializer,
     PaymentVerifySerializer,
 )
-from myapp.Utils.permissions import IsAdminOrAccountant
+from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.references import next_reference
 from myapp.Utils.partner_ledger import distribute_fee_for_payment
 
@@ -123,8 +123,10 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     queryset = (
         IncomingPayment.objects
         .select_related(
-            "customer", "currency", "merchant_account__bank",
+            "customer", "currency",
+            "payment_method",
             "handled_by", "verified_by",
+            "outgoing_transfer",
         )
         .prefetch_related("status_history__changed_by")
         .all()
@@ -143,9 +145,50 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         u = self.request.user
+        qs = self.queryset
         if u.role == UserRole.CUSTOMER:
-            return self.queryset.filter(customer=u)
-        return self.queryset
+            # Customers see every one of their own payments, including stale
+            # ones — they're the ones who need to confirm those.
+            return qs.filter(customer=u)
+
+        # Staff: apply the stale filter ONLY on the list action. For a
+        # retrieve (detail page), custom @action endpoints, or update,
+        # we must return the full unfiltered queryset — otherwise staff
+        # can't open, edit, or force-complete a payment whose URL they
+        # navigate to directly, because it's been filtered out as stale.
+        if self.action != "list":
+            return qs
+
+        # List view: by default exclude stale PKR_SENT payments so the
+        # main transactions list stays focused on active work. The
+        # "Awaiting customer confirmation" page passes `?only_stale=true`
+        # to flip the filter, or `?include_stale=true` to see both mixed.
+        #
+        # Staleness is computed on the fly by comparing `updated_at`
+        # against the configured threshold minutes, rather than relying
+        # solely on the `is_stale` DB flag. This means the Awaiting page
+        # reflects reality instantly even without celery-beat running.
+        from datetime import timedelta
+        from django.db.models import Q
+
+        p = self.request.query_params
+        only_stale = p.get("only_stale") in ("1", "true", "True", "yes")
+        include_stale = p.get("include_stale") in ("1", "true", "True", "yes")
+
+        from myapp.Utils.stale_payment_tasks import _resolve_threshold_minutes
+        minutes = _resolve_threshold_minutes()
+        cutoff = timezone.now() - timedelta(minutes=minutes)
+
+        stale_q = (
+            Q(status=TransactionStatus.PKR_SENT)
+            & (Q(is_stale=True) | Q(updated_at__lt=cutoff))
+        )
+
+        if only_stale:
+            qs = qs.filter(stale_q)
+        elif not include_stale:
+            qs = qs.exclude(stale_q)
+        return qs
 
     # ---- customer submit ----
     def create(self, request, *args, **kwargs):
@@ -323,6 +366,23 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         new_status = s.validated_data["status"]
         if new_status not in TransactionStatus.values:
             raise ValidationError({"status": "Invalid status."})
+
+        # --- Gate (item 10): prevent moving to any "advancing" state without
+        # rate + fee applied. We allow REJECTED / ON_HOLD / UNDER_REVIEW /
+        # SUBMITTED transitions even without rate+fee, because those aren't
+        # "completion" outcomes. But advancing to VERIFIED / PKR_SENT /
+        # COMPLETED requires rate+fee already in place. ---
+        advancing_states = {
+            TransactionStatus.VERIFIED,
+            TransactionStatus.PKR_SENT,
+            TransactionStatus.COMPLETED,
+        }
+        if new_status in advancing_states and not payment.is_rate_fee_applied:
+            raise ValidationError({
+                "status":
+                "Apply exchange rate and fee before advancing the payment status.",
+            })
+
         before = payment.status
         payment.status = new_status
         payment.handled_by = request.user
@@ -331,6 +391,175 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             payment, before, new_status,
             user=request.user, note=s.validated_data.get("note", ""),
         )
+        return Response(IncomingPaymentSerializer(payment).data)
+
+    # ---- accountant / admin: unverify (item 7) ----
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+        url_path="unverify",
+    )
+    def unverify_documents(self, request, pk=None):
+        """
+        Reverse a verification. Flips `verified_at` back to null and rolls the
+        status back to UNDER_REVIEW (unless already past PKR_SENT, in which
+        case we refuse). Used by the admin/accountant when they clicked
+        "Verify" in error.
+        """
+        payment = self.get_object()
+        if payment.verified_at is None:
+            return Response(
+                {"detail": "Payment is not currently verified."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if payment.status in (TransactionStatus.PKR_SENT, TransactionStatus.COMPLETED):
+            return Response(
+                {"detail":
+                 "Cannot unverify after PKR has been sent. Reverse the "
+                 "PKR transfer record first if this was an error."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        before_status = payment.status
+        with dbtx.atomic():
+            payment.verified_at = None
+            payment.verified_by = None
+            payment.verified_note = ""
+            payment.status = TransactionStatus.UNDER_REVIEW
+            payment.handled_by = request.user
+            payment.save(update_fields=[
+                "verified_at", "verified_by", "verified_note",
+                "status", "handled_by", "updated_at",
+            ])
+            if before_status != payment.status:
+                _record_status_change(
+                    payment, before_status, payment.status,
+                    user=request.user, note="Verification reversed",
+                )
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=f"{payment.reference}: verification reversed",
+            )
+        return Response(IncomingPaymentSerializer(payment).data)
+
+    # ---- customer: "I received my PKR" ----
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated],
+        url_path="customer-confirm",
+    )
+    def customer_confirm(self, request, pk=None):
+        """
+        Customer clicks "I received my PKR" on their portal after the
+        accountant has recorded an OutgoingPKRTransfer. Flips status to
+        COMPLETED and fires the partner fee-distribution logic.
+        """
+        from myapp.Models.Auth_models import UserRole
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+        from myapp.serializers.Transaction_serializers import CustomerConfirmSerializer
+
+        payment = self.get_object()
+
+        # Only the owning customer can confirm. Staff have their own path
+        # (force_complete) — they should NOT be hitting this endpoint.
+        if request.user.role != UserRole.CUSTOMER or payment.customer_id != request.user.id:
+            return Response(
+                {"detail": "Only the payment's customer can confirm receipt."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if payment.status != TransactionStatus.PKR_SENT:
+            return Response(
+                {"detail":
+                 "Payment is not awaiting customer confirmation "
+                 f"(current status: {payment.get_status_display()})."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        s = CustomerConfirmSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        note = s.validated_data.get("note", "") or ""
+
+        before_status = payment.status
+        with dbtx.atomic():
+            payment.customer_confirmed_at = timezone.now()
+            payment.completed_at = timezone.now()
+            payment.status = TransactionStatus.COMPLETED
+            # Confirming un-stales a stale payment if this happened after the
+            # daily task already flagged it.
+            payment.is_stale = False
+            payment.save(update_fields=[
+                "customer_confirmed_at", "completed_at",
+                "status", "is_stale", "updated_at",
+            ])
+            _record_status_change(
+                payment, before_status, TransactionStatus.COMPLETED,
+                user=request.user,
+                note=("Customer confirmed receipt"
+                      + (f" — {note}" if note else "")),
+            )
+            # Run partner fee distribution now (was previously run at
+            # PKR_SENT; new flow runs it at true completion).
+            distribute_fee_for_payment(payment)
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=f"{payment.reference}: customer confirmed PKR receipt",
+            )
+        return Response(IncomingPaymentSerializer(payment).data)
+
+    # ---- admin: force complete a stale payment ----
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="force-complete",
+    )
+    def force_complete(self, request, pk=None):
+        """
+        Admin-only override for the "Awaiting customer confirmation" queue.
+        Moves a stale PKR_SENT payment to COMPLETED on the customer's behalf,
+        runs fee distribution, and logs a reason + `force_completed_by` on
+        the payment for the audit trail.
+        """
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+        from myapp.serializers.Transaction_serializers import ForceCompleteSerializer
+
+        payment = self.get_object()
+        if payment.status != TransactionStatus.PKR_SENT:
+            return Response(
+                {"detail":
+                 "Only PKR-sent payments awaiting customer confirmation "
+                 "can be force-completed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        s = ForceCompleteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        reason = s.validated_data["reason"]
+
+        before_status = payment.status
+        with dbtx.atomic():
+            payment.force_completed_by = request.user
+            payment.force_completed_at = timezone.now()
+            payment.completed_at = timezone.now()
+            payment.status = TransactionStatus.COMPLETED
+            payment.is_stale = False
+            payment.save(update_fields=[
+                "force_completed_by", "force_completed_at", "completed_at",
+                "status", "is_stale", "updated_at",
+            ])
+            _record_status_change(
+                payment, before_status, TransactionStatus.COMPLETED,
+                user=request.user,
+                note=f"Force-completed by admin — reason: {reason}",
+            )
+            distribute_fee_for_payment(payment)
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=(
+                    f"{payment.reference}: force-completed by admin. "
+                    f"Reason: {reason}"
+                ),
+            )
         return Response(IncomingPaymentSerializer(payment).data)
 
 
@@ -366,10 +595,14 @@ class OutgoingTransferViewSet(
 
         if payment.status in (TransactionStatus.PKR_SENT, TransactionStatus.COMPLETED):
             raise ValidationError({"incoming_payment": "Already settled."})
-        if payment.net_pkr is None:
+
+        # --- Gate (item 10): rate + fee MUST be applied before recording PKR
+        # transfer. This is enforced server-side so any client that skips the
+        # UI block still can't bypass it. ---
+        if not payment.is_rate_fee_applied:
             raise ValidationError({
                 "incoming_payment":
-                "Payment has no rate/fee applied. Apply rate first.",
+                "Apply exchange rate and fee before recording the PKR transfer.",
             })
 
         with dbtx.atomic():
@@ -380,26 +613,17 @@ class OutgoingTransferViewSet(
                 sent_by=request.user,
                 **s.validated_data,
             )
+            # --- NEW flow: stop at PKR_SENT and wait for customer confirmation.
+            # The customer portal will show a "I received my PKR" button; when
+            # they click it, status flips to COMPLETED and partner fees are
+            # distributed (see `customer_confirm` and `force_complete`
+            # actions on IncomingPaymentViewSet).
             payment.status = TransactionStatus.PKR_SENT
             payment.handled_by = request.user
-            payment.completed_at = timezone.now()
-            payment.save(update_fields=[
-                "status", "handled_by", "completed_at", "updated_at",
-            ])
+            payment.save(update_fields=["status", "handled_by", "updated_at"])
             _record_status_change(
                 payment, before_status, TransactionStatus.PKR_SENT,
                 user=request.user, note=f"PKR sent — ref {transfer.reference}",
-            )
-
-            # Distribute fees across partners
-            distribute_fee_for_payment(payment)
-
-            # Mark completed
-            payment.status = TransactionStatus.COMPLETED
-            payment.save(update_fields=["status", "updated_at"])
-            _record_status_change(
-                payment, TransactionStatus.PKR_SENT, TransactionStatus.COMPLETED,
-                user=request.user, note="Auto-completed after transfer + distribution",
             )
 
         return Response(

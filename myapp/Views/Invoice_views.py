@@ -76,7 +76,7 @@ def single_invoice_pdf(request, payment_id):
 
     payment = get_object_or_404(
         IncomingPayment.objects.select_related(
-            "customer", "currency", "merchant_account",
+            "customer", "currency",
         ),
         pk=payment_id,
     )
@@ -128,7 +128,7 @@ def bulk_invoice_pdf(request):
     payments = list(
         IncomingPayment.objects
         .filter(id__in=ids)
-        .select_related("customer", "currency", "merchant_account")
+        .select_related("customer", "currency")
         .order_by("-created_at")
     )
     if not payments:

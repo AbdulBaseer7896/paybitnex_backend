@@ -184,6 +184,17 @@ CELERY_BEAT_SCHEDULE = {
         "task": "myapp.Utils.report_tasks.generate_daily_report",
         "schedule": crontab(hour=0, minute=5),
     },
+    # Flag PKR-sent payments that have been awaiting customer confirmation
+    # beyond the configured threshold (SystemSetting `stale_payment_days`).
+    # Runs shortly after midnight so a payment transitioned "today" won't be
+    # flagged before the user has had at least one full day to confirm.
+    "flag-stale-payments-hourly": {
+        "task": "myapp.Utils.stale_payment_tasks.flag_stale_payments",
+        # Run every 30 minutes so minute-level thresholds (e.g. 60 minutes
+        # for testing, or anything <24h for production) actually trigger
+        # within a reasonable window of the cutoff.
+        "schedule": crontab(minute="*/30"),
+    },
 }
 
 EXCHANGE_RATE_API_KEY = config("EXCHANGE_RATE_API_KEY", default="")
