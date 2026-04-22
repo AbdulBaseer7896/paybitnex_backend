@@ -29,6 +29,12 @@ INSTALLED_APPS = [
     "django_filters",
     "cloudinary",
     "cloudinary_storage",
+    # S3 backend for NEW uploads. `storages` provides
+    # storages.backends.s3.S3Storage, which we wire into the
+    # STORAGES setting below. Keep cloudinary_storage listed above
+    # so legacy code paths that still import it don't crash —
+    # they're just never selected as the default storage anymore.
+    "storages",
     "drf_spectacular",
     "django_extensions",
     "anymail",
@@ -149,13 +155,74 @@ CORS_ALLOWED_ORIGINS = config(
 )
 CORS_ALLOW_CREDENTIALS = True
 
-# Cloudinary
+# ────────────────────────────────────────────────────────────────────
+# File storage — AWS S3 (private bucket, pre-signed URLs)
+# ────────────────────────────────────────────────────────────────────
+# All user-uploaded media (company logos, payment-method QR codes,
+# KYC documents, invoice PDFs, avatars, etc.) lives in a PRIVATE S3
+# bucket. `django-storages` serves them via time-limited pre-signed
+# URLs — you never expose raw bucket URLs. The bucket itself should
+# have "Block all public access = ON" in the AWS console.
+#
+# Cloudinary is no longer the default storage but its config stays
+# defined below so legacy code that still imports cloudinary_storage
+# doesn't crash. Old Cloudinary-hosted files (logos, QR codes,
+# snapshot URLs on old invoices) keep working because the URLs
+# frozen into their JSON snapshots are absolute Cloudinary URLs.
+# ────────────────────────────────────────────────────────────────────
+
+AWS_ACCESS_KEY_ID       = config("AWS_ACCESS_KEY_ID",      default="")
+AWS_SECRET_ACCESS_KEY   = config("AWS_SECRET_ACCESS_KEY",  default="")
+AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME",
+                                 default=config("S3_BUCKET_NAME", default=""))
+AWS_S3_REGION_NAME      = config("AWS_S3_REGION_NAME",
+                                 default=config("AWS_REGION", default="us-east-1"))
+
+# Everything is uploaded under this key prefix inside the bucket.
+# Keep the folder hierarchy you asked for:
+#   backup/documents/paybitnexdocuments/<upload_to>/<filename>
+AWS_LOCATION = config(
+    "AWS_S3_LOCATION",
+    default="backup/documents/paybitnexdocuments",
+)
+
+# Security posture — NEVER change these.
+AWS_DEFAULT_ACL          = None   # Don't attach a public ACL on upload
+AWS_QUERYSTRING_AUTH     = True   # Every .url() returns a SIGNED URL
+AWS_S3_SIGNATURE_VERSION = "s3v4" # Required in most regions incl. us-east-1
+AWS_S3_FILE_OVERWRITE    = False  # Append random suffix on collision
+
+# TTL for signed URLs Django hands out for authenticated access
+# (portal pages, avatars, KYC docs, etc.). 60 minutes — plenty for
+# a user browsing the app, short enough that a leaked URL in a
+# chat log / screenshot expires fast.
+AWS_QUERYSTRING_EXPIRE = int(config("S3_SIGNED_URL_TTL", default=3600))
+
+# Basic cache-control; private so proxies don't cache the signed URL.
+AWS_S3_OBJECT_PARAMETERS = {
+    "CacheControl": "private, max-age=300",
+}
+
+# Django 4.2+ STORAGES dict. This supersedes the legacy
+# DEFAULT_FILE_STORAGE setting — Django 4.2 still honours the old
+# name but you shouldn't mix both.
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3.S3Storage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
+# Cloudinary — kept defined for backwards-compat only. Not selected
+# as default storage anymore. Safe to strip once no code references
+# CLOUDINARY_STORAGE.
 CLOUDINARY_STORAGE = {
     "CLOUD_NAME": config("CLOUDINARY_CLOUD_NAME", default=""),
-    "API_KEY": config("CLOUDINARY_API_KEY", default=""),
+    "API_KEY":    config("CLOUDINARY_API_KEY",    default=""),
     "API_SECRET": config("CLOUDINARY_API_SECRET", default=""),
 }
-DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 
 # Redis + Celery
 REDIS_URL = config("REDIS_URL", default="redis://localhost:6379/0")

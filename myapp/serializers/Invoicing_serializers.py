@@ -1,21 +1,64 @@
 """Serializers for the invoicing module (clients + customer companies)."""
+import logging
+import re
+
 from rest_framework import serializers
 
 from myapp.Models.Invoicing_models import Client, CustomerCompany
 
+log = logging.getLogger(__name__)
+
+
+def _signed_s3_download_url(fieldfile, filename, ttl=None):
+    """Return a pre-signed S3 URL that forces the browser to save
+    the file as ``<filename>.pdf`` via Content-Disposition.
+
+    Works only when the storage backend is django-storages' S3Storage.
+    Returns ``None`` for any other backend so callers know to fall
+    back to the Cloudinary helper or the plain ``.url``.
+
+    ``ttl`` overrides ``settings.AWS_QUERYSTRING_EXPIRE``. Useful for
+    the public invoice page which wants the URL to expire when the
+    share link itself expires.
+    """
+    if not fieldfile:
+        return None
+    try:
+        from django.conf import settings as dj_settings
+        storage = fieldfile.storage
+        # Duck-type: only S3Storage exposes `.connection`.
+        if not hasattr(storage, "connection"):
+            return None
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                      str(filename or "download"))
+
+        # django-storages stores the key as-is under AWS_LOCATION
+        # (if the backend was configured with AWS_LOCATION). Use
+        # `storage.bucket_name` + `storage._normalize_name` to get
+        # the real object key — this is what django-storages uses
+        # internally when resolving a URL.
+        key = storage._normalize_name(storage._clean_name(fieldfile.name))
+
+        return storage.connection.meta.client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": storage.bucket_name,
+                "Key": key,
+                "ResponseContentDisposition":
+                    f'attachment; filename="{safe}.pdf"',
+                "ResponseContentType": "application/pdf",
+            },
+            ExpiresIn=int(ttl or dj_settings.AWS_QUERYSTRING_EXPIRE),
+        )
+    except Exception as e:
+        log.warning("signed S3 download URL generation failed: %s", e)
+        return None
+
 
 def _cloudinary_attachment_url(url, filename):
-    """Inject Cloudinary's fl_attachment flag so the browser downloads
-    the file instead of opening it inline.
-
-    Cloudinary serves uploaded files with URLs that have no ``.pdf``
-    extension and no ``Content-Disposition: attachment`` header, so
-    a plain ``<a href>`` click just opens the PDF in a new tab. The
-    ``fl_attachment:<filename>`` flag tells Cloudinary to send the
-    response as an attachment with that filename.
-
-    Non-Cloudinary URLs (local dev, custom storage) are returned
-    unchanged. URLs that already have the flag are also left alone.
+    """Legacy Cloudinary helper — kept for invoices whose PDFs were
+    uploaded to Cloudinary BEFORE the S3 migration. New uploads go
+    to S3 and use _signed_s3_download_url() above.
     """
     if not url:
         return url
@@ -25,7 +68,6 @@ def _cloudinary_attachment_url(url, filename):
         return url
     if "fl_attachment" in url:
         return url
-    import re
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(filename or "invoice"))
     return url.replace("/upload/", f"/upload/fl_attachment:{safe}/", 1)
 
@@ -227,12 +269,23 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def get_pdf_download_url(self, obj):
         """Return a download-forcing PDF URL.
 
-        Cloudinary-hosted PDFs get `fl_attachment:<number>` injected
-        so the response comes back with `Content-Disposition:
-        attachment` — the browser saves instead of previewing.
+        New S3 PDFs: generate a short-lived pre-signed URL with
+        ``Content-Disposition: attachment`` baked into the signed
+        params. The URL itself is the HTTPS S3 endpoint, bounded by
+        ``settings.AWS_QUERYSTRING_EXPIRE``.
+
+        Legacy Cloudinary PDFs (from before the S3 migration): fall
+        back to the ``fl_attachment:<number>`` URL trick.
         """
         if not obj.pdf_file:
             return None
+        # 1) Try S3 first — the common case going forward.
+        s3_url = _signed_s3_download_url(obj.pdf_file, obj.number)
+        if s3_url:
+            return s3_url
+        # 2) Fall back to the legacy Cloudinary flag. This path
+        #    only fires for invoices whose pdf_file was uploaded
+        #    before the S3 switchover.
         req = self.context.get("request")
         try:
             raw = obj.pdf_file.url
@@ -311,10 +364,55 @@ class PublicInvoiceSerializer(serializers.ModelSerializer):
             )
         ]
 
+    def _public_pdf_ttl(self, obj):
+        """TTL (seconds) for signed URLs on the public share page.
+
+        Matches the invoice's ``expires_at`` exactly (option B chosen
+        by the customer). If the invoice has no expiry set, falls
+        back to the global default (``AWS_QUERYSTRING_EXPIRE``).
+        """
+        from django.conf import settings as dj_settings
+        from django.utils import timezone
+        default = int(dj_settings.AWS_QUERYSTRING_EXPIRE)
+        if not obj.expires_at:
+            return default
+        remaining = int(
+            (obj.expires_at - timezone.now()).total_seconds()
+        )
+        # Clamp to at least 60s — a URL that expires in under a
+        # minute would 403 before the browser finishes the request.
+        return max(60, remaining)
+
     def get_pdf_url(self, obj):
-        """Raw inline URL (no fl_attachment) — used for <object> preview."""
+        """Inline preview URL for the <object> tag on the public page.
+
+        For S3-hosted PDFs this is a pre-signed URL (no
+        Content-Disposition header, so it renders inline); for old
+        Cloudinary PDFs it's the raw Cloudinary URL.
+        """
         if not obj.pdf_file:
             return None
+        # S3 path: generate a plain signed URL with custom TTL.
+        storage = obj.pdf_file.storage
+        if hasattr(storage, "connection"):
+            try:
+                # Django-storages honours AWS_QUERYSTRING_EXPIRE
+                # as a global, but for per-request TTL we sign by
+                # hand through boto3.
+                key = storage._normalize_name(
+                    storage._clean_name(obj.pdf_file.name),
+                )
+                return storage.connection.meta.client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={
+                        "Bucket": storage.bucket_name,
+                        "Key": key,
+                    },
+                    ExpiresIn=self._public_pdf_ttl(obj),
+                )
+            except Exception as e:
+                log.warning("public inline S3 URL failed: %s", e)
+        # Fallback (Cloudinary): the raw .url works as preview.
         req = self.context.get("request")
         try:
             raw = obj.pdf_file.url
@@ -323,9 +421,17 @@ class PublicInvoiceSerializer(serializers.ModelSerializer):
             return None
 
     def get_pdf_download_url(self, obj):
-        """Download-forcing URL with Cloudinary fl_attachment flag."""
+        """Download-forcing URL for the public page's Download button."""
         if not obj.pdf_file:
             return None
+        # S3 path: signed URL with Content-Disposition, TTL bounded
+        # by the invoice's expires_at.
+        s3_url = _signed_s3_download_url(
+            obj.pdf_file, obj.number, ttl=self._public_pdf_ttl(obj),
+        )
+        if s3_url:
+            return s3_url
+        # Cloudinary fallback.
         req = self.context.get("request")
         try:
             raw = obj.pdf_file.url

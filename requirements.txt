@@ -8,6 +8,14 @@ psycopg[binary,pool]==3.2.3
 python-decouple==3.8
 dj-database-url==2.3.0
 Pillow==11.0.0
+# S3 storage (private bucket + pre-signed URLs). django-storages
+# ships an S3 backend built on boto3 that Django picks up as the
+# default FileField storage via the STORAGES setting.
+django-storages==1.14.4
+boto3==1.35.76
+# Kept transitionally so code that still references cloudinary
+# doesn't crash at import time. Safe to remove once every model's
+# existing files have been re-uploaded or deleted.
 cloudinary==1.42.1
 django-cloudinary-storage==0.3.0
 celery==5.4.0
