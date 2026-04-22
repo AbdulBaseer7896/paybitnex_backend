@@ -49,10 +49,15 @@ def _format_from() -> str:
     acks_late=True,
 )
 def send_email_task(self, *, to, subject, body_text, body_html=None,
-                    cc=None, bcc=None, reply_to=None):
+                    cc=None, bcc=None, reply_to=None, attachments=None):
     """
     Low-level Celery task. Prefer `send_email_async` (which renders
     templates and dispatches here).
+
+    `attachments` — optional list of dicts, each {"filename": str,
+    "content_b64": str, "mimetype": str}. We base64-encode on the
+    producer side so the attachment crosses the Celery broker as
+    plain JSON; decoding happens here.
     """
     if not to:
         log.warning("send_email_task called with empty recipient list")
@@ -71,10 +76,26 @@ def send_email_task(self, *, to, subject, body_text, body_html=None,
         if body_html:
             msg.attach_alternative(body_html, "text/html")
 
+        # Attach files (decode base64 on the worker side).
+        if attachments:
+            import base64
+            for att in attachments:
+                try:
+                    content = base64.b64decode(att["content_b64"])
+                    msg.attach(
+                        att.get("filename", "attachment"),
+                        content,
+                        att.get("mimetype", "application/octet-stream"),
+                    )
+                except Exception as e:
+                    log.warning("skipping bad attachment %r: %s",
+                                att.get("filename"), e)
+
         sent = msg.send(fail_silently=False)
         log.info(
-            "email sent: subject=%r to=%s cc=%s sent=%s",
+            "email sent: subject=%r to=%s cc=%s sent=%s attachments=%s",
             subject, to, cc, sent,
+            [a.get("filename") for a in (attachments or [])],
         )
         return sent
     except Exception as exc:
@@ -93,6 +114,7 @@ def send_email_async(
     cc: Optional[Iterable[str]] = None,
     bcc: Optional[Iterable[str]] = None,
     reply_to: Optional[Iterable[str]] = None,
+    attachments: Optional[list] = None,
 ):
     """
     Queue an email for background delivery. Templates live under
@@ -143,4 +165,5 @@ def send_email_async(
         cc=_clean(cc),
         bcc=_clean(bcc),
         reply_to=_clean(reply_to),
+        attachments=attachments or [],
     )

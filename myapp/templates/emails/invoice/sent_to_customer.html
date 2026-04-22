@@ -1,0 +1,48 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+  <p style="font-size:15px; margin:0 0 14px 0;">
+    Hi,
+  </p>
+  <p style="font-size:14px; line-height:1.6; margin:0 0 16px 0;">
+    Your invoice has been sent to <strong>{{ client_name }}</strong>.
+    A copy of the PDF is attached for your records.
+  </p>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+         style="margin:18px 0; background:#f8f8f5; border-radius:8px;
+                border:1px solid #eeeff2;">
+    <tr>
+      <td style="padding:16px 18px;">
+        <div style="font-size:11px; text-transform:uppercase;
+                    letter-spacing:1.2px; color:#6b6f78; margin-bottom:4px;">
+          Invoice
+        </div>
+        <div style="font-size:18px; font-weight:700; color:#101115;">
+          {{ invoice_number }}
+        </div>
+        <div style="margin-top:10px; font-size:13px; color:#374151;">
+          Total: <strong>{{ currency_code }} {{ total }}</strong>
+          {% if due_date %}<br>Due date: {{ due_date }}{% endif %}<br>
+          Sent to: {{ client_name }}
+        </div>
+      </td>
+    </tr>
+  </table>
+
+  <p style="font-size:13px; line-height:1.6; margin:0 0 18px 0;">
+    The client has been sent a public link they can open without signing
+    in. You can also share or track the invoice from your dashboard:
+  </p>
+  <p style="margin:0 0 22px 0;">
+    <a href="{{ public_url }}"
+       style="display:inline-block; background:#0F3D30; color:#ffffff;
+              text-decoration:none; padding:12px 22px; border-radius:6px;
+              font-weight:600; font-size:14px;">
+      Open public invoice
+    </a>
+  </p>
+
+  <p style="font-size:13px; line-height:1.6; color:#6b6f78; margin:0;">
+    This is an automated copy — no reply is needed.
+  </p>
+{% endblock %}

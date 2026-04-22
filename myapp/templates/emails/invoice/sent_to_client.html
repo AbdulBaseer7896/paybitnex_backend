@@ -1,0 +1,48 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+  <p style="font-size:15px; margin:0 0 14px 0;">
+    Hi {{ client_name|default:"there" }},
+  </p>
+  <p style="font-size:14px; line-height:1.6; margin:0 0 16px 0;">
+    You have a new invoice from
+    <strong>{{ company_name|default:"our team" }}</strong>.
+    The full details are attached as a PDF.
+  </p>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+         style="margin:18px 0; background:#f8f8f5; border-radius:8px;
+                border:1px solid #eeeff2;">
+    <tr>
+      <td style="padding:16px 18px;">
+        <div style="font-size:11px; text-transform:uppercase;
+                    letter-spacing:1.2px; color:#6b6f78; margin-bottom:4px;">
+          Invoice
+        </div>
+        <div style="font-size:18px; font-weight:700; color:#101115;">
+          {{ invoice_number }}
+        </div>
+        <div style="margin-top:10px; font-size:13px; color:#374151;">
+          Total due: <strong>{{ currency_code }} {{ total }}</strong>
+          {% if due_date %}<br>Due date: {{ due_date }}{% endif %}
+        </div>
+      </td>
+    </tr>
+  </table>
+
+  <p style="font-size:14px; line-height:1.6; margin:0 0 16px 0;">
+    Open the invoice online to view payment instructions:
+  </p>
+  <p style="margin:0 0 22px 0;">
+    <a href="{{ public_url }}"
+       style="display:inline-block; background:#0F3D30; color:#ffffff;
+              text-decoration:none; padding:12px 22px; border-radius:6px;
+              font-weight:600; font-size:14px;">
+      View invoice
+    </a>
+  </p>
+
+  <p style="font-size:13px; line-height:1.6; color:#6b6f78; margin:0;">
+    If you have any questions about this invoice, reply to this email
+    and it will reach {{ company_name|default:"the sender" }} directly.
+  </p>
+{% endblock %}

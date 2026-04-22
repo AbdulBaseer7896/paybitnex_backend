@@ -18,7 +18,17 @@ api_v1 = [
     path("expenses/", include("myapp.Urls.Expense_urls")),
     path("reports/", include("myapp.Urls.Report_urls")),
     path("core/", include("myapp.Urls.Core_urls")),
+    path("invoicing/", include("myapp.Urls.Invoicing_urls")),
 ]
+
+# Public (no-auth) endpoints — share-token invoice view. Mounted at
+# /api/v1/public-invoice/<token>/ so it can be fetched by the frontend's
+# public share page without dragging auth middleware in.
+from myapp.Views.Invoicing_views import PublicInvoiceView
+api_v1.append(
+    path("public-invoice/<str:share_token>/", PublicInvoiceView.as_view(),
+         name="public-invoice"),
+)
 
 urlpatterns = [
     path("admin/", admin.site.urls),

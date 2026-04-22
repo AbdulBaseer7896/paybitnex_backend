@@ -23,6 +23,10 @@ from myapp.Models.Core_models import SystemSetting, Currency, PaymentMethod
 from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Expense_models import Expense, ExpenseCategory
 from myapp.Models.EmailOTP_models import EmailOTP
+from myapp.Models.Invoicing_models import (
+    Client, CustomerCompany, CustomerAllowedPaymentMethod,
+    Invoice, InvoiceLineItem, InvoiceStatus, InvoicePaymentMethod,
+)
 
 __all__ = [
     "User", "UserRole",
@@ -38,4 +42,6 @@ __all__ = [
     "AuditLog",
     "Expense", "ExpenseCategory",
     "EmailOTP",
+    "Client", "CustomerCompany", "CustomerAllowedPaymentMethod",
+    "Invoice", "InvoiceLineItem", "InvoiceStatus", "InvoicePaymentMethod",
 ]

@@ -33,15 +33,70 @@ class Currency(models.Model):
 class PaymentMethod(models.Model):
     """Methods by which customers receive foreign-currency payments.
 
-    Seeded with Zelle, Cash App, ACH/Wire. Admin can add more from the
-    Settings page. Referenced by IncomingPayment.payment_method via its
-    `code` so historical rows don't break if the admin renames something.
+    Seeded with Zelle, Cash App, ACH/Wire, Payoneer. Admin can add more
+    from the Settings → Payment Methods page. Referenced by
+    IncomingPayment.payment_method via its `code` so historical rows
+    don't break if the admin renames something.
+
+    The detail fields (`email`, `phone`, `account_number`, etc.) hold the
+    merchant's own receiving details — what gets printed on invoices so
+    the client knows where to send money. These are global defaults that
+    apply to any customer who is granted access to the method via
+    `CustomerAllowedPaymentMethod`.
     """
+
+    # ---- basic identity ----
     code = models.CharField(max_length=32, primary_key=True)
     label = models.CharField(max_length=80)
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveSmallIntegerField(default=0)
+
+    # ---- receiving details (per-method; all optional so the admin can
+    #      use whichever fields the method needs) ----
+
+    # Zelle / Cash App style contact identifiers.
+    email = models.EmailField(blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="")
+    cashapp_tag = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text="For Cash App, e.g. $freightflow",
+    )
+
+    # Bank account details for ACH / Wire / Payoneer.
+    holder_name = models.CharField(
+        max_length=120, blank=True, default="",
+        help_text="Account title / holder of record, e.g. 'Freight Flow Solutions'.",
+    )
+    account_number = models.CharField(max_length=40, blank=True, default="")
+    routing_number = models.CharField(max_length=20, blank=True, default="")
+    bank_name = models.CharField(max_length=120, blank=True, default="")
+    account_type = models.CharField(
+        max_length=40, blank=True, default="",
+        help_text="E.g. 'Business Checking'.",
+    )
+
+    # Address of the account holder — printed on invoices / wire instructions.
+    address_line1 = models.CharField(max_length=200, blank=True, default="")
+    address_line2 = models.CharField(max_length=200, blank=True, default="")
+    city = models.CharField(max_length=100, blank=True, default="")
+    state = models.CharField(max_length=100, blank=True, default="")
+    postal_code = models.CharField(max_length=32, blank=True, default="")
+    country = models.CharField(max_length=100, blank=True, default="")
+
+    # Optional QR code image (admin uploads; appears on the invoice).
+    qr_code = models.ImageField(
+        upload_to="payment_methods/qr/", null=True, blank=True,
+    )
+
+    # Free-text extra instructions appended to the invoice payment section.
+    instructions = models.TextField(
+        blank=True, default="",
+        help_text="Extra instructions the client should follow, e.g. "
+                  "'Reference invoice # in memo'.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = "payment_methods"
