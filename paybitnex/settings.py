@@ -190,7 +190,16 @@ AWS_LOCATION = config(
 AWS_DEFAULT_ACL          = None   # Don't attach a public ACL on upload
 AWS_QUERYSTRING_AUTH     = True   # Every .url() returns a SIGNED URL
 AWS_S3_SIGNATURE_VERSION = "s3v4" # Required in most regions incl. us-east-1
-AWS_S3_FILE_OVERWRITE    = False  # Append random suffix on collision
+
+# Overwrite-on-collision instead of asking S3 "does this key already
+# exist?" before writing. The existence check requires s3:GetObject /
+# s3:ListBucket on the prefix; if IAM is locked down to PutObject
+# only, the HeadObject probe returns 403 and Django raises
+# SuspiciousFileOperation, breaking any upload (company logo, profile
+# picture, KYC doc, etc.). Django's `get_available_name()` already
+# appends a random 7-char suffix to the filename, so real collisions
+# across users are effectively impossible — overwriting is safe.
+AWS_S3_FILE_OVERWRITE    = True
 
 # TTL for signed URLs Django hands out for authenticated access
 # (portal pages, avatars, KYC docs, etc.). 60 minutes — plenty for
@@ -206,9 +215,16 @@ AWS_S3_OBJECT_PARAMETERS = {
 # Django 4.2+ STORAGES dict. This supersedes the legacy
 # DEFAULT_FILE_STORAGE setting — Django 4.2 still honours the old
 # name but you shouldn't mix both.
+#
+# We point at a custom subclass of S3Storage (SilentS3Storage) that
+# never calls HeadObject/GetObject to check for existence. Our IAM
+# policy on the bucket grants write-only access — the default
+# S3Storage.exists() call would fail with 403 and break every
+# upload (company logo, profile pic, KYC doc, invoice PDF). See
+# myapp/Utils/s3_storage.py for the full rationale.
 STORAGES = {
     "default": {
-        "BACKEND": "storages.backends.s3.S3Storage",
+        "BACKEND": "myapp.Utils.s3_storage.SilentS3Storage",
     },
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
