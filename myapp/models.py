@@ -27,6 +27,7 @@ from myapp.Models.Invoicing_models import (
     Client, CustomerCompany, CustomerAllowedPaymentMethod,
     Invoice, InvoiceLineItem, InvoiceStatus, InvoicePaymentMethod,
 )
+from myapp.Models.Feature_models import CustomerFeatureAccess
 
 __all__ = [
     "User", "UserRole",
@@ -44,4 +45,5 @@ __all__ = [
     "EmailOTP",
     "Client", "CustomerCompany", "CustomerAllowedPaymentMethod",
     "Invoice", "InvoiceLineItem", "InvoiceStatus", "InvoicePaymentMethod",
+    "CustomerFeatureAccess",
 ]

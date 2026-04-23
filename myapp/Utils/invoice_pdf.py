@@ -42,15 +42,109 @@ from reportlab.platypus import (
 log = logging.getLogger(__name__)
 
 # ── Theme (matches Tailwind tokens in PublicInvoicePage.jsx) ───────
-INK_HEADING = colors.HexColor("#0e1b2b")
-INK_BODY    = colors.HexColor("#1f2937")
-INK_MUTED   = colors.HexColor("#6b7280")
-INK_LIGHT   = colors.HexColor("#9ca3af")
-INK_BORDER  = colors.HexColor("#e5e7eb")
-INK_BORDER_STRONG = colors.HexColor("#374151")
-BRAND_SOFT  = colors.HexColor("#ecf3ef")
-BRAND_RIM   = colors.HexColor("#cde0d5")
-BRAND_HEAD  = colors.HexColor("#0e5a3a")
+# Two themes — 'light' (default, preserves original look) and 'dark'
+# (matches the reference dark invoice design the user supplied).
+# The dict is read by render_invoice_pdf() at render time; all
+# downstream helpers look colors up via the module-level `T` alias,
+# which render_invoice_pdf rebinds before each run.
+THEMES = {
+    "light": {
+        "PAGE_BG":       None,                         # no canvas fill
+        "INK_HEADING":   colors.HexColor("#0e1b2b"),
+        "INK_BODY":      colors.HexColor("#1f2937"),
+        "INK_MUTED":     colors.HexColor("#6b7280"),
+        "INK_LIGHT":     colors.HexColor("#9ca3af"),
+        "INK_BORDER":    colors.HexColor("#e5e7eb"),
+        "INK_BORDER_STRONG": colors.HexColor("#374151"),
+        # Table header strip (BILL TO / QTY / UNIT / TOTAL etc.)
+        "TABLE_HEAD_BG": colors.HexColor("#f3f4f6"),
+        "TABLE_HEAD_FG": colors.HexColor("#374151"),
+        "TABLE_ROW_BG":  None,
+        "TABLE_ROW_ALT": colors.HexColor("#fafafa"),
+        # Payment card (Zelle / Cash App panels)
+        "CARD_BG":       colors.HexColor("#ffffff"),
+        "CARD_BORDER":   colors.HexColor("#e5e7eb"),
+        "CARD_HEAD_BG":  colors.HexColor("#ecf3ef"),
+        "CARD_HEAD_FG":  colors.HexColor("#0e5a3a"),
+        "CARD_VALUE_FG": colors.HexColor("#0e5a3a"),
+        # Bill-to label
+        "LABEL_FG":      colors.HexColor("#6b7280"),
+        # Brand accents
+        "BRAND_SOFT":    colors.HexColor("#ecf3ef"),
+        "BRAND_RIM":     colors.HexColor("#cde0d5"),
+        "BRAND_HEAD":    colors.HexColor("#0e5a3a"),
+        # Description/summary box background
+        "SUMMARY_BG":    colors.HexColor("#f8f8f5"),
+    },
+    "dark": {
+        # Matches reference design: near-black page, pale text, muted
+        # grey accents, brand green reserved for important figures.
+        "PAGE_BG":       colors.HexColor("#0a0f14"),
+        "INK_HEADING":   colors.HexColor("#f3f4f6"),
+        "INK_BODY":      colors.HexColor("#e5e7eb"),
+        "INK_MUTED":     colors.HexColor("#9ca3af"),
+        "INK_LIGHT":     colors.HexColor("#6b7280"),
+        "INK_BORDER":    colors.HexColor("#1f2937"),
+        "INK_BORDER_STRONG": colors.HexColor("#374151"),
+        "TABLE_HEAD_BG": colors.HexColor("#111827"),
+        "TABLE_HEAD_FG": colors.HexColor("#9ca3af"),
+        "TABLE_ROW_BG":  None,
+        "TABLE_ROW_ALT": colors.HexColor("#0f1621"),
+        "CARD_BG":       colors.HexColor("#111827"),
+        "CARD_BORDER":   colors.HexColor("#1f2937"),
+        "CARD_HEAD_BG":  colors.HexColor("#111827"),
+        "CARD_HEAD_FG":  colors.HexColor("#34d399"),    # brand green, readable on dark
+        "CARD_VALUE_FG": colors.HexColor("#34d399"),
+        "LABEL_FG":      colors.HexColor("#9ca3af"),
+        "BRAND_SOFT":    colors.HexColor("#0f1f17"),
+        "BRAND_RIM":     colors.HexColor("#1f3a2a"),
+        "BRAND_HEAD":    colors.HexColor("#34d399"),
+        "SUMMARY_BG":    colors.HexColor("#111827"),
+    },
+}
+
+# Module-level "current theme" — rebound by render_invoice_pdf before
+# each run. Defaults to light so importing the module at process start
+# doesn't crash anything that reads these at import time.
+T = THEMES["light"]
+
+
+def _c(key):
+    """Color lookup shorthand — keeps callsites terse."""
+    return T[key]
+
+
+# Backwards-compat aliases — the existing code reads INK_HEADING,
+# INK_BODY, etc. directly. Rather than rewrite 30+ callsites we
+# expose module-level globals that render_invoice_pdf() mutates at
+# the start of each render so they always reflect the chosen theme.
+INK_HEADING = T["INK_HEADING"]
+INK_BODY    = T["INK_BODY"]
+INK_MUTED   = T["INK_MUTED"]
+INK_LIGHT   = T["INK_LIGHT"]
+INK_BORDER  = T["INK_BORDER"]
+INK_BORDER_STRONG = T["INK_BORDER_STRONG"]
+BRAND_SOFT  = T["BRAND_SOFT"]
+BRAND_RIM   = T["BRAND_RIM"]
+BRAND_HEAD  = T["BRAND_HEAD"]
+
+
+def _apply_theme(name):
+    """Rebind the module-level T + INK_* / BRAND_* globals to the
+    chosen theme so every helper in this module reads the right
+    palette for the current render, without touching any callsite."""
+    global T, INK_HEADING, INK_BODY, INK_MUTED, INK_LIGHT
+    global INK_BORDER, INK_BORDER_STRONG, BRAND_SOFT, BRAND_RIM, BRAND_HEAD
+    T = THEMES.get(name, THEMES["light"])
+    INK_HEADING       = T["INK_HEADING"]
+    INK_BODY          = T["INK_BODY"]
+    INK_MUTED         = T["INK_MUTED"]
+    INK_LIGHT         = T["INK_LIGHT"]
+    INK_BORDER        = T["INK_BORDER"]
+    INK_BORDER_STRONG = T["INK_BORDER_STRONG"]
+    BRAND_SOFT        = T["BRAND_SOFT"]
+    BRAND_RIM         = T["BRAND_RIM"]
+    BRAND_HEAD        = T["BRAND_HEAD"]
 
 
 def _fmt_money(amount, currency="USD"):
@@ -256,14 +350,16 @@ def _draw_company_footer(canvas, doc, comp):
 
 
 def _make_on_page_handler(comp, total_pages_box):
-    """Return a reportlab onPage callback that draws the company
-    footer only on the final page.
+    """Return a reportlab onPage callback that paints the background
+    on every page and draws the company footer only on the final page.
 
     `total_pages_box` is a list of length 1 — the second pass reads
     it to know which page is the last. In the first pass it's empty
-    so we draw nothing.
+    so we draw the footer nowhere.
     """
     def _on_page(canvas, doc):
+        # Background first so the footer rule/text stays visible on top.
+        _paint_page_background(canvas, doc)
         if not total_pages_box:
             return
         if canvas.getPageNumber() == total_pages_box[0]:
@@ -372,7 +468,7 @@ def _build_story(invoice, styles):
             styles["InvBody"],
         )]], colWidths=[None])
         summary.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8f8f5")),
+            ("BACKGROUND", (0, 0), (-1, -1), T["SUMMARY_BG"]),
             ("BOX", (0, 0), (-1, -1), 0.4, INK_BORDER),
             ("LEFTPADDING", (0, 0), (-1, -1), 12),
             ("RIGHTPADDING", (0, 0), (-1, -1), 12),
@@ -548,12 +644,19 @@ def _build_story(invoice, styles):
 
 # ── Main renderer ──────────────────────────────────────────────────
 
-def render_invoice_pdf(invoice):
+def render_invoice_pdf(invoice, theme="light"):
     """Return a BytesIO containing the rendered invoice PDF.
 
     Uses a two-pass build so the company-contact footer appears only
     on the final page regardless of content length.
+
+    ``theme`` is one of the keys in THEMES — currently 'light' (the
+    classic cream-on-white look) or 'dark' (near-black page, pale
+    text, matches the reference design the customer asked for). The
+    chosen theme is applied to every color read in this module via
+    _apply_theme() before the story is built.
     """
+    _apply_theme(theme)
     _REMOTE_CACHE.clear()
     comp = invoice.company_snapshot or {}
 
@@ -580,8 +683,12 @@ def render_invoice_pdf(invoice):
         doc1.pagesize[1] - top_margin - bottom_margin,
         id="body", showBoundary=0,
     )
+    # First pass also paints the page background so layout/spacing
+    # matches pass 2 exactly (otherwise reportlab could pick a
+    # different page-break position).
     doc1.addPageTemplates([PageTemplate(
-        id="main", frames=[frame1], onPage=lambda c, d: None,
+        id="main", frames=[frame1],
+        onPage=lambda c, d: _paint_page_background(c, d),
     )])
     doc1.build(_build_story(invoice, styles))
     total_pages_box.append(doc1.page)   # final page count
@@ -608,6 +715,23 @@ def render_invoice_pdf(invoice):
     doc2.build(_build_story(invoice, styles))
     buf.seek(0)
     return buf
+
+
+def _paint_page_background(canvas, doc):
+    """Fill the entire page with the current theme's PAGE_BG, if any.
+
+    Must run BEFORE any other onPage drawing so footer rules/text
+    stay visible. For the light theme this is a no-op (PAGE_BG=None),
+    so the existing cream-paper look is unchanged.
+    """
+    bg = T.get("PAGE_BG")
+    if not bg:
+        return
+    canvas.saveState()
+    w, h = doc.pagesize
+    canvas.setFillColor(bg)
+    canvas.rect(0, 0, w, h, stroke=0, fill=1)
+    canvas.restoreState()
 
 
 def _build_styles():

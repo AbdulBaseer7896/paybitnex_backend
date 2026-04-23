@@ -58,7 +58,13 @@ class MeView(AsyncAPIView):
     permission_classes = [IsAuthenticated]
 
     async def get(self, request):
+        # Build the base payload synchronously — UserSerializer no longer
+        # touches the ORM (we stripped the `features` method field for
+        # exactly this reason). Then layer on the feature map using the
+        # async helper so it's legal inside this async handler.
+        from myapp.Utils.features import auser_feature_map
         data = UserSerializer(request.user).data
+        data["features"] = await auser_feature_map(request.user)
         return Response(data)
 
     async def patch(self, request):
@@ -93,7 +99,10 @@ class MeView(AsyncAPIView):
                     "had_picture": bool(user.profile_picture),
                 },
             )
-        return Response(UserSerializer(user).data)
+        from myapp.Utils.features import auser_feature_map
+        out = UserSerializer(user).data
+        out["features"] = await auser_feature_map(user)
+        return Response(out)
 
 
 class ChangePasswordView(AsyncAPIView):

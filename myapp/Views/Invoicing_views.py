@@ -25,6 +25,7 @@ from myapp.serializers.Invoicing_serializers import (
     ClientSerializer, CustomerCompanySerializer,
 )
 from myapp.Models.Audit_models import AuditLog
+from myapp.Utils.permissions import HasFeature
 
 
 def _is_customer(request):
@@ -34,8 +35,12 @@ def _is_customer(request):
 class ClientViewSet(viewsets.ModelViewSet):
     """
     Customer-owned clients. CRUD restricted to the owning customer.
+
+    Gated behind the 'invoicing' premium feature — customers without
+    the grant get 403. Staff (admin/accountant) bypass the gate but
+    still see an empty queryset per product spec.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasFeature("invoicing")]
     serializer_class = ClientSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -100,8 +105,10 @@ class CustomerCompanyViewSet(viewsets.ModelViewSet):
     Customer-owned companies (their own businesses they invoice from).
     CRUD restricted to the owning customer. At most one `is_primary=True`
     per customer; setting primary on a new row demotes all others.
+
+    Gated behind the 'invoicing' premium feature.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasFeature("invoicing")]
     serializer_class = CustomerCompanySerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -670,10 +677,22 @@ def _compute_totals(line_items_data, tax_percent):
     return subtotal, tax_amt, total
 
 
-def _build_and_cache_pdf(invoice):
-    """Render the PDF and save it to invoice.pdf_file."""
+def _build_and_cache_pdf(invoice, theme=None):
+    """Render the PDF and save it to invoice.pdf_file.
+
+    ``theme`` overrides the invoice's stored preference if given. If
+    omitted we fall back to whatever was last stored on the invoice
+    (default 'light'), so re-renders triggered by data changes (edit,
+    send) preserve the customer's last chosen theme.
+    """
     from myapp.Utils.invoice_pdf import render_invoice_pdf
-    buf = render_invoice_pdf(invoice)
+    chosen = (theme or getattr(invoice, "pdf_theme", None) or "light").lower()
+    if chosen not in ("light", "dark"):
+        chosen = "light"
+    buf = render_invoice_pdf(invoice, theme=chosen)
+    # Record the theme we used on the invoice itself; do this BEFORE
+    # the .save() call so the field is persisted in the same write.
+    invoice.pdf_theme = chosen
     # Wire the bytes into the FileField.
     invoice.pdf_file.save(
         f"{invoice.number}.pdf",
@@ -699,8 +718,10 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
     Admin/accountant get an empty queryset — invoices are private to
     the customer per product spec.
+
+    Gated behind the 'invoicing' premium feature.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasFeature("invoicing")]
     serializer_class = InvoiceSerializer
 
     def get_queryset(self):
@@ -1102,8 +1123,21 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if invoice.customer_id != request.user.id:
             return Response({"detail": "Forbidden."},
                             status=status.HTTP_403_FORBIDDEN)
+        # Optional ?theme= or body {"theme": "dark"} — sticks on the
+        # invoice so subsequent sends + manual re-renders keep using
+        # whatever the customer last chose. Unknown values fall back
+        # to 'light' so bad client input can't break anything.
+        theme = (
+            request.data.get("theme")
+            or request.query_params.get("theme")
+            or invoice.pdf_theme
+            or "light"
+        )
+        theme = str(theme).lower()
+        if theme not in ("light", "dark"):
+            theme = "light"
         self._refresh_letterhead_snapshots(invoice, request)
-        _build_and_cache_pdf(invoice)
+        _build_and_cache_pdf(invoice, theme=theme)
         return Response(self.get_serializer(invoice).data)
 
     def _refresh_letterhead_snapshots(self, invoice, request):

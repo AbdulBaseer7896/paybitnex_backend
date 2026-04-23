@@ -297,6 +297,13 @@ class Invoice(models.Model):
     pdf_file = models.FileField(
         upload_to="invoices/pdf/", null=True, blank=True,
     )
+    # Which visual theme the cached PDF was rendered with. Stored as
+    # a short string so new themes can be added without a migration
+    # (values are validated in the render helper). Default 'light'
+    # preserves the classic cream-paper look for older invoices.
+    pdf_theme = models.CharField(
+        max_length=16, default="light", blank=True,
+    )
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)

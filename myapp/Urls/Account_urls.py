@@ -8,6 +8,7 @@ from myapp.Views.Account_views import (
     CustomerScoreView, CustomerOnboardingListView,
     onboarding_counts,
 )
+from myapp.Views.Feature_views import UserFeaturesView
 
 router = DefaultRouter()
 router.register(r"users", UserAdminViewSet, basename="users")
@@ -26,4 +27,7 @@ urlpatterns = [
     # Alias kept for frontend code that uses the older path.
     path("customers/onboarded/", CustomerOnboardingListView.as_view(),
          name="onboarding-list-alias"),
+    # Admin-only: read / write a customer's premium feature grants.
+    path("users/<uuid:user_id>/features/",
+         UserFeaturesView.as_view(), name="user-features"),
 ]

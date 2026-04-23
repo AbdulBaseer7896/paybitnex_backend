@@ -14,7 +14,15 @@ class UserBriefSerializer(serializers.ModelSerializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Read serializer — includes a profile-picture URL if present."""
+    """Read serializer — includes a profile-picture URL if present.
+
+    NOTE: the `features` map is NOT exposed here. It's injected by
+    the views that return this payload (MeView, UserAdminViewSet) so
+    async views can await the async helper and sync views can call
+    the sync one. Putting an ORM-touching SerializerMethodField here
+    caused SynchronousOnlyOperation when MeView (async) serialised a
+    user who had any CustomerFeatureAccess rows.
+    """
     profile_picture_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -131,5 +139,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         data = super().validate(attrs)
-        data["user"] = UserBriefSerializer(self.user).data
+        # Login endpoint is sync (TokenObtainPairView), so the sync
+        # helper is the correct one here. This keeps the frontend's
+        # `user.features` populated on the very first request after
+        # login, before `/auth/me/` is called.
+        from myapp.Utils.features import user_feature_map
+        user_payload = UserBriefSerializer(self.user).data
+        user_payload["features"] = user_feature_map(self.user)
+        data["user"] = user_payload
         return data

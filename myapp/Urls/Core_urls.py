@@ -6,6 +6,7 @@ from myapp.Views.Core_views import (
     CurrencyViewSet, PaymentMethodViewSet, SystemSettingViewSet,
     AuditLogListView, dashboard_summary, bank_balances,
 )
+from myapp.Views.Feature_views import FeatureRegistryView
 
 router = DefaultRouter()
 router.register(r"currencies", CurrencyViewSet, basename="currencies")
@@ -18,4 +19,5 @@ urlpatterns = [
     path("activity/",  AuditLogListView.as_view(), name="activity"),
     path("dashboard/", dashboard_summary, name="dashboard"),
     path("bank-balances/", bank_balances, name="bank-balances"),
+    path("features/", FeatureRegistryView.as_view(), name="feature-registry"),
 ]
