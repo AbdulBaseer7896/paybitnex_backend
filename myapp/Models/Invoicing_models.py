@@ -305,6 +305,28 @@ class Invoice(models.Model):
         max_length=16, default="light", blank=True,
     )
 
+    # ── Payment receipt confirmation ──
+    # Captured when the customer flips the invoice to "paid" out-of-band
+    # (e.g. they got a bank transfer / cash app confirmation). The proof
+    # file is whatever the customer uploads — typically a screenshot of
+    # the bank confirmation, a PDF receipt, etc. Both fields are
+    # optional: a customer who just clicks "Mark as paid" without
+    # uploading anything still flips the status fine.
+    payment_proof_file = models.FileField(
+        upload_to="invoices/payment_proof/", null=True, blank=True,
+        help_text="Document the customer uploaded as proof that payment "
+                  "was received (screenshot, receipt PDF, etc.).",
+    )
+    payment_proof_note = models.TextField(
+        blank=True, default="",
+        help_text="Customer's note/comment recorded when marking the "
+                  "invoice as paid (e.g. 'Wire arrived 2026-04-25').",
+    )
+    paid_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When the customer marked this invoice as paid.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

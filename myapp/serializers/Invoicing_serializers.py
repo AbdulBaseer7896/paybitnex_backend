@@ -212,6 +212,12 @@ class InvoiceSerializer(serializers.ModelSerializer):
     public_url = serializers.SerializerMethodField()
     pdf_url = serializers.SerializerMethodField()
     pdf_download_url = serializers.SerializerMethodField()
+    # Payment-receipt proof — pre-signed S3 URLs the frontend can use
+    # to render or download the document the customer attached when
+    # marking the invoice as paid. Empty when no proof was uploaded.
+    payment_proof_url = serializers.SerializerMethodField()
+    payment_proof_download_url = serializers.SerializerMethodField()
+    payment_proof_filename = serializers.SerializerMethodField()
     # Multi-method selection. Read-only on the main serializer — writes
     # happen via the `payment_methods` (plural) list of codes on the
     # create payload, handled in the viewset.
@@ -300,6 +306,93 @@ class InvoiceSerializer(serializers.ModelSerializer):
                 or obj.payment_method.label
         return None
 
+    # ── Payment-proof helpers ─────────────────────────────────────
+    # We expose two URLs for symmetry with the invoice PDF: a plain
+    # pre-signed URL for inline preview (image / PDF in <object>) and
+    # a download-forcing URL for the explicit "Download" button.
+    # Both fall back to the field's raw .url for non-S3 backends so
+    # local development without S3 still works.
+    def _proof_basename(self, obj):
+        if not obj.payment_proof_file:
+            return None
+        try:
+            import os
+            return os.path.basename(obj.payment_proof_file.name)
+        except Exception:
+            return None
+
+    def get_payment_proof_filename(self, obj):
+        return self._proof_basename(obj)
+
+    def get_payment_proof_url(self, obj):
+        """Inline preview URL for the proof document.
+
+        Uses a plain pre-signed URL on S3 so images render and PDFs
+        open inline in the browser. Falls back to the raw .url for
+        local/legacy storage.
+        """
+        if not obj.payment_proof_file:
+            return None
+        storage = obj.payment_proof_file.storage
+        # Duck-type S3 backend: it exposes .connection, .bucket_name.
+        if hasattr(storage, "connection"):
+            try:
+                from django.conf import settings as dj_settings
+                key = storage._normalize_name(
+                    storage._clean_name(obj.payment_proof_file.name),
+                )
+                return storage.connection.meta.client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={
+                        "Bucket": storage.bucket_name,
+                        "Key": key,
+                    },
+                    ExpiresIn=int(dj_settings.AWS_QUERYSTRING_EXPIRE),
+                )
+            except Exception as e:
+                log.warning("payment proof inline URL failed: %s", e)
+        # Non-S3 fallback (local dev / Cloudinary).
+        req = self.context.get("request")
+        try:
+            raw = obj.payment_proof_file.url
+            return req.build_absolute_uri(raw) if req else raw
+        except Exception:
+            return None
+
+    def get_payment_proof_download_url(self, obj):
+        """Download-forcing URL for the proof document."""
+        if not obj.payment_proof_file:
+            return None
+        # Reuse the S3 helper but pass the *original* filename so the
+        # downloaded file keeps its extension (the helper appends .pdf
+        # by default — we want to preserve whatever the customer
+        # uploaded, e.g. .png / .jpg / .pdf).
+        try:
+            from django.conf import settings as dj_settings
+            storage = obj.payment_proof_file.storage
+            if hasattr(storage, "connection"):
+                import os
+                base = os.path.basename(obj.payment_proof_file.name)
+                # Sanitise for Content-Disposition.
+                safe = re.sub(r'[\\/:*?"<>|]+', "_", base)
+                key = storage._normalize_name(
+                    storage._clean_name(obj.payment_proof_file.name),
+                )
+                return storage.connection.meta.client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={
+                        "Bucket": storage.bucket_name,
+                        "Key": key,
+                        "ResponseContentDisposition":
+                            f'attachment; filename="{safe}"',
+                    },
+                    ExpiresIn=int(dj_settings.AWS_QUERYSTRING_EXPIRE),
+                )
+        except Exception as e:
+            log.warning("payment proof download URL failed: %s", e)
+        # Non-S3 fallback — same as inline URL; browser will decide.
+        return self.get_payment_proof_url(obj)
+
     class Meta:
         model = Invoice
         fields = [
@@ -320,6 +413,12 @@ class InvoiceSerializer(serializers.ModelSerializer):
             "expires_at", "first_viewed_at", "view_count",
             "sent_to_client_at", "sent_to_customer_at",
             "client_snapshot", "company_snapshot", "payment_method_snapshot",
+            # Payment-receipt proof (set when the customer marks paid).
+            "paid_at",
+            "payment_proof_note",
+            "payment_proof_url",
+            "payment_proof_download_url",
+            "payment_proof_filename",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -336,6 +435,13 @@ class InvoiceSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
             "client_name", "company_name", "payment_method_label",
             "invoice_payment_methods",
+            # Proof fields are written exclusively via the mark-paid
+            # action — never via the standard create/update endpoints.
+            "paid_at",
+            "payment_proof_note",
+            "payment_proof_url",
+            "payment_proof_download_url",
+            "payment_proof_filename",
         ]
 
 

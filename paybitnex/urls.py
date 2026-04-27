@@ -19,6 +19,8 @@ api_v1 = [
     path("reports/", include("myapp.Urls.Report_urls")),
     path("core/", include("myapp.Urls.Core_urls")),
     path("invoicing/", include("myapp.Urls.Invoicing_urls")),
+    path("internal-transactions/",
+         include("myapp.Urls.InternalTx_urls")),
 ]
 
 # Public (no-auth) endpoints — share-token invoice view. Mounted at

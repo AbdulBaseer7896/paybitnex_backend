@@ -1173,7 +1173,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 invoice.number, e,
             )
 
-    @action(detail=True, methods=["post"], url_path="mark-paid")
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="mark-paid",
+        # Accept multipart so the customer can attach a proof document
+        # alongside the action. JSON is still fine for the no-attachment
+        # case (e.g. quick "mark paid" from the list page).
+        parser_classes=[MultiPartParser, FormParser, JSONParser],
+    )
     def mark_paid(self, request, pk=None):
         """Flip an invoice to paid status.
 
@@ -1182,7 +1190,18 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         directly to paid in one step, which is what customers expect
         when the client actually pays them out-of-band (Zelle, ACH
         confirmation, etc.).
+
+        Optional payload fields:
+          - ``payment_proof_file``: file the customer uploaded as
+            proof (receipt screenshot, PDF, etc.). Multipart only.
+          - ``payment_proof_note``: free-form note/comment.
+
+        Both are optional. Re-marking an already-paid invoice with
+        new attachments is allowed — useful when the customer forgot
+        to attach proof the first time and wants to add it now.
         """
+        from django.utils import timezone
+
         invoice = self.get_object()
         if invoice.customer_id != request.user.id:
             return Response({"detail": "Forbidden."},
@@ -1192,15 +1211,63 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 {"detail": "A voided invoice cannot be marked as paid."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if invoice.status == InvoiceStatus.PAID:
-            return Response(self.get_serializer(invoice).data)
 
-        invoice.status = InvoiceStatus.PAID
-        invoice.save(update_fields=["status", "updated_at"])
-        AuditLog.record(
-            user=request.user, action=AuditLog.ACTION_UPDATE, target=invoice,
-            description=f"Invoice {invoice.number} marked as paid",
-        )
+        # Pull optional proof + note from the request. We accept either
+        # multipart (file in request.FILES) or plain JSON (note only).
+        proof_file = request.FILES.get("payment_proof_file")
+        # Note: request.data is a unified dict for both JSON and
+        # multipart payloads in DRF, so this works for both.
+        note_raw = request.data.get("payment_proof_note", None)
+
+        update_fields = []
+
+        if invoice.status != InvoiceStatus.PAID:
+            invoice.status = InvoiceStatus.PAID
+            invoice.paid_at = timezone.now()
+            update_fields += ["status", "paid_at"]
+
+        if proof_file is not None:
+            # Once a proof document is on file, it's locked — the
+            # customer can edit the note but not swap the file. This
+            # mirrors the frontend, which hides the file input after
+            # the first upload, but we enforce it server-side too so
+            # a crafted multipart request can't bypass the rule.
+            if invoice.payment_proof_file:
+                return Response(
+                    {"detail": "A payment proof document is already on "
+                               "file for this invoice and cannot be "
+                               "replaced. You can still update the note."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            invoice.payment_proof_file = proof_file
+            update_fields.append("payment_proof_file")
+
+        if note_raw is not None:
+            invoice.payment_proof_note = (note_raw or "").strip()
+            update_fields.append("payment_proof_note")
+
+        if update_fields:
+            update_fields.append("updated_at")
+            invoice.save(update_fields=update_fields)
+
+        # Audit log message reflects what actually happened so the
+        # admin trail is informative without spamming on no-op calls.
+        if "status" in update_fields:
+            description = f"Invoice {invoice.number} marked as paid"
+        elif "payment_proof_file" in update_fields \
+                or "payment_proof_note" in update_fields:
+            description = (
+                f"Invoice {invoice.number} payment proof updated"
+            )
+        else:
+            description = None
+
+        if description:
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=invoice, description=description,
+            )
+
         return Response(self.get_serializer(invoice).data)
 
     @action(detail=False, methods=["get"], url_path="stats")
