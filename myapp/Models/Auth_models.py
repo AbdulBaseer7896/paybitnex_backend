@@ -55,6 +55,11 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     # customer onboarding — must complete profile before accessing dashboard
     is_profile_complete = models.BooleanField(default=False)
+    # last completed onboarding step (0 = not started, 1 = personal done,
+    # 2 = CNIC done, 3 = selfie done). When the user logs back in mid-flow
+    # the frontend resumes from this step instead of restarting at step 0.
+    # Only meaningful while is_profile_complete is False.
+    onboarding_step = models.PositiveSmallIntegerField(default=0)
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

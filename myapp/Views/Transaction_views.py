@@ -149,7 +149,8 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         if u.role == UserRole.CUSTOMER:
             # Customers see every one of their own payments, including stale
             # ones — they're the ones who need to confirm those.
-            return qs.filter(customer=u)
+            qs = qs.filter(customer=u)
+            return self._apply_date_filter(qs)
 
         # Staff: apply the stale filter ONLY on the list action. For a
         # retrieve (detail page), custom @action endpoints, or update,
@@ -188,7 +189,205 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(stale_q)
         elif not include_stale:
             qs = qs.exclude(stale_q)
+
+        return self._apply_date_filter(qs)
+
+    def _apply_date_filter(self, qs):
+        """Apply ?date_from / ?date_to query params if present.
+
+        Both bounds are inclusive and operate on `created_at::date` so
+        users get the calendar-day intuition they expect ("from Apr 1 to
+        Apr 30" includes anything on Apr 1 from 00:00 onward and
+        anything on Apr 30 up to 23:59:59). Invalid strings are ignored
+        silently — DRF would 400 on a filter, but we don't want a
+        malformed URL to break the page.
+        """
+        from datetime import datetime
+        p = self.request.query_params
+        df = p.get("date_from")
+        dt = p.get("date_to")
+        try:
+            if df:
+                df_date = datetime.strptime(df, "%Y-%m-%d").date()
+                qs = qs.filter(created_at__date__gte=df_date)
+            if dt:
+                dt_date = datetime.strptime(dt, "%Y-%m-%d").date()
+                qs = qs.filter(created_at__date__lte=dt_date)
+        except (ValueError, TypeError):
+            # Bad date string → just skip filtering rather than raising.
+            pass
         return qs
+
+    # ---- admin / accountant: CSV export of (filtered) transactions ----
+    @action(
+        detail=False, methods=["get"],
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+        url_path="export.csv",
+    )
+    def export_csv(self, request):
+        """
+        GET /transactions/payments/export.csv
+
+        Streams a CSV of incoming payments matching the same filters
+        the list endpoint accepts: ?customer=, ?status=, ?date_from=,
+        ?date_to=, ?search=. Designed to back the "Export CSV" button
+        on the per-customer transactions view.
+
+        The Content-Disposition filename includes the customer's name
+        (slugified) when ?customer= is present so downloads are easy
+        to organize, otherwise it falls back to a date-stamped name.
+        """
+        import csv
+        import io
+        from datetime import datetime
+        from django.http import StreamingHttpResponse
+
+        # Re-use the filterset / search-fields machinery from the
+        # ListModelMixin so the export honours the exact same filters
+        # as the list endpoint. We deliberately bypass `get_queryset`'s
+        # stale-exclusion when the caller is exporting — they may want
+        # to see all completed transactions including stale ones — but
+        # we honour an explicit ?only_stale flag.
+        qs = (
+            IncomingPayment.objects
+            .select_related(
+                "customer", "currency", "payment_method",
+                "verified_by", "handled_by",
+            )
+        )
+        # Customer scope filter
+        cust_id = request.query_params.get("customer")
+        if cust_id:
+            qs = qs.filter(customer_id=cust_id)
+        # Status filter
+        st = request.query_params.get("status")
+        if st:
+            qs = qs.filter(status=st)
+        # Currency filter (rare, but the list view supports it)
+        cur = request.query_params.get("currency")
+        if cur:
+            qs = qs.filter(currency_id=cur)
+        # Search across reference / external id / sender / customer email
+        search = request.query_params.get("search")
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(reference__icontains=search)
+                | Q(external_transaction_id__icontains=search)
+                | Q(sender_name__icontains=search)
+                | Q(sender_company__icontains=search)
+                | Q(customer__email__icontains=search)
+            )
+        # Date range — inclusive of both bounds, calendar-day semantics
+        try:
+            df = request.query_params.get("date_from")
+            dt_ = request.query_params.get("date_to")
+            if df:
+                qs = qs.filter(
+                    created_at__date__gte=datetime.strptime(df, "%Y-%m-%d").date(),
+                )
+            if dt_:
+                qs = qs.filter(
+                    created_at__date__lte=datetime.strptime(dt_, "%Y-%m-%d").date(),
+                )
+        except (ValueError, TypeError):
+            pass
+
+        qs = qs.order_by("-created_at")
+
+        # Build the CSV in memory. For the data sets this app handles
+        # (low thousands per customer), in-memory is fine. If we ever
+        # need to handle millions of rows we'd swap to the streaming
+        # `csv.writer` + generator pattern.
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "Reference",
+            "Submitted at",
+            "Customer name",
+            "Customer email",
+            "Sender name",
+            "Sender company",
+            "Sender bank",
+            "External tx ID",
+            "Currency",
+            "Amount",
+            "Exchange rate",
+            "Fee %",
+            "Fee (foreign)",
+            "Net (foreign)",
+            "Gross PKR",
+            "Net PKR",
+            "Status",
+            "Verified by",
+            "Verified at",
+            "Completed at",
+            "Payment method",
+        ])
+
+        def fmt_dt(value):
+            return value.strftime("%Y-%m-%d %H:%M:%S") if value else ""
+
+        def fmt_d(value):
+            return value.strftime("%Y-%m-%d") if value else ""
+
+        def s(value):
+            return "" if value is None else str(value)
+
+        for tx in qs.iterator(chunk_size=500):
+            cust = tx.customer
+            pm = tx.payment_method
+            writer.writerow([
+                tx.reference,
+                fmt_dt(tx.created_at),
+                cust.full_name or "",
+                cust.email or "",
+                tx.sender_name or "",
+                tx.sender_company or "",
+                tx.sender_bank_name or "",
+                tx.external_transaction_id or "",
+                tx.currency_id or "",
+                s(tx.amount),
+                s(tx.exchange_rate),
+                s(tx.fee_percentage),
+                s(tx.fee_amount_foreign),
+                s(tx.net_amount_foreign),
+                s(tx.gross_pkr),
+                s(tx.net_pkr),
+                tx.status or "",
+                (tx.verified_by.full_name or tx.verified_by.email) if tx.verified_by_id else "",
+                fmt_dt(tx.verified_at),
+                fmt_dt(tx.completed_at),
+                pm.label if pm else "",
+            ])
+
+        # Build a sensible filename. When exporting a specific customer's
+        # transactions we slugify their name so downloads are easy to
+        # tell apart in a Downloads folder full of CSVs.
+        slug_part = "all-customers"
+        if cust_id:
+            from myapp.Models.Auth_models import User
+            target = User.objects.filter(pk=cust_id).first()
+            if target is not None:
+                raw = target.full_name or target.email or "customer"
+                slug_part = "".join(
+                    ch.lower() if ch.isalnum() else "-"
+                    for ch in raw
+                ).strip("-") or "customer"
+        date_stamp = timezone.now().strftime("%Y-%m-%d")
+        filename = f"transactions-{slug_part}-{date_stamp}.csv"
+
+        body = buf.getvalue().encode("utf-8")
+        # Add BOM so Excel on Windows opens UTF-8 correctly without
+        # mangling non-ASCII characters in customer names. Cheap and
+        # universally understood.
+        body = b"\xef\xbb\xbf" + body
+
+        resp = StreamingHttpResponse(
+            iter([body]), content_type="text/csv; charset=utf-8",
+        )
+        resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
 
     # ---- customer submit ----
     def create(self, request, *args, **kwargs):

@@ -94,7 +94,10 @@ class KYCObjectionItemSerializer(serializers.Serializer):
     """Single objection entry: which field, what's wrong."""
     field = serializers.CharField(
         max_length=60,
-        help_text="e.g. 'selfie', 'cnic_front', 'cnic_back', 'address', 'full_name', 'general'",
+        help_text=(
+            "e.g. 'selfie', 'cnic_front', 'cnic_back', 'cnic_number', "
+            "'full_name', 'phone', 'address', 'city', 'bank', 'general'"
+        ),
     )
     message = serializers.CharField(max_length=500)
 

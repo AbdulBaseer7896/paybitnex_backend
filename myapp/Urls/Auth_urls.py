@@ -4,6 +4,7 @@ from myapp.Views.Auth_views import (
     LoginView, RefreshView, LogoutView, MeView, ChangePasswordView,
     SignupRequestOTPView, SignupVerifyOTPView,
     ForgotPasswordRequestOTPView, ForgotPasswordResetView,
+    OnboardingStepView,
 )
 
 urlpatterns = [
@@ -12,6 +13,8 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="auth-logout"),
     path("me/", MeView.as_view(), name="auth-me"),
     path("change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("onboarding-step/", OnboardingStepView.as_view(),
+         name="auth-onboarding-step"),
 
     # OTP-based signup
     path("signup/request-otp/", SignupRequestOTPView.as_view(),

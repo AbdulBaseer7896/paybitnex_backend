@@ -1,0 +1,25 @@
+Hi{% if name %} {{ name }}{% endif %},
+
+Our compliance team has reviewed your {{ company_name }} account
+submission and raised {{ objection_count }} objection{{ objection_count|pluralize }}
+that need your attention before we can approve your profile.
+
+What needs to be fixed:
+{% for o in objections %}
+  {{ forloop.counter }}. {{ o.field_label }}: {{ o.message }}
+{% endfor %}
+{% if notes %}
+
+Note from the reviewer:
+{{ notes }}
+{% endif %}
+
+Sign in to your account, address each item above, and resubmit your
+profile. Our team will re-review within 24 hours during business days.
+
+  {{ frontend_url }}/app
+
+If you believe this objection was raised in error, please reply to this
+email and our team will look into it.
+
+— The {{ company_name }} team

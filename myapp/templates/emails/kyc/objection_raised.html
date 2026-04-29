@@ -1,0 +1,56 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  Our compliance team has reviewed your {{ company_name }} account
+  submission and raised
+  {% if objection_count == 1 %}one objection{% else %}{{ objection_count }} objections{% endif %}
+  that need your attention before we can approve your profile.
+</p>
+
+<div style="background:#FFF7E5; border-left:3px solid #B7791F;
+            padding:14px 18px; border-radius:4px; margin:20px 0;">
+  <div style="font-weight:600; color:#7B5A0E; margin-bottom:8px;">
+    What needs to be fixed
+  </div>
+  {% if objections %}
+  <ol style="margin:0; padding-left:18px; color:#3a3d44; font-size:14px; line-height:1.6;">
+    {% for o in objections %}
+    <li style="margin-bottom:6px;">
+      <b>{{ o.field_label }}:</b> {{ o.message }}
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</div>
+
+{% if notes %}
+<div style="background:#EEF1F4; padding:12px 16px; border-radius:4px;
+            margin:16px 0; color:#3a3d44; font-size:14px; line-height:1.6;">
+  <div style="font-weight:600; color:#1f2329; margin-bottom:4px;">
+    Note from the reviewer
+  </div>
+  {{ notes }}
+</div>
+{% endif %}
+
+<p style="margin:16px 0;">
+  Sign in to your account, address each item above, and resubmit your
+  profile. Our team will re-review within 24 hours during business days.
+</p>
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ frontend_url }}/app"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    Update my profile
+  </a>
+</p>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If you believe this objection was raised in error, please reply to this
+  email and our team will look into it.
+</p>
+{% endblock %}

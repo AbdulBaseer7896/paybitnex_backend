@@ -48,7 +48,9 @@ class _BaseRefViewSet(viewsets.ModelViewSet):
     """Shared base for the four reference-data tables.
 
     - Admin can create/update/delete.
-    - Accountant has read-only access.
+    - Accountant can create + read (so the "add new bank inline" flow
+      on the New Internal Transaction modal works for accountants too)
+      but cannot update or destroy persisted reference data.
     - Customers have no access (the URL is mounted under the
       admin-side internal-transactions namespace).
     """
@@ -56,8 +58,9 @@ class _BaseRefViewSet(viewsets.ModelViewSet):
     audit_label = "ref"
 
     def get_permissions(self):
-        if self.action in ("update", "partial_update", "destroy", "create"):
+        if self.action in ("update", "partial_update", "destroy"):
             return [IsAuthenticated(), IsAdmin()]
+        # create + list + retrieve all available to admin AND accountant
         return [IsAuthenticated(), IsAdminOrAccountant()]
 
     def perform_create(self, serializer):

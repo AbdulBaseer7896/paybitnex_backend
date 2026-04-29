@@ -122,6 +122,56 @@ class ChangePasswordView(AsyncAPIView):
         return Response({"detail": "Password changed."})
 
 
+class _OnboardingStepSerializer(serializers.Serializer):
+    """Validate the step number — clamped to 0..3 since onboarding has 4 steps."""
+    step = serializers.IntegerField(min_value=0, max_value=3)
+
+
+class OnboardingStepView(AsyncAPIView):
+    """
+    PATCH /auth/onboarding-step/   {step: int}
+
+    Records the last completed onboarding step on the user. The
+    frontend onboarding wizard calls this after every step transition
+    so that, if the user closes the tab and comes back later, we can
+    resume from where they left off instead of restarting at step 1.
+
+    The `goto` flag in the GET response tells the frontend which step
+    to render. Once `is_profile_complete` flips to true, this becomes
+    a no-op — completed users hit /app instead of /onboarding.
+    """
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request):
+        # `goto` is the step the frontend should render next.
+        # Returning it explicitly (rather than just the raw stored
+        # value) keeps the contract clear: the server tells the
+        # client where to start, the client doesn't have to interpret.
+        user = request.user
+        return Response({
+            "onboarding_step": user.onboarding_step,
+            "goto": user.onboarding_step,
+            "is_profile_complete": user.is_profile_complete,
+        })
+
+    async def patch(self, request):
+        s = _OnboardingStepSerializer(data=request.data)
+        await async_is_valid(s, raise_exception=True)
+        new_step = s.validated_data["step"]
+        user = request.user
+        # Never let the step go backwards — if the user already got to
+        # step 3 and refreshes mid-step-2, we don't want to clobber
+        # their progress. Frontend only PATCHes forward anyway, but
+        # this guards against clock-skew / out-of-order requests.
+        if new_step > (user.onboarding_step or 0):
+            user.onboarding_step = new_step
+            await user.asave(update_fields=["onboarding_step", "updated_at"])
+        return Response({
+            "onboarding_step": user.onboarding_step,
+            "goto": user.onboarding_step,
+        })
+
+
 # ─────────────────────────────────────────────────────────────────────
 # OTP-based signup
 # ─────────────────────────────────────────────────────────────────────

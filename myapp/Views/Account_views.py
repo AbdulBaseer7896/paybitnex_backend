@@ -190,8 +190,13 @@ class CustomerProfileView(AsyncAPIView):
         request.user.is_profile_complete = True
         request.user.full_name = profile.full_name
         request.user.phone = profile.phone
+        # Mark all 4 onboarding steps as completed. If the user logs in
+        # again after this, the resume endpoint sees step=4 (== STEPS.length)
+        # which the frontend interprets as "no resume needed, send to /app".
+        request.user.onboarding_step = 4
         await request.user.asave(
-            update_fields=["is_profile_complete", "full_name", "phone"],
+            update_fields=["is_profile_complete", "full_name", "phone",
+                           "onboarding_step"],
         )
 
         return Response(
@@ -396,6 +401,58 @@ class KYCRaiseObjectionsView(AsyncAPIView):
                 "objections": new_items,
             },
         )
+
+        # Send a notification email to the customer with the list of
+        # objections and a link to update their profile. Previously this
+        # was handled only by an on-screen message inside the dashboard,
+        # which meant a user who didn't log in for a few days had no way
+        # of knowing their submission had been objected to. Best-effort:
+        # if email fails for any reason we still return success so the
+        # admin's action is recorded.
+        try:
+            # Map field codes to user-facing labels so the email reads
+            # naturally ("Selfie" instead of "selfie", "CNIC — front"
+            # instead of "cnic_front"). Keep this list in sync with the
+            # frontend's OBJECTION_FIELDS in src/pages/admin/AdminOnboarding.jsx.
+            FIELD_LABELS = {
+                "selfie":      "Selfie",
+                "cnic_front":  "CNIC — front",
+                "cnic_back":   "CNIC — back",
+                "cnic_number": "CNIC number",
+                "full_name":   "Full name",
+                "phone":       "Phone",
+                "address":     "Address",
+                "city":        "City",
+                "bank":        "Bank",
+                "general":     "General",
+            }
+            user = profile.user
+            if user and user.email:
+                template_objections = [
+                    {
+                        "field_label": FIELD_LABELS.get(item["field"], item["field"]),
+                        "message": item["message"],
+                    }
+                    for item in new_items
+                ]
+                send_email_async(
+                    to=[user.email],
+                    subject="Action required: PayBitnex profile objections",
+                    template="kyc/objection_raised",
+                    context={
+                        "name": user.full_name or profile.full_name or "",
+                        "objection_count": len(new_items),
+                        "objections": template_objections,
+                        "notes": s.validated_data.get("notes", ""),
+                    },
+                )
+        except Exception:
+            # Log via stdlib but don't propagate — admin already has a
+            # successful response by the time we get here.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Failed to enqueue KYC objection email for profile %s", profile.id,
+            )
 
         return Response(CustomerProfileSerializer(profile).data)
 

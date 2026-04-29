@@ -9,7 +9,8 @@ from myapp.Models.Auth_models import User, UserRole
 class UserBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "email", "full_name", "role", "is_profile_complete"]
+        fields = ["id", "email", "full_name", "role", "is_profile_complete",
+                  "onboarding_step"]
         read_only_fields = fields
 
 
@@ -29,7 +30,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "email", "full_name", "role", "phone",
-            "is_active", "is_profile_complete",
+            "is_active", "is_profile_complete", "onboarding_step",
             "profile_picture_url",
             "created_at", "updated_at",
         ]
@@ -135,6 +136,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["role"] = user.role
         token["email"] = user.email
         token["is_profile_complete"] = user.is_profile_complete
+        token["onboarding_step"] = user.onboarding_step
         return token
 
     def validate(self, attrs):
