@@ -6,7 +6,7 @@ from myapp.Views.Account_views import (
     UserAdminViewSet, CustomerProfileView,
     KYCReviewView, PendingKYCListView, KYCRaiseObjectionsView,
     CustomerScoreView, CustomerOnboardingListView,
-    onboarding_counts,
+    onboarding_counts, cnic_available,
 )
 from myapp.Views.Feature_views import UserFeaturesView
 
@@ -24,6 +24,7 @@ urlpatterns = [
          KYCRaiseObjectionsView.as_view(), name="kyc-objections"),
     path("onboarding/", CustomerOnboardingListView.as_view(), name="onboarding-list"),
     path("onboarding/counts/", onboarding_counts, name="onboarding-counts"),
+    path("cnic-available/", cnic_available, name="cnic-available"),
     # Alias kept for frontend code that uses the older path.
     path("customers/onboarded/", CustomerOnboardingListView.as_view(),
          name="onboarding-list-alias"),

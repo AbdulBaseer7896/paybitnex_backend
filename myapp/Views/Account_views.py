@@ -575,3 +575,58 @@ def onboarding_counts(request):
         (tx_agg.get("submitted") or 0) + (tx_agg.get("under_review") or 0)
     )
     return Response(agg)
+
+
+# =====================================================================
+#  CNIC AVAILABILITY CHECK  (used by onboarding wizard)
+# =====================================================================
+import re
+
+_CNIC_RE = re.compile(r"^\d{5}-?\d{7}-?\d{1}$")
+
+
+@api_view(["GET"])
+@perm_classes([IsAuthenticated])
+def cnic_available(request):
+    """
+    GET /accounts/cnic-available/?cnic=12345-1234567-1
+
+    Returns {"available": bool, "format_valid": bool} so the
+    onboarding wizard can warn the user *as they type* if the CNIC
+    they're entering is already attached to another account, instead
+    of waiting until form-submit to find out.
+
+    Rules:
+      - We exclude the current user's own profile (so re-entering
+        their own CNIC during a re-submit is not flagged "duplicate").
+      - We do not 400 on bad format — instead `format_valid: false`
+        with `available: null`. The caller decides how to render.
+      - This is auth-required: only signed-in users (i.e. those
+        actively in onboarding) can probe. Anonymous strangers can
+        not enumerate the CNIC space.
+    """
+    cnic = (request.query_params.get("cnic") or "").strip()
+    if not cnic:
+        return Response(
+            {"available": None, "format_valid": False,
+             "detail": "cnic query param required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not _CNIC_RE.match(cnic):
+        # Don't even hit the DB for malformed input — the frontend
+        # should debounce until the format is valid anyway, but we
+        # answer cleanly if it asks early.
+        return Response(
+            {"available": None, "format_valid": False},
+            status=status.HTTP_200_OK,
+        )
+
+    qs = CustomerProfile.objects.filter(cnic_number=cnic)
+    # Exclude the current user's own profile: re-entering your own
+    # CNIC during a re-submit must not be flagged as "duplicate".
+    qs = qs.exclude(user_id=request.user.id)
+    return Response({
+        "available": not qs.exists(),
+        "format_valid": True,
+    })

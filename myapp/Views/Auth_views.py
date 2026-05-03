@@ -11,6 +11,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
 from django.db import transaction
 
+from django.core.cache import cache
+
 from myapp.serializers.User_serializers import (
     CustomTokenObtainPairSerializer, UserSerializer, ChangePasswordSerializer,
 )
@@ -18,6 +20,24 @@ from myapp.Models.Audit_models import AuditLog
 from myapp.Models.EmailOTP_models import EmailOTP, OTPPurpose
 from myapp.Utils.async_helpers import async_is_valid
 from myapp.Utils.email_tasks import send_email_async
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────
+def _client_ip(request):
+    """Best-effort client IP extraction.
+
+    Honors X-Forwarded-For (used by Nginx/Cloudflare/most proxies) but
+    falls back to REMOTE_ADDR. Always picks the LEFTMOST address in
+    XFF, which is the original client; the rest of the chain are
+    intermediate proxies.
+    """
+    xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if xff:
+        # Comma-separated list, possibly with whitespace.
+        return xff.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "0.0.0.0")
 
 User = get_user_model()
 
@@ -319,31 +339,89 @@ class ForgotPasswordRequestOTPView(APIView):
     """
     POST /auth/forgot-password/request-otp/   {email}
 
-    Always returns 200 regardless of whether the email is registered —
-    this prevents email-enumeration attacks. The OTP is only actually
-    sent if a user exists with this email.
+    Behavior (intentional, requested by product):
+      - If the email is NOT registered, return 404 immediately so the
+        UI can stay on the request step. We do NOT send an email.
+      - IP-based rate limit: 3 attempts per 24h per IP. The 4th attempt
+        from the same IP returns 429 "try after 24 hours". The IP can
+        still log in or do anything else — the limit is scoped to this
+        endpoint only.
+
+    Note on email enumeration: the product team explicitly prefers
+    clear UX over silent-success enumeration protection here. The IP
+    rate limit makes brute-force enumeration impractical (attacker
+    burns their 3 attempts per IP per day) and login attempts on the
+    /auth/login/ endpoint already reveal the same information.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
+
+    # 3 attempts per 24h per IP. Tweakable here without code changes
+    # elsewhere.
+    RATE_LIMIT_MAX = 3
+    RATE_LIMIT_TTL = 24 * 60 * 60   # 24h in seconds
 
     def post(self, request):
         s = _ForgotPasswordRequestSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         email = s.validated_data["email"].lower()
 
-        user = User.objects.filter(email__iexact=email).first()
-        if user is not None:
-            otp = EmailOTP.issue(email=email, purpose=OTPPurpose.PASSWORD_RESET)
-            send_email_async(
-                to=[email],
-                subject="Your PayBitnex password reset code",
-                template="auth/otp_password_reset",
-                context={"code": otp.code, "name": user.full_name or ""},
+        # ---- IP rate limit check (before any DB lookup) -------------
+        ip = _client_ip(request)
+        cache_key = f"fp_rl:{ip}"
+        attempts = cache.get(cache_key, 0)
+        if attempts >= self.RATE_LIMIT_MAX:
+            return Response(
+                {
+                    "detail": (
+                        "You've reached the maximum number of password "
+                        "reset attempts for today. Please try again "
+                        "after 24 hours, or contact admin."
+                    ),
+                    "code": "rate_limited",
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
-        # Silent success either way
+        # ---- Increment counter BEFORE looking up email --------------
+        # Otherwise an attacker could probe email existence freely as
+        # long as the email doesn't exist (no rate limit hit). The
+        # counter must apply to every request, regardless of outcome.
+        # `add()` returns True only if the key didn't exist; in that
+        # case it sets the TTL for the first time. After that we use
+        # incr() which preserves the TTL.
+        if not cache.add(cache_key, 1, timeout=self.RATE_LIMIT_TTL):
+            try:
+                cache.incr(cache_key)
+            except ValueError:
+                # Key vanished between add() and incr() (race or TTL
+                # boundary). Set it fresh — caller still gets one
+                # request "for free" but on the next one we're back
+                # in sync.
+                cache.set(cache_key, 1, timeout=self.RATE_LIMIT_TTL)
+
+        # ---- Email existence check ----------------------------------
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            return Response(
+                {
+                    "detail": "No account found with this email address.",
+                    "code": "email_not_found",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # ---- Issue OTP and send email -------------------------------
+        otp = EmailOTP.issue(email=email, purpose=OTPPurpose.PASSWORD_RESET)
+        send_email_async(
+            to=[email],
+            subject="Your PayBitnex password reset code",
+            template="auth/otp_password_reset",
+            context={"code": otp.code, "name": user.full_name or ""},
+        )
+
         return Response(
-            {"detail": "If that email is registered, a reset code has been sent."},
+            {"detail": "A reset code has been sent to your email."},
             status=status.HTTP_200_OK,
         )
 

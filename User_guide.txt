@@ -90,6 +90,7 @@ python manage.py createadmin --email abdulbasirqazi@gmail.com --password pass123
 python manage.py runserver                         # or: daphne paybitnex.asgi:application
 
 
+python -m celery -A paybitnex worker -l info --pool=solo
 
 sudo systemctl restart paybitnex paybitnex-celery paybitnex-beat
 
@@ -97,3 +98,4 @@ sudo systemctl status paybitnex
 
 sudo journalctl -u paybitnex-celery -f
 sudo journalctl -u paybitnex -f
+
