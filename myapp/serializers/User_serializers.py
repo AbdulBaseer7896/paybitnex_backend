@@ -148,5 +148,20 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         from myapp.Utils.features import user_feature_map
         user_payload = UserBriefSerializer(self.user).data
         user_payload["features"] = user_feature_map(self.user)
+        # Include kyc_status so the sidebar can render the "Onboarding"
+        # nav item from the very first paint after login (no extra
+        # round trip needed). Staff users have no profile row, so the
+        # field stays null and the sidebar item simply doesn't show.
+        from myapp.Models.Profile_models import CustomerProfile
+        try:
+            profile = CustomerProfile.objects.get(user=self.user)
+            user_payload["kyc_status"] = profile.kyc_status
+            objs = profile.kyc_objections or []
+            user_payload["kyc_objection_count"] = (
+                len(objs) if isinstance(objs, list) else 0
+            )
+        except CustomerProfile.DoesNotExist:
+            user_payload["kyc_status"] = None
+            user_payload["kyc_objection_count"] = 0
         data["user"] = user_payload
         return data

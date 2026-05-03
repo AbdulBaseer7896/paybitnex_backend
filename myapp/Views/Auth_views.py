@@ -83,8 +83,21 @@ class MeView(AsyncAPIView):
         # exactly this reason). Then layer on the feature map using the
         # async helper so it's legal inside this async handler.
         from myapp.Utils.features import auser_feature_map
+        from myapp.Models.Profile_models import CustomerProfile
         data = UserSerializer(request.user).data
         data["features"] = await auser_feature_map(request.user)
+        # Include kyc_status (and a small object-count for any open
+        # objections) so the frontend sidebar can decide whether to
+        # show the "Onboarding" nav item without a second round trip.
+        # Staff users have no CustomerProfile, so this stays null.
+        try:
+            profile = await CustomerProfile.objects.aget(user=request.user)
+            data["kyc_status"] = profile.kyc_status
+            objs = profile.kyc_objections or []
+            data["kyc_objection_count"] = len(objs) if isinstance(objs, list) else 0
+        except CustomerProfile.DoesNotExist:
+            data["kyc_status"] = None
+            data["kyc_objection_count"] = 0
         return Response(data)
 
     async def patch(self, request):
@@ -120,8 +133,17 @@ class MeView(AsyncAPIView):
                 },
             )
         from myapp.Utils.features import auser_feature_map
+        from myapp.Models.Profile_models import CustomerProfile
         out = UserSerializer(user).data
         out["features"] = await auser_feature_map(user)
+        try:
+            profile = await CustomerProfile.objects.aget(user=user)
+            out["kyc_status"] = profile.kyc_status
+            objs = profile.kyc_objections or []
+            out["kyc_objection_count"] = len(objs) if isinstance(objs, list) else 0
+        except CustomerProfile.DoesNotExist:
+            out["kyc_status"] = None
+            out["kyc_objection_count"] = 0
         return Response(out)
 
 

@@ -17,7 +17,7 @@ Note from the reviewer:
 Sign in to your account, address each item above, and resubmit your
 profile. Our team will re-review within 24 hours during business days.
 
-  {{ frontend_url }}/app/profile
+  {{ frontend_url }}/app/onboarding
 
 If you believe this objection was raised in error, please reply to this
 email and our team will look into it.
