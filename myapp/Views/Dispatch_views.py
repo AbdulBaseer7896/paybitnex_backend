@@ -550,6 +550,13 @@ class DispatchViewSet(viewsets.ModelViewSet):
         expires_at = (timezone.now() + timedelta(days=expiry_days)
                       if expiry_days else None)
 
+        # Default the due date to 14 days from today when blank —
+        # same Net-14 convention as the regular invoice flow. Keeps
+        # generated invoices from going out with no deadline.
+        due_date_value = d.get("due_date")
+        if not due_date_value:
+            due_date_value = timezone.now().date() + timedelta(days=14)
+
         invoice = Invoice.objects.create(
             customer=request.user,
             client=client,
@@ -561,7 +568,7 @@ class DispatchViewSet(viewsets.ModelViewSet):
             tax_percent=tax_percent,
             tax_amount=tax_amt,
             total=total,
-            due_date=d.get("due_date"),
+            due_date=due_date_value,
             general_description=(
                 f"Dispatch fee for load #{dispatch.load_number or dispatch.id}"
             ),

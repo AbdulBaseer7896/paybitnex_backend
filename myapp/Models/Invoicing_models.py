@@ -299,10 +299,12 @@ class Invoice(models.Model):
     )
     # Which visual theme the cached PDF was rendered with. Stored as
     # a short string so new themes can be added without a migration
-    # (values are validated in the render helper). Default 'light'
-    # preserves the classic cream-paper look for older invoices.
+    # (values are validated in the render helper). Default 'dark'
+    # so newly-issued invoices match the modern dark UI customers see
+    # in the dashboard. (Prior to this default flip the legacy was
+    # 'light'; existing invoices keep whatever they were rendered as.)
     pdf_theme = models.CharField(
-        max_length=16, default="light", blank=True,
+        max_length=16, default="dark", blank=True,
     )
 
     # ── Payment receipt confirmation ──

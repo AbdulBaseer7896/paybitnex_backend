@@ -686,9 +686,12 @@ def _build_and_cache_pdf(invoice, theme=None):
     send) preserve the customer's last chosen theme.
     """
     from myapp.Utils.invoice_pdf import render_invoice_pdf
-    chosen = (theme or getattr(invoice, "pdf_theme", None) or "light").lower()
+    # Default to "dark" — matches the modern dashboard look that
+    # customers expect their invoices to mirror. The light theme is
+    # still available as an explicit choice in the preview toggle.
+    chosen = (theme or getattr(invoice, "pdf_theme", None) or "dark").lower()
     if chosen not in ("light", "dark"):
-        chosen = "light"
+        chosen = "dark"
     buf = render_invoice_pdf(invoice, theme=chosen)
     # Record the theme we used on the invoice itself; do this BEFORE
     # the .save() call so the field is persisted in the same write.
@@ -834,6 +837,16 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         expires_at = (timezone.now() + timedelta(days=expiry_days)
                       if expiry_days else None)
 
+        # ── Due date default ──
+        # If the customer didn't set a due date, we don't want to
+        # leave the invoice with no payment deadline (rendering
+        # blank in the PDF and feeling unprofessional). Default to
+        # 14 days out, which matches Net-14 — a common accounting
+        # convention. Customers can always edit afterwards.
+        due_date_value = d.get("due_date")
+        if not due_date_value:
+            due_date_value = timezone.now().date() + timedelta(days=14)
+
         # ── Totals ──
         line_items_data = d.pop("line_items", [])
         subtotal, tax_amt, total = _compute_totals(
@@ -858,7 +871,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             tax_percent=d.get("tax_percent") or Decimal("0"),
             tax_amount=tax_amt,
             total=total,
-            due_date=d.get("due_date"),
+            due_date=due_date_value,
             general_description=d.get("general_description", ""),
             notes=d.get("notes", ""),
             status=initial_status,
