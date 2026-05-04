@@ -33,6 +33,9 @@ from myapp.Models.InternalTx_models import (
     InternalTransaction,
     InternalTxSource, InternalTxDestination, InternalTxMethod,
 )
+from myapp.Models.Dispatch_models import (
+    DispatchCompany, DispatchDriver, Dispatch, DispatchStatus,
+)
 
 __all__ = [
     "User", "UserRole",
@@ -55,4 +58,6 @@ __all__ = [
     "Vendor", "USABankAccount", "CreditCard", "InternalPakistaniAccount",
     "InternalTransaction",
     "InternalTxSource", "InternalTxDestination", "InternalTxMethod",
+    # Dispatch module
+    "DispatchCompany", "DispatchDriver", "Dispatch", "DispatchStatus",
 ]

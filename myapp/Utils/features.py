@@ -29,6 +29,17 @@ FEATURES: Dict[str, dict] = {
         "group": "Billing",
         "default_enabled": False,
     },
+    "dispatch": {
+        "label": "Dispatch",
+        "description": (
+            "Manage trucking companies, drivers, and dispatched loads. "
+            "Track pickups, dropoffs, broker info, mileage, rates and "
+            "dispatch fees. Generate invoices for dispatch fees directly "
+            "from the load detail page."
+        ),
+        "group": "Operations",
+        "default_enabled": False,
+    },
     # Future examples — add here as the product grows. No migration needed.
     # "bulk_payments": {
     #     "label": "Bulk Payments",
