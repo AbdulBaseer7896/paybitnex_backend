@@ -1,14 +1,27 @@
 """
-Recomputes partner ledger entries using the corrected pool-based
+Recomputes partner ledger entries using the corrected DIRECT-share
 distribution formula.
 
-Background: The original `distribute_fee_for_payment` treated share_percentage
-as "percent of the fee" (multiplying by share/100). The corrected formula
-treats shares as slices of a *pool* — each partner gets
-`fee × (share / sum_of_all_active_shares)`, so partners collectively
-receive the entire fee when their shares sum to less than 100%.
+Background: an early version of `distribute_fee_for_payment`
+normalized partner shares against the sum of all active shares —
+so partners with 13% and 10% would split the entire fee 56.5/43.5
+between them, instead of receiving 13% and 10% of the fee with
+the remaining 77% going to the company.
 
-Usage:
+The corrected formula treats each `share_percentage` as a DIRECT
+percentage of the gross fee:
+
+    fee = $100. Partners A=13%, B=10%.
+    A receives $100 × 13% = $13.00
+    B receives $100 × 10% = $10.00
+    Company retains       = $77.00
+
+This matches the "PayBitnex's share of fee" card on the dashboard
+and is the formula `distribute_fee_for_payment` now uses for new
+payments.
+
+Run this command after deploying that fix to recompute every
+historical payment's ledger entries:
 
     # Dry run — show what WOULD change without touching the database.
     python manage.py recompute_partner_ledger --dry-run
@@ -19,12 +32,13 @@ Usage:
     # Restrict to payments completed on/after a date.
     python manage.py recompute_partner_ledger --since 2026-01-01
 
-Important: this deletes existing PartnerLedgerEntry rows for each affected
-payment and creates fresh ones using the current share_snapshot logic. It
-preserves created_at on the new entries where practical by using the
-payment's completed_at timestamp as the ledger entry's created_at.
+The command deletes existing PartnerLedgerEntry rows for each
+affected payment and creates fresh ones using the direct-share
+formula. It preserves the original share_snapshot values where
+they exist so historical "Partner A's share was 13%" labels stay
+correct.
 
-The command is idempotent — running it twice produces the same result.
+Idempotent — running it twice produces the same result.
 """
 from decimal import Decimal, ROUND_HALF_UP
 from django.core.management.base import BaseCommand
@@ -114,25 +128,19 @@ class Command(BaseCommand):
             if not pool_rows:
                 continue
 
-            pool = sum((pct for _, pct in pool_rows), start=Decimal("0"))
-            if pool <= 0:
-                continue
-
-            # Compute new allocations
-            last_idx = len(pool_rows) - 1
-            allocated_foreign = Decimal("0")
-            allocated_pkr = Decimal("0")
+            # Each share_snapshot is a percent value (e.g. 13 means 13%).
+            # Direct interpretation: a partner with share=13 gets 13%
+            # of the fee. The remainder stays with the company.
+            # (Earlier this code normalized shares to a "pool sum"
+            # so partners between them split 100% of the fee — that
+            # was inconsistent with the dashboard's "PayBitnex's
+            # share" card and with how `distribute_fee_for_payment`
+            # now works.)
             new_rows = []
-            for idx, (pid, pct) in enumerate(pool_rows):
-                if idx == last_idx:
-                    amt_foreign = _q(fee_foreign - allocated_foreign)
-                    amt_pkr = _q(fee_pkr - allocated_pkr)
-                else:
-                    frac = pct / pool
-                    amt_foreign = _q(fee_foreign * frac)
-                    amt_pkr = _q(fee_pkr * frac)
-                    allocated_foreign += amt_foreign
-                    allocated_pkr += amt_pkr
+            for pid, pct in pool_rows:
+                share_frac = pct / Decimal("100")
+                amt_foreign = _q(fee_foreign * share_frac)
+                amt_pkr = _q(fee_pkr * share_frac)
                 new_rows.append((pid, pct, amt_foreign, amt_pkr))
 
             # Compare against existing
@@ -153,9 +161,13 @@ class Command(BaseCommand):
 
             changed += 1
             if dry:
+                # Sum of share percentages across all eligible
+                # partners on this payment — the company keeps
+                # `100 - total_pct` percent of the fee.
+                total_pct = sum((pct for _, pct in pool_rows), Decimal("0"))
                 self.stdout.write(
                     f"  [DRY] {payment.reference}: fee={fee_foreign} {payment.currency_id} "
-                    f"pool={pool}% → {len(new_rows)} entries"
+                    f"partners total={total_pct}% → {len(new_rows)} entries"
                 )
                 for pid, pct, amt_f, amt_p in new_rows:
                     old = existing_map.get(pid)

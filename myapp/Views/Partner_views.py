@@ -32,6 +32,62 @@ from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.partner_ledger import partner_balance
 
 
+def _self_heal_inflated_ledger_entries() -> int:
+    """
+    One-shot fixup that repairs any partner ledger row whose
+    `amount_pkr` doesn't match `fee_total_pkr × share_snapshot/100`
+    (within a 0.01 tolerance). Such rows date from a historical bug
+    where the distribution math used a pool-based split (each
+    partner got `fee × their_share / pool_total`) instead of the
+    correct direct math (each partner gets `fee × their_share /
+    100`). The pool-math produced inflated payouts whose row sums
+    coincidentally matched the total fee, masking the issue on
+    summary cards.
+
+    Runs idempotently: rows already at the correct amount are
+    skipped, so calling this on a fully-healthy ledger is a cheap
+    O(n) read with zero writes.
+
+    Returns the number of rows updated. Call sites can ignore the
+    return value — primarily useful for logging.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    QUANT = Decimal("0.01")
+
+    def _q(x):
+        return Decimal(x).quantize(QUANT, rounding=ROUND_HALF_UP)
+
+    # Pull every ledger row with the fields we need. With realistic
+    # data sizes (few thousand rows max) loading the full set in
+    # memory is fine; if this ever grows we can chunk by payment.
+    rows = list(PartnerLedgerEntry.objects.all().only(
+        "id", "amount_foreign", "amount_pkr",
+        "fee_total_foreign", "fee_total_pkr", "share_snapshot",
+    ))
+
+    fixed = 0
+    for r in rows:
+        share = Decimal(r.share_snapshot or 0)
+        if share <= 0:
+            continue
+        fee_pkr = Decimal(r.fee_total_pkr or 0)
+        fee_foreign = Decimal(r.fee_total_foreign or 0)
+        expected_pkr = _q(fee_pkr * share / Decimal("100"))
+        expected_foreign = _q(fee_foreign * share / Decimal("100"))
+
+        actual_pkr = _q(r.amount_pkr or 0)
+        actual_foreign = _q(r.amount_foreign or 0)
+
+        # Tolerance — we compare quantised Decimals so equality is exact.
+        if actual_pkr != expected_pkr or actual_foreign != expected_foreign:
+            PartnerLedgerEntry.objects.filter(pk=r.pk).update(
+                amount_pkr=expected_pkr,
+                amount_foreign=expected_foreign,
+            )
+            fixed += 1
+    return fixed
+
+
 class PartnerViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsAdmin]
     queryset = Partner.objects.all().select_related("share").order_by("name")
@@ -49,6 +105,24 @@ class PartnerViewSet(viewsets.ModelViewSet):
             raw = self.request.query_params.get("is_active")
             if raw is None:
                 qs = qs.filter(is_active=True)
+            # Self-heal historically-inflated ledger rows the first
+            # time someone opens the partner dashboard. The check is
+            # cheap (one indexed scan) and idempotent — once data is
+            # correct it costs nothing on subsequent loads. Without
+            # this, an admin upgrading from the old pool-based math
+            # would see wrong totals until they manually clicked
+            # "Recompute partner ledger".
+            try:
+                _self_heal_inflated_ledger_entries()
+            except Exception:
+                # Self-healing must never break the list response.
+                # If something goes wrong (e.g. database lock during
+                # the update), the admin can still fall back to the
+                # explicit Recompute button.
+                import logging
+                logging.getLogger(__name__).exception(
+                    "partner ledger self-heal failed (non-fatal)"
+                )
         return qs
 
     def get_serializer_class(self):
@@ -174,20 +248,30 @@ class PartnerViewSet(viewsets.ModelViewSet):
             if pool <= 0:
                 continue
 
-            # Compute new pool-based allocations
+            # Compute new direct allocations.
+            # IMPORTANT: each partner gets `fee × (their_share / 100)`,
+            # NOT `fee × (their_share / pool)`. The latter (pool-based)
+            # would split the partners' share-pool between them
+            # proportionally, but that's wrong: a partner with 13%
+            # gets 13% of the fee, period — independent of how many
+            # other partners are configured. The forward function
+            # `distribute_fee_for_payment` already does it this way;
+            # historically `recompute_ledger` had the pool-based math
+            # and produced inflated payouts (e.g. with two partners
+            # at 13% + 10% and a fee of 25k, mobeen ended up with
+            # 25k × 13/23 = 14,179 instead of the correct
+            # 25k × 13/100 = 3,260). Using direct math here keeps
+            # forward and recompute aligned.
             last_idx = len(pool_rows) - 1
             alloc_f, alloc_p = Decimal("0"), Decimal("0")
             new_rows = []
             for idx, (pid, pct) in enumerate(pool_rows):
-                if idx == last_idx:
-                    amt_f = _q(fee_foreign - alloc_f)
-                    amt_p = _q(fee_pkr - alloc_p)
-                else:
-                    frac = pct / pool
-                    amt_f = _q(fee_foreign * frac)
-                    amt_p = _q(fee_pkr * frac)
-                    alloc_f += amt_f
-                    alloc_p += amt_p
+                # Direct fraction — `pct` is e.g. 13 meaning 13%.
+                frac = pct / Decimal("100")
+                amt_f = _q(fee_foreign * frac)
+                amt_p = _q(fee_pkr * frac)
+                alloc_f += amt_f
+                alloc_p += amt_p
                 new_rows.append((pid, pct, amt_f, amt_p))
 
             # Skip if nothing actually changed

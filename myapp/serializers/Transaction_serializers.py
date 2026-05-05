@@ -71,6 +71,29 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"currency": f"'{code}' is not a supported currency."}
             )
+
+        # Validate the payment method against the customer's allowed
+        # methods. Admins manage these via CustomerAllowedPaymentMethod;
+        # if a customer has any rows in that table, they MUST pick one
+        # of their granted methods. If they have zero rows, we fall
+        # back to allowing any active method (unrestricted access —
+        # matches the legacy behavior for customers who pre-date the
+        # allowed-methods feature). Staff users (admin/accountant)
+        # bypass this check entirely since they create transactions
+        # on behalf of customers via different flows.
+        request = self.context.get("request")
+        method = attrs.get("payment_method")
+        if request and method and getattr(request.user, "role", None) == "customer":
+            from myapp.Models.Invoicing_models import CustomerAllowedPaymentMethod
+            grant_codes = list(CustomerAllowedPaymentMethod.objects.filter(
+                customer=request.user,
+            ).values_list("payment_method_id", flat=True))
+            if grant_codes and method.code not in grant_codes:
+                raise serializers.ValidationError(
+                    {"payment_method":
+                        f"You're not approved to receive payments via "
+                        f"{method.label}. Please contact support."}
+                )
         return attrs
 
     def validate_external_transaction_id(self, value):

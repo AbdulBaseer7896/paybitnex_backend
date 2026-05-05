@@ -9,7 +9,7 @@ from myapp.Models.Auth_models import UserRole
 from myapp.Models.Core_models import SystemSetting
 from myapp.Models.Fee_models import CustomerFeeConfig
 from myapp.serializers.Fee_serializers import CustomerFeeConfigSerializer
-from myapp.Utils.permissions import IsAdmin
+from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 
 
 class CustomerFeeConfigViewSet(viewsets.ModelViewSet):
@@ -74,9 +74,17 @@ def my_effective_fee(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated, IsAdmin])
+@permission_classes([IsAuthenticated, IsAdminOrAccountant])
 def customer_effective_fee(request, user_id):
-    """Admin utility: get the effective fee % a specific customer pays."""
+    """
+    Get the effective fee % a specific customer pays.
+
+    Used by the accountant's "Apply Rate & Fee" form to prefill
+    the percentage field, AND by admin tooling. Both roles need
+    this — accountants are the ones primarily approving payments,
+    so requiring IsAdmin alone caused the form to silently fall
+    back to "Required" with no prefill.
+    """
     from myapp.Models.Auth_models import User
     try:
         user = User.objects.get(pk=user_id)
@@ -92,10 +100,21 @@ def customer_effective_fee(request, user_id):
         source = "customer_override"
         notes = cfg.notes or ""
 
+    pct_str = str(percentage)
     return Response({
         "user": str(user.id),
         "email": user.email,
-        "fee_percentage": str(percentage),
-        "source": source,
+        # Both keys returned for compatibility — `fee_percentage`
+        # is the legacy name, `effective_percentage` is what the
+        # accountant frontend ApplyRateFeeCard reads. Returning a
+        # number-typed value (not just str) so React's <Input
+        # type="number"> binds cleanly without a manual cast.
+        "fee_percentage": pct_str,
+        "effective_percentage": float(percentage),
+        # Frontend short-form check: it tests `source === 'override'`
+        # for the "Customer rate" badge label. Map our internal
+        # 'customer_override' → 'override' here so the UI label
+        # matches reality.
+        "source": "override" if source == "customer_override" else "default",
         "notes": notes,
     })

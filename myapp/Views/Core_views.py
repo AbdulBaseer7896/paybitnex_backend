@@ -41,6 +41,10 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
     - POST / PATCH / DELETE: admin only.
 
     `?active_only=true` filters to active methods (used by customer UI).
+    `?for_me=true` further restricts to methods the calling customer has
+    been granted via CustomerAllowedPaymentMethod. Combined with
+    active_only, this is what the customer's New Payment form should
+    use so they only see methods the admin enabled for them.
     """
     queryset = PaymentMethod.objects.all().order_by("sort_order", "label")
     serializer_class = PaymentMethodSerializer
@@ -56,6 +60,20 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         if self.request.query_params.get("active_only") in ("1", "true", "True", "yes"):
             qs = qs.filter(is_active=True)
+        # for_me — restrict to the current customer's allowed-methods
+        # set. Staff users (admin / accountant) see the full list
+        # since they don't have customer grants. We import here to
+        # avoid a circular import with the invoicing models.
+        if self.request.query_params.get("for_me") in ("1", "true", "True", "yes"):
+            user = self.request.user
+            if getattr(user, "role", None) == "customer":
+                from myapp.Models.Invoicing_models import CustomerAllowedPaymentMethod
+                allowed_codes = set(CustomerAllowedPaymentMethod.objects.filter(
+                    customer=user,
+                ).values_list("payment_method_id", flat=True))
+                qs = qs.filter(code__in=allowed_codes)
+            # else: admin/accountant — full list (their work flows
+            # need to see every method to populate forms).
         return qs
 
 

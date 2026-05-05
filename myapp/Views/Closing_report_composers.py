@@ -26,6 +26,32 @@ def _short(value, code=None):
     return f"{v:,.2f}"
 
 
+def _partner_payouts_from_pool(total_fees_pkr):
+    """
+    Compute partner payouts from `fees × active_pool/100`.
+
+    We deliberately don't sum the ledger rollup here because the
+    rollup can be polluted by historical entries written under
+    older / inconsistent distribution math. Computing from the
+    formula keeps this row consistent with `net_profit_pkr` (which
+    uses the same formula in `_compute_net_profit`), and means the
+    profit table always reads as
+        Fees − Payouts − Expenses = Net profit
+    rather than a confusing inequality where the displayed payout
+    doesn't match what was deducted from net profit.
+    """
+    from myapp.Models.Partner_models import Partner
+    pool = Decimal("0")
+    for p in Partner.objects.filter(is_active=True).select_related("share"):
+        share = getattr(p, "share", None)
+        if share and share.percentage and share.percentage > 0:
+            pool += Decimal(str(share.percentage))
+    if pool > Decimal("100"):
+        pool = Decimal("100")
+    fees = Decimal(str(total_fees_pkr or 0))
+    return (fees * pool / Decimal("100")).quantize(Decimal("0.01"))
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Shared profit-analysis section (gross vs net side-by-side with breakdown)
 # ─────────────────────────────────────────────────────────────────────
@@ -129,9 +155,8 @@ def compose_profit_analysis(report):
             "align": ["left", "right", "right"],
         })
         sections.append({"type": "paragraph", "text":
-            "<i>Only PKR-denominated expenses are subtracted from the net "
-            "profit above. Non-PKR expenses would need to be converted "
-            "at the prevailing rate on the day of spend to be included.</i>"})
+            "<i>All expenses are converted to PKR (using the current rate "
+            "for non-PKR currencies) and subtracted from net profit above.</i>"})
 
     # Partner payout detail — who got paid, how much, and their share
     if partner_rollup:
@@ -180,29 +205,39 @@ def compose_simple_general(report):
         {"label": "Fees collected", "value": _short(totals["total_fees_pkr"]),
          "sub": "company revenue"},
         {"label": "Net profit", "value": _short(totals["net_profit_pkr"]),
-         "sub": "after partners & PKR expenses"},
+         "sub": "after partners & all expenses"},
     ]})
 
     sections.append({"type": "heading", "text": "Profit calculation"})
     sections.append({"type": "paragraph", "text":
         "Net profit is derived as: "
-        "<b>Fees collected − Partner payouts − PKR expenses</b>. "
-        "Only <b>completed</b> transactions contribute to profit (money we've "
-        "actually disbursed to customers)."
+        "<b>Fees collected − Partner payouts − Expenses (PKR equivalent)</b>. "
+        "Foreign-currency expenses are converted to PKR at the current rate "
+        "before subtraction. Only <b>completed</b> transactions contribute to "
+        "profit (money we've actually disbursed to customers)."
     })
 
-    partner_total = sum(
-        (Decimal(p["total_pkr"] or 0) for p in report["partner_rollup"]),
-        Decimal(0),
-    )
-    expense_pkr = Decimal(report["expense_totals"]["total_pkr_only"] or 0)
+    partner_total = _partner_payouts_from_pool(totals["total_fees_pkr"])
+    # Use the PKR-equivalent of ALL expenses (PKR + foreign
+    # converted at current rate). The earlier `total_pkr_only`
+    # silently dropped USD/EUR expenses from the displayed row,
+    # so users saw "Less: PKR expenses (0.00)" while the Net
+    # profit total below was actually computed including those
+    # foreign expenses — making the line items not add up to
+    # the bottom line. Using `total_pkr_equivalent` keeps the
+    # display consistent with the math.
+    expense_pkr = Decimal(report["expense_totals"].get("total_pkr_equivalent")
+                          or report["expense_totals"]["total_pkr_only"] or 0)
 
     sections.append({"type": "table",
         "headers": ["Line item", "Amount (PKR)"],
         "rows": [
             ["Fees collected",               _short(totals["total_fees_pkr"])],
             ["Less: Partner payouts",        f"({_short(partner_total)})"],
-            ["Less: PKR expenses",           f"({_short(expense_pkr)})"],
+            # Renamed from "PKR expenses" → "Expenses (PKR equiv.)"
+            # so it's clear the line includes foreign-currency
+            # spend converted to PKR at current rates.
+            ["Less: Expenses (PKR equiv.)",  f"({_short(expense_pkr)})"],
         ],
         "total_row": ["Net profit (PKR)", _short(totals["net_profit_pkr"])],
         "col_widths": [4.2, 2.6],
@@ -259,11 +294,31 @@ def compose_general_full(report):
                          "text": "<i>No transactions in this period.</i>"})
 
     # Profit calculation with partners + expenses summary
-    partner_total = sum(
-        (Decimal(p["total_pkr"] or 0) for p in report["partner_rollup"]),
-        Decimal(0),
+    partner_total = _partner_payouts_from_pool(totals["total_fees_pkr"])
+    # Show ALL expenses (PKR + foreign converted to PKR equivalent)
+    # in the "Less" line so the displayed math reconciles to
+    # `Net profit`. Previously this used `total_pkr_only` while
+    # the Net profit line subtracted `total_pkr_equivalent`,
+    # which silently hid USD/EUR expenses from the breakdown
+    # even though they were factored into the bottom-line total.
+    # Using `total_pkr_equivalent` here means the column adds up.
+    expense_pkr = Decimal(
+        report["expense_totals"].get("total_pkr_equivalent")
+        or report["expense_totals"].get("total_pkr_only")
+        or 0
     )
-    expense_pkr = Decimal(report["expense_totals"]["total_pkr_only"] or 0)
+    # If there are foreign-currency expenses included in the
+    # equivalent number, label the line accordingly so the reader
+    # knows what's being subtracted.
+    has_foreign_exp = any(
+        (r.get("currency") != "PKR")
+        and Decimal(r.get("total") or 0) > 0
+        for r in report["expense_totals"].get("by_currency", [])
+    )
+    expense_label = (
+        "Less: Expenses (PKR equiv.)" if has_foreign_exp
+        else "Less: PKR expenses"
+    )
 
     sections.append({"type": "heading", "text": "Profit calculation"})
     sections.append({"type": "table",
@@ -271,7 +326,7 @@ def compose_general_full(report):
         "rows": [
             ["Fees collected",        _short(totals["total_fees_pkr"])],
             ["Less: Partner payouts", f"({_short(partner_total)})"],
-            ["Less: PKR expenses",    f"({_short(expense_pkr)})"],
+            [expense_label,           f"({_short(expense_pkr)})"],
         ],
         "total_row": ["Net profit (PKR)", _short(totals["net_profit_pkr"])],
         "col_widths": [4.2, 2.6],
@@ -419,29 +474,56 @@ def compose_expenses(report):
     sections = []
 
     sections.append({"type": "paragraph", "text":
-        "This report summarises company expenses for the selected date range, "
-        "grouped by currency. PKR expenses are subtracted from net profit; "
-        "foreign-currency expenses are listed separately and <b>not</b> "
-        "converted in this report."
+        "This report summarises company expenses for the selected date "
+        "range, grouped by currency. All expenses are converted to PKR "
+        "(using the current rate for non-PKR currencies) when subtracted "
+        "from net profit. The "
+        "<b>By currency</b> table below shows each currency's raw total "
+        "alongside the PKR equivalent we used in the profit math."
     })
+
+    # Use the canonical "total_pkr_equivalent" for the headline
+    # number — that's what's actually deducted from net profit. The
+    # legacy "total_pkr_only" hid USD/EUR/etc expenses, making this
+    # report read "PKR total: 0.00" even when foreign expenses were
+    # present (and being deducted from profit elsewhere). Falling
+    # back to PKR-only keeps older snapshots renderable.
+    pkr_equiv = exp.get("total_pkr_equivalent") or exp.get("total_pkr_only") or 0
+    pkr_only = exp.get("total_pkr_only") or 0
 
     sections.append({"type": "heading", "text": "Summary"})
     sections.append({"type": "kpi_grid", "items": [
         {"label": "Total entries", "value": str(exp["count"])},
-        {"label": "PKR total", "value": _short(exp["total_pkr_only"]),
+        {"label": "All-currency total (PKR equiv.)",
+         "value": _short(pkr_equiv),
          "sub": "subtracted from profit"},
+        {"label": "PKR-only subtotal",
+         "value": _short(pkr_only),
+         "sub": "of the above"},
     ]})
 
     sections.append({"type": "heading", "text": "By currency"})
     if exp["by_currency"]:
+        # Show both the native total AND the PKR-equivalent so the
+        # reader can verify the conversion. by_currency rows now
+        # carry `total_pkr_equiv` (added when the report was built);
+        # fall back to '—' when missing (legacy snapshots).
+        rows = []
+        for c in exp["by_currency"]:
+            native_total = _short(c["total"])
+            equiv = c.get("total_pkr_equiv")
+            equiv_str = _short(equiv) if equiv not in (None, "", "None") else "—"
+            rows.append([
+                c["currency"],
+                str(c["count"]),
+                native_total,
+                equiv_str,
+            ])
         sections.append({"type": "table",
-            "headers": ["Currency", "Entries", "Total"],
-            "rows": [
-                [c["currency"], str(c["count"]), _short(c["total"])]
-                for c in exp["by_currency"]
-            ],
-            "col_widths": [1.5, 1.2, 4.1],
-            "align": [None, "right", "right"],
+            "headers": ["Currency", "Entries", "Native total", "PKR equiv."],
+            "rows": rows,
+            "col_widths": [1.2, 1.0, 2.3, 2.3],
+            "align": [None, "right", "right", "right"],
         })
     else:
         sections.append({"type": "paragraph",

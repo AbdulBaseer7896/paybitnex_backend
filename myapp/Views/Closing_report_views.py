@@ -268,19 +268,81 @@ def _compute_report(filters):
                 .annotate(total=Sum("amount"), count=Count("id"))
                 .order_by("currency_id")
     )
+    # Convert all expenses (PKR + foreign) into a single PKR total
+    # using the current ExchangeRate.rate_to_pkr per currency. This
+    # is what gets subtracted from fees in the net-profit line so
+    # USD/EUR/etc expenses don't silently disappear from the math
+    # the way they did when only PKR expenses were considered.
+    # PKR rate is implicit (1:1) — for any other code we look up
+    # the configured rate; if a row is missing for a currency we
+    # log it and skip rather than crash, since adding a missing
+    # rate row is an admin-fixable issue.
+    # Build a currency→PKR rate map. Static `ExchangeRate` rows take
+    # priority (admin-managed). Missing currencies fall back to the
+    # most recent transaction-level `exchange_rate` we've ever
+    # recorded for that currency — better than silently dropping
+    # USD expenses just because no admin remembered to add an
+    # ExchangeRate row.
+    from myapp.Models.Rate_models import ExchangeRate
+    rate_map = {
+        r.currency_id: Decimal(r.rate_to_pkr)
+        for r in ExchangeRate.objects.all()
+    }
+    rate_map["PKR"] = Decimal("1")
+
+    # Discover currencies that appear in expenses but DON'T have an
+    # ExchangeRate row. For each, look up the most recent payment in
+    # that currency and use its exchange rate as a sane fallback.
+    # This keeps foreign-currency expenses visible in the profit
+    # breakdown even when the rate table is incomplete.
+    expense_currency_ids = {r["currency_id"] for r in expense_by_currency}
+    missing = expense_currency_ids - set(rate_map.keys())
+    if missing:
+        for ccy in missing:
+            recent = (
+                IncomingPayment.objects
+                .filter(currency_id=ccy)
+                .exclude(exchange_rate__isnull=True)
+                .order_by("-created_at")
+                .values_list("exchange_rate", flat=True)
+                .first()
+            )
+            if recent:
+                rate_map[ccy] = Decimal(recent)
+
+    total_expense_pkr_all = Decimal("0")
+    expense_by_currency_with_pkr = []
+    for r in expense_by_currency:
+        ccy = r["currency_id"]
+        amt = Decimal(r["total"] or 0)
+        rate = rate_map.get(ccy)
+        pkr_equiv = (amt * rate) if rate is not None else None
+        if pkr_equiv is not None:
+            total_expense_pkr_all += pkr_equiv
+        expense_by_currency_with_pkr.append({
+            "currency": ccy,
+            "total": str(amt),
+            "count": r["count"],
+            # PKR equivalent at the current configured rate; null if
+            # no rate is set for that currency.
+            "total_pkr_equiv": str(pkr_equiv) if pkr_equiv is not None else None,
+        })
+
     expense_totals = {
         "count": expenses.count(),
-        "by_currency": [
-            {"currency": r["currency_id"], "total": str(r["total"] or 0),
-             "count": r["count"]}
-            for r in expense_by_currency
-        ],
-        # Rough PKR-only expense (for net-profit calculation). If expenses
-        # are in other currencies, show them separately in the UI.
+        "by_currency": expense_by_currency_with_pkr,
+        # PKR-only subtotal (kept for back-compat with the
+        # individual-currency breakdown card).
         "total_pkr_only": str(
             expenses.filter(currency_id="PKR").aggregate(
                 total=Sum("amount"))["total"] or 0
         ),
+        # New: total of ALL expenses (PKR + foreign converted at
+        # current rate). This is the authoritative number used in
+        # the net-profit formula. The composer's "Less: Expenses"
+        # line uses this so foreign-currency expenses no longer
+        # silently disappear.
+        "total_pkr_equivalent": str(total_expense_pkr_all),
     }
 
     # ── Partner share breakdown ──────────────────────────────────────
@@ -312,11 +374,12 @@ def _compute_report(filters):
             "total_received_pkr": str(totals_row["total_received_pkr"] or 0),
             "total_fees_pkr": str(totals_row["total_fees_pkr"] or 0),
             "total_net_pkr": str(totals_row["total_net_pkr"] or 0),
-            # Net profit = fees collected - partner payouts - PKR expenses
+            # Net profit = fees collected - partner payouts - all expenses
+            # (PKR + foreign converted at current rate).
             "net_profit_pkr": _compute_net_profit(
                 totals_row["total_fees_pkr"],
                 partner_rollup,
-                expense_totals["total_pkr_only"],
+                expense_totals["total_pkr_equivalent"],
             ),
         },
         "customer_rollup": customer_rollup,
@@ -547,6 +610,15 @@ def closing_report_pdf(request):
 
     builder = PDFReportBuilder(
         title=title, subtitle=subtitle, metadata=metadata,
+        # Header band reflects the report type so each PDF
+        # self-identifies — comprehensive ("CLOSING REPORT"),
+        # expenses ("EXPENSES REPORT"), partners ("PARTNERS
+        # REPORT"). Falls back to the generic label otherwise.
+        header_label={
+            "comprehensive": "CLOSING REPORT",
+            "expenses":      "EXPENSES REPORT",
+            "partners":      "PARTNERS REPORT",
+        }.get(report_type, "CLOSING REPORT"),
     )
     pdf_bytes = builder.build(sections)
 

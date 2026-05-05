@@ -24,31 +24,33 @@ def distribute_fee_for_payment(payment) -> list:
     Create PartnerLedgerEntry rows for the given IncomingPayment.
     Returns the list of created entries.
 
-    Distribution model: the fee IS the profit pool, and the partners SHARE
-    that entire pool pro-rata by their share_percentage.
+    Distribution model: each partner's `share.percentage` is a DIRECT
+    percentage of the gross fee. The remainder stays with the company.
 
-        Example: $100 payment, 10% fee = $10 profit.
-                 Partners A=5%, B=4%, C=3% (pool = 12%).
-                 A receives $10 × (5/12) = $4.17
-                 B receives $10 × (4/12) = $3.33
-                 C receives $10 × (3/12) = $2.50
-                 Total distributed = $10.00 (entire fee).
+        Example: $100 payment, 10% fee = $10 fee.
+                 Partners A=5%, B=4%, C=3%.
+                 A receives $10 × 5%  = $0.50
+                 B receives $10 × 4%  = $0.40
+                 C receives $10 × 3%  = $0.30
+                 Partners total       = $1.20  (12% of fee)
+                 PayBitnex retains    = $8.80  (88% of fee)
 
-    Historically this code multiplied by `share_percentage / 100`, which
-    interpreted shares as "percent of the fee" rather than "percent of the
-    profit pool". For the example above that incorrectly produced
-    A=$0.50, B=$0.40, C=$0.30 — leaving $8.80 of the fee unaccounted for.
-    The pool-based calculation here is the business rule Bitnex confirmed.
+    The dashboard's "Partners' share of fee: 12% / PayBitnex's share: 88%"
+    cards reflect this same direct interpretation. The earlier
+    pool-based math (where partners split the entire fee pro-rata
+    by their relative shares) was inconsistent with the dashboard
+    and made the company's retained share invisible — that's been
+    corrected.
 
-    Idempotent: if entries already exist for this payment, does nothing.
+    Idempotent: if entries already exist for this payment, does
+    nothing.
 
-    The `share_snapshot` still records each partner's raw share_percentage
-    at the time of the payment, so reports can display "Partner A's share
-    was 5%" even after shares are later re-balanced. The stored snapshot
-    is NOT used as a direct multiplier on the fee during reporting — the
-    snapshot is purely informational; the authoritative payout is in
-    `amount_foreign` / `amount_pkr` which were computed at distribution
-    time using the pool-based math.
+    The `share_snapshot` records each partner's raw share_percentage
+    at the time of the payment, so reports can display "Partner A's
+    share was 5%" even after shares are later re-balanced. The
+    snapshot is purely informational; the authoritative payout
+    amounts live in `amount_foreign` / `amount_pkr` which were
+    computed at distribution time.
     """
     from myapp.Models.Partner_models import Partner, PartnerLedgerEntry
 
@@ -69,46 +71,33 @@ def distribute_fee_for_payment(payment) -> list:
             .select_related("share")
         )
 
-        # First pass: collect every active partner with a positive share,
-        # and compute the total "pool" (sum of all active shares). If no
-        # partners have a share we short-circuit — the company retains
-        # the entire fee and there are no ledger entries to create.
+        # Collect every active partner with a positive share. We
+        # also sum their percentages purely for the log line — the
+        # math no longer treats this as a "pool" to split between.
         eligible = []
-        pool = Decimal("0")
+        total_pct = Decimal("0")
         for p in partners:
             share = getattr(p, "share", None)
             if share is None or share.percentage <= 0:
                 continue
             eligible.append((p, Decimal(share.percentage)))
-            pool += Decimal(share.percentage)
+            total_pct += Decimal(share.percentage)
 
-        if not eligible or pool <= 0:
+        if not eligible:
             log.info(
                 "No eligible partners for %s — full fee retained by PayBitnex.",
                 payment.reference,
             )
             return []
 
-        # Second pass: allocate each partner's pro-rata slice of the fee
-        # relative to the pool. We track the running total and assign the
-        # remainder to the last partner, which prevents cumulative rounding
-        # error from leaving a few paisa unaccounted for (or over-allocated).
+        # Allocate each partner's direct slice. share_pct is a
+        # number like 13 (meaning 13%), so we divide by 100 to
+        # convert to a fraction of the fee.
         created = []
-        allocated_foreign = Decimal("0")
-        allocated_pkr = Decimal("0")
-        last_idx = len(eligible) - 1
-
-        for i, (p, share_pct) in enumerate(eligible):
-            if i == last_idx:
-                # Final partner takes whatever's left so the sum is exact.
-                amt_foreign = _q(fee_foreign - allocated_foreign)
-                amt_pkr = _q(fee_pkr - allocated_pkr)
-            else:
-                share_frac = share_pct / pool
-                amt_foreign = _q(fee_foreign * share_frac)
-                amt_pkr = _q(fee_pkr * share_frac)
-                allocated_foreign += amt_foreign
-                allocated_pkr += amt_pkr
+        for p, share_pct in eligible:
+            share_frac = share_pct / Decimal("100")
+            amt_foreign = _q(fee_foreign * share_frac)
+            amt_pkr = _q(fee_pkr * share_frac)
 
             entry = PartnerLedgerEntry.objects.create(
                 partner=p,
@@ -123,8 +112,10 @@ def distribute_fee_for_payment(payment) -> list:
             created.append(entry)
 
         log.info(
-            "Created %d partner ledger entries for %s (fee=%s %s, pool=%s%%)",
-            len(created), payment.reference, fee_foreign, payment.currency_id, pool,
+            "Created %d partner ledger entries for %s "
+            "(fee=%s %s, partners total=%s%%)",
+            len(created), payment.reference, fee_foreign,
+            payment.currency_id, total_pct,
         )
         return created
 

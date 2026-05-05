@@ -102,12 +102,19 @@ class PDFReportBuilder:
     """
 
     def __init__(self, *, title, subtitle="", metadata=None,
-                 company_name="PayBitnex", company_tagline="Global Payments"):
+                 company_name="PayBitnex", company_tagline="Global Payments",
+                 header_label="CLOSING REPORT"):
         self.title = title
         self.subtitle = subtitle
         self.metadata = metadata or {}
         self.company_name = company_name
         self.company_tagline = company_tagline
+        # Top-right header label (e.g. "CLOSING REPORT" for the
+        # admin closing pack, "TRANSACTION INVOICE" for a single-
+        # customer transaction PDF, "EXPENSES REPORT" for the
+        # expenses pack). Defaults to the closing-report wording
+        # to preserve back-compat for callers that didn't set it.
+        self.header_label = header_label
         self.styles = _build_styles()
 
     # ── Header / footer drawn on every page ──────────────────────────
@@ -127,10 +134,10 @@ class PDFReportBuilder:
         canv.setFont("Helvetica", 8)
         canv.drawString(15 * mm, height - 15.5 * mm, self.company_tagline)
 
-        # Right: small label
+        # Right: small label (configurable per report type)
         canv.setFillColor(BRAND_LITE)
         canv.setFont("Helvetica", 8)
-        label = "CLOSING REPORT"
+        label = self.header_label
         tw = canv.stringWidth(label, "Helvetica", 8)
         canv.drawString(width - 15 * mm - tw, height - 11 * mm, label)
 

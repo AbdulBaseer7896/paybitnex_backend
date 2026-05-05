@@ -93,10 +93,23 @@ def single_invoice_pdf(request, payment_id):
         "Generated On": datetime.now().strftime("%b %d, %Y at %H:%M"),
     }
 
+    # Pull the customer name once so we can use it both in the
+    # header band (instead of "CLOSING REPORT") and the filename.
+    customer_name = (
+        getattr(payment.customer, "full_name", None)
+        or getattr(payment.customer, "email", "").split("@")[0]
+        or "Customer"
+    )
+
     builder = PDFReportBuilder(
         title="Transaction Invoice",
         subtitle=_subtitle_single(payment),
         metadata=metadata,
+        # Per-customer document — the header band should read with
+        # the customer's name + "INVOICE" rather than the generic
+        # "CLOSING REPORT" we use for company-level reports. Cap
+        # at ~36 chars so long names don't crowd the brand mark.
+        header_label=f"{customer_name.upper()[:36]} — INVOICE",
     )
     pdf_bytes = builder.build(sections)
 
@@ -150,6 +163,14 @@ def bulk_invoice_pdf(request):
         title="Bulk Transaction Invoice",
         subtitle=_subtitle_bulk(payments),
         metadata=metadata,
+        # If every transaction in the bulk belongs to one customer,
+        # show that customer's name in the header band; otherwise
+        # generic "TRANSACTIONS — INVOICE".
+        header_label=(
+            f"{(payments[0].customer.full_name or payments[0].customer.email).upper()[:36]} — INVOICE"
+            if len(customers) == 1
+            else "TRANSACTIONS — INVOICE"
+        ),
     )
     pdf_bytes = builder.build(sections)
 
