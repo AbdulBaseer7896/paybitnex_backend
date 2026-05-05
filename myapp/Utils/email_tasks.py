@@ -43,9 +43,12 @@ don't want to leak SMTP/recipient details back to the caller.
 """
 import asyncio
 import logging
+import sys
 import threading
 from email.message import EmailMessage
 from typing import Dict, Iterable, List, Optional
+
+import aiosmtplib
 
 from django.conf import settings
 from django.template.loader import render_to_string
@@ -95,10 +98,6 @@ async def _send_via_aiosmtplib(
     settings (which in turn read .env). Caller's responsibility to
     pass cleaned recipient lists.
     """
-    # Lazy import so test environments and any future "console-only"
-    # backends don't pay the import cost.
-    import aiosmtplib
-
     msg = EmailMessage()
     msg["From"] = _format_from()
     msg["To"] = ", ".join(to)
@@ -219,7 +218,7 @@ def _dispatch_sync(payload: dict) -> None:
         # specifically asked for and gives us cleaner async-mode
         # semantics + better diagnostics on TLS failures.
         if backend.endswith("smtp.EmailBackend") and settings.EMAIL_HOST:
-            asyncio.run(_send_via_aiosmtplib(**payload))
+            _run_async_send(payload)
         else:
             # Console / Anymail / locmem path. Drop attachments here —
             # those backends don't always support them, and the OTP
@@ -231,6 +230,20 @@ def _dispatch_sync(payload: dict) -> None:
             "email sent: subject=%r to=%s cc=%s",
             payload["subject"], payload["to"], payload["cc"],
         )
+    except aiosmtplib.errors.SMTPAuthenticationError as e:
+        # Surface a clear, actionable hint for the most common cause:
+        # the SMTP credentials in settings are wrong / expired. Gmail
+        # in particular requires an App Password (2FA must be enabled),
+        # and silently rejects regular account passwords with a 535.
+        # We keep the original traceback for full diagnostics, but
+        # prepend a one-line summary so it's obvious at a glance.
+        log.error(
+            "email auth rejected by SMTP server (subject=%r to=%s): %s. "
+            "Check EMAIL_HOST_USER / EMAIL_HOST_PASSWORD in settings — "
+            "Gmail requires an App Password (Account → Security → App "
+            "passwords) when 2-Step Verification is enabled.",
+            payload.get("subject"), payload.get("to"), e,
+        )
     except Exception:
         # Never raise back into the request thread — but keep a
         # full stack trace in the logs so we can diagnose later.
@@ -238,6 +251,36 @@ def _dispatch_sync(payload: dict) -> None:
             "email send failed: subject=%r to=%s",
             payload.get("subject"), payload.get("to"),
         )
+
+
+def _run_async_send(payload: dict) -> None:
+    """
+    Drive the aiosmtplib coroutine on a dedicated event loop and
+    tear it down cleanly.
+
+    Why not just `asyncio.run`? On Windows the default
+    ProactorEventLoop sometimes fires `_ProactorBasePipeTransport.__del__`
+    AFTER the loop has been closed, raising a noisy
+    "RuntimeError: Event loop is closed" in the GC pass. Building
+    the loop ourselves and shutting down async generators / closing
+    transports before close() avoids that. On non-Windows platforms
+    this is functionally identical to `asyncio.run`.
+    """
+    # On Windows, prefer the SelectorEventLoop for our outbound SMTP —
+    # it doesn't have the proactor's __del__-after-close bug and is
+    # plenty fast for the ~kilobyte payload we're shipping.
+    if sys.platform == "win32":
+        loop = asyncio.SelectorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_send_via_aiosmtplib(**payload))
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
 
 
 # ---------------------------------------------------------------------

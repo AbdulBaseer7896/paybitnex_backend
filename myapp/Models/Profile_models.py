@@ -69,6 +69,23 @@ class CustomerProfile(models.Model):
         help_text="Set when KYC moves to APPROVED. Profile becomes locked after this.",
     )
 
+    # ── Resubmission diff tracking ──
+    # When a customer responds to objections by PATCHing
+    # /accounts/profile/, we record which fields they actually
+    # changed (as a list of field names: e.g. ['full_name',
+    # 'selfie']) plus when they did it. The admin / accountant
+    # review modal uses this to highlight exactly what's new in
+    # the resubmission, so reviewers don't have to manually diff
+    # the old vs new submission. Reset to [] / null when the
+    # profile is approved or when fresh objections are raised
+    # (the next round starts clean).
+    kyc_last_resubmit_at = models.DateTimeField(null=True, blank=True)
+    kyc_last_resubmit_changes = models.JSONField(
+        default=list, blank=True,
+        help_text="List of field names the customer changed in their "
+                  "most recent resubmission (e.g. ['full_name', 'selfie']).",
+    )
+
     # Customer scoring / rating — updated by signals on transaction completion.
     RATING_NEW = "new"
     RATING_BRONZE = "bronze"

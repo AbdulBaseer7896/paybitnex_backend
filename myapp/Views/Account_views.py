@@ -220,6 +220,29 @@ class CustomerProfileView(AsyncAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # ── Capture pre-PATCH state for the resubmission diff ──
+        # We snapshot the relevant fields BEFORE the serializer
+        # saves the new values, then compare each field to detect
+        # what the customer actually changed. The reviewer needs
+        # this on the next round so they can spot-check just the
+        # updated fields rather than re-reviewing everything.
+        # File fields are detected by checking whether the request
+        # included a multipart upload for that key — that's the
+        # only reliable signal for "the customer replaced this
+        # photo" since the model field always points to *some*
+        # object regardless.
+        was_resubmission = profile.kyc_status in (
+            CustomerProfile.KYC_OBJECTIONS,
+            CustomerProfile.KYC_REJECTED,
+        )
+        pre_state = {
+            "full_name":   profile.full_name or "",
+            "phone":       profile.phone or "",
+            "cnic_number": profile.cnic_number or "",
+            "address":     profile.address or "",
+            "city":        profile.city or "",
+        }
+
         s = CustomerProfileSerializer(
             profile, data=request.data, partial=True,
             context={"request": request},
@@ -228,19 +251,39 @@ class CustomerProfileView(AsyncAPIView):
         profile = await async_save(s)
 
         # If the customer was responding to objections, flip status to RESUBMITTED.
-        if profile.kyc_status in (
-            CustomerProfile.KYC_OBJECTIONS,
-            CustomerProfile.KYC_REJECTED,
-        ):
+        if was_resubmission:
+            # Compute the diff between pre- and post-PATCH state
+            # for the simple text fields. For files, look at the
+            # raw request — if a multipart field is present, the
+            # customer uploaded a new photo regardless of whether
+            # its filename matches the old one.
+            changed = []
+            for field, before in pre_state.items():
+                after = getattr(profile, field, None) or ""
+                if before != after:
+                    changed.append(field)
+            for file_field in ("selfie", "cnic_front", "cnic_back"):
+                if file_field in request.FILES:
+                    changed.append(file_field)
+
             profile.kyc_status = CustomerProfile.KYC_RESUBMITTED
-            await profile.asave(update_fields=["kyc_status", "updated_at"])
+            profile.kyc_last_resubmit_at = timezone.now()
+            profile.kyc_last_resubmit_changes = changed
+            await profile.asave(update_fields=[
+                "kyc_status", "kyc_last_resubmit_at",
+                "kyc_last_resubmit_changes", "updated_at",
+            ])
             await AuditLog.arecord(
                 user=request.user, action=AuditLog.ACTION_UPDATE, target=profile,
                 description=(
                     f"Customer resubmitted KYC for {profile.full_name} "
-                    f"(round {profile.kyc_objection_round})"
+                    f"(round {profile.kyc_objection_round}) — "
+                    f"changed: {', '.join(changed) or 'no fields detected'}"
                 ),
-                after={"kyc_status": profile.kyc_status},
+                after={
+                    "kyc_status": profile.kyc_status,
+                    "kyc_last_resubmit_changes": changed,
+                },
             )
 
         return Response(
@@ -306,7 +349,16 @@ class KYCReviewView(AsyncAPIView):
         if new_status == CustomerProfile.KYC_APPROVED:
             profile.kyc_approved_at = timezone.now()
             profile.kyc_objections = []
-            update_fields += ["kyc_approved_at", "kyc_objections"]
+            # Clear the resubmit diff — once approved, the
+            # "what changed last round" highlights are no longer
+            # relevant. Keeps the data tidy for any subsequent
+            # admin views.
+            profile.kyc_last_resubmit_changes = []
+            profile.kyc_last_resubmit_at = None
+            update_fields += [
+                "kyc_approved_at", "kyc_objections",
+                "kyc_last_resubmit_changes", "kyc_last_resubmit_at",
+            ]
 
         await profile.asave(update_fields=update_fields)
         await AuditLog.arecord(
@@ -384,9 +436,17 @@ class KYCRaiseObjectionsView(AsyncAPIView):
         profile.kyc_notes = s.validated_data.get("notes", profile.kyc_notes or "")
         profile.kyc_reviewed_by = request.user
         profile.kyc_reviewed_at = now
+        # Reset the resubmit diff — the customer is starting a new
+        # round of objections, so any previously-recorded "what
+        # changed last time" is now stale and would be misleading
+        # if the customer never updates anything before the next
+        # admin review.
+        profile.kyc_last_resubmit_changes = []
+        profile.kyc_last_resubmit_at = None
         await profile.asave(update_fields=[
             "kyc_objections", "kyc_objection_round", "kyc_status",
             "kyc_notes", "kyc_reviewed_by", "kyc_reviewed_at",
+            "kyc_last_resubmit_changes", "kyc_last_resubmit_at",
         ])
 
         await AuditLog.arecord(
