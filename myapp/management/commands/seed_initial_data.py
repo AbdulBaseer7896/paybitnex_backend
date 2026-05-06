@@ -16,38 +16,58 @@ from django.core.management.base import BaseCommand
 from myapp.Models.Banking_models import PakistaniBank, ForeignBank
 from myapp.Models.Core_models import Currency, SystemSetting
 
-
 PK_BANKS = [
+    # Major Commercial Banks
     ("Allied Bank Limited", "ABL"),
-    ("Askari Bank", "AKBL"),
-    ("Bank Alfalah", "BAFL"),
-    ("Bank Al Habib", "BAHL"),
-    ("BankIslami Pakistan", "BIPL"),
-    ("Dubai Islamic Bank Pakistan", "DIBPL"),
-    ("Faysal Bank", "FABL"),
+    ("Askari Bank Limited", "AKBL"),
+    ("Bank Alfalah Limited", "BAFL"),
+    ("Bank Al Habib Limited", "BAHL"),
+    ("Faysal Bank Limited", "FABL"),
     ("Habib Bank Limited", "HBL"),
-    ("Habib Metropolitan Bank", "HMB"),
-    ("JS Bank", "JSBL"),
-    ("MCB Bank", "MCB"),
-    ("MCB Islamic Bank", "MCBIB"),
-    ("Meezan Bank", "MEBL"),
+    ("Habib Metropolitan Bank Limited", "HMB"),
+    ("JS Bank Limited", "JSBL"),
+    ("MCB Bank Limited", "MCB"),
     ("National Bank of Pakistan", "NBP"),
-    ("Samba Bank", "SMBL"),
-    ("Silkbank Limited", "SILK"),
-    ("Soneri Bank", "SNBL"),
+    ("Soneri Bank Limited", "SNBL"),
     ("Standard Chartered Bank Pakistan", "SCB"),
-    ("Summit Bank", "SMBL2"),
+    ("Summit Bank Limited", "SMBL"),
     ("The Bank of Khyber", "BOK"),
     ("The Bank of Punjab", "BOP"),
     ("United Bank Limited", "UBL"),
+    ("Silkbank Limited", "SILK"),
+
+    # Islamic Banks
+    ("Meezan Bank Limited", "MEBL"),
+    ("BankIslami Pakistan Limited", "BIPL"),
+    ("Dubai Islamic Bank Pakistan Limited", "DIBPL"),
+    ("MCB Islamic Bank Limited", "MCBIB"),
+
+    # Specialized / Government / DFIs
     ("Zarai Taraqiati Bank Limited", "ZTBL"),
-    ("EasyPaisa (Telenor Microfinance Bank)", "EP"),
-    ("JazzCash (Mobilink Microfinance Bank)", "JC"),
+    ("SME Bank Limited", "SMEBL"),
+    ("Sindh Bank Limited", "SNDB"),
+    ("Industrial Development Bank of Pakistan", "IDBP"),
+
+    # Foreign Banks (operating in Pakistan)
+    ("Citibank N.A. Pakistan", "CITI"),
+    ("Deutsche Bank AG Pakistan", "DB"),
+    ("Industrial and Commercial Bank of China Pakistan", "ICBC"),
+
+    # Microfinance Banks
+    ("Telenor Microfinance Bank (EasyPaisa)", "TMFB"),
+    ("Mobilink Microfinance Bank (JazzCash)", "MMBL"),
+    ("Khushhali Microfinance Bank", "KMBL"),
+    ("U Microfinance Bank", "UMBL"),
+    ("FINCA Microfinance Bank", "FINCA"),
+    ("NRSP Microfinance Bank", "NRSP"),
+    ("Apna Microfinance Bank", "APNA"),
+    ("Pak Oman Microfinance Bank", "POMB"),
+
+    # Digital / Fintech / Payment Systems (NOT banks but included for your use-case)
     ("SadaPay", "SADA"),
     ("NayaPay", "NAYA"),
-    ("Raast (SBP Instant Payment)", "RAAST"),
+    ("Raast (SBP Instant Payment System)", "RAAST"),
 ]
-
 # country, bank name
 FOREIGN_BANKS = [
     ("USA", "Bank of America"),
