@@ -131,6 +131,19 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "myapp.Utils.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 25,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # ── API rate limiting ──────────────────────────────────────────────
+    # Prevents brute-force and DoS. Anon: 60/min, authed: 300/min.
+    # Login endpoint gets its own tighter scope (see Auth_urls.py or
+    # add a per-view throttle class there).
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min",
+        "user": "300/min",
+        "login": "10/min",   # tighter scope for /auth/login/
+    },
 }
 
 SIMPLE_JWT = {
@@ -278,6 +291,10 @@ CELERY_BEAT_SCHEDULE = {
         # within a reasonable window of the cutoff.
         "schedule": crontab(minute="*/30"),
     },
+    "cleanup-expired-otps-daily": {
+        "task": "myapp.Utils.email_tasks.cleanup_expired_otps",
+        "schedule": crontab(hour=2, minute=0),  # 2 AM Karachi time — low traffic
+    },
 }
 
 EXCHANGE_RATE_API_KEY = config("EXCHANGE_RATE_API_KEY", default="")
@@ -320,6 +337,25 @@ EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PayBitnex")
 
 # Frontend origin used inside emails for links like reset-password pages.
 FRONTEND_URL       = config("FRONTEND_URL", default="https://paybitnex.com")
+
+# ── Production security headers ───────────────────────────────────────
+# These should also be set at the Nginx/CDN layer for belt-and-suspenders
+# hardening, but setting them here ensures they're enforced even in
+# non-Nginx deployments.
+SECURE_BROWSER_XSS_FILTER     = True
+SECURE_CONTENT_TYPE_NOSNIFF   = True   # prevents MIME-type sniffing
+X_FRAME_OPTIONS               = "DENY"  # stops clickjacking
+
+# Only enable HSTS + cookie flags in production (DEBUG=False).
+# Enabling in dev would break plain-http localhost flows.
+if not DEBUG:
+    SECURE_SSL_REDIRECT             = True
+    SESSION_COOKIE_SECURE           = True
+    CSRF_COOKIE_SECURE              = True
+    SECURE_HSTS_SECONDS             = 31536000    # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS  = True
+    SECURE_HSTS_PRELOAD             = True
+    SECURE_REFERRER_POLICY          = "strict-origin-when-cross-origin"
 
 LOGGING = {
     "version": 1,

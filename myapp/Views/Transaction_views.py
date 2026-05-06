@@ -912,7 +912,9 @@ def customers_with_tx_counts(request):
         return None
 
     rows = []
-    for u in qs[:500]:
+    # Cap at 200 rows — this is a summary widget, not an export.
+    # For bulk exports use the /reports/ endpoint with pagination.
+    for u in qs[:200]:
         prof = None
         try:
             prof = u.profile
@@ -941,4 +943,4 @@ def customers_with_tx_counts(request):
             "created_at": u.created_at.isoformat() if u.created_at else None,
         })
 
-    return Response({"count": len(rows), "results": rows})
+    return Response({"count": len(rows), "results": rows, "capped": len(rows) >= 200})

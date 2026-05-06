@@ -9,6 +9,7 @@ OTPs are short-lived (60 seconds) and single-use. When verified, we mark
 `attempts` counts failed verifications; we lock out at 5 failed attempts
 to deter brute-force guessing of a 6-digit code.
 """
+import hmac
 import secrets
 import uuid
 from datetime import timedelta
@@ -94,7 +95,7 @@ class EmailOTP(models.Model):
             return False, "expired"
         if self.is_locked:
             return False, "locked"
-        if code != self.code:
+        if not hmac.compare_digest(code, self.code):
             self.attempts += 1
             self.save(update_fields=["attempts"])
             return False, "invalid"

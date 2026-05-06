@@ -8,6 +8,7 @@ Transaction serializers (revised for new flow):
 - OutgoingTransferSerializer: accountant records the PKR transfer.
 - CustomerConfirmSerializer / ForceCompleteSerializer: new completion flow.
 """
+from myapp.Utils.file_validators import validate_image_file, validate_doc_file
 from rest_framework import serializers
 
 from myapp.Models.Transaction_models import (
@@ -55,6 +56,10 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
             "screenshot_transaction",
             "extra_document",
         ]
+        extra_kwargs = {
+            "screenshot_transaction": {"validators": [validate_image_file]},
+            "extra_document": {"validators": [validate_doc_file]},
+        }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

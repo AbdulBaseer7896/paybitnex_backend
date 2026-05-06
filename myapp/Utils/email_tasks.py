@@ -414,3 +414,34 @@ class _CeleryShim:
 
 
 send_email_task = _CeleryShim()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# OTP cleanup — remove expired/consumed codes older than 24 hours.
+# Keeps the email_otps table lean so index scans stay fast.
+# ─────────────────────────────────────────────────────────────────────
+from celery import shared_task as _shared_task
+
+@_shared_task(name="myapp.Utils.email_tasks.cleanup_expired_otps")
+def cleanup_expired_otps():
+    """
+    Delete EmailOTP rows that are:
+      - expired (expires_at < now), OR
+      - consumed (consumed_at is not null)
+    and are older than 24 hours (grace period so logs/auditing works).
+
+    Runs daily. Registered in CELERY_BEAT_SCHEDULE in settings.py.
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+    from django.db.models import Q
+    from myapp.Models.EmailOTP_models import EmailOTP
+
+    cutoff = timezone.now() - timedelta(hours=24)
+    deleted, _ = EmailOTP.objects.filter(
+        created_at__lt=cutoff,
+    ).filter(
+        Q(expires_at__lt=timezone.now()) |
+        Q(consumed_at__isnull=False)
+    ).delete()
+    return f"Deleted {deleted} stale OTP records"

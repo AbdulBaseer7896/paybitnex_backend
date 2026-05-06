@@ -2,6 +2,7 @@
 OTP-based signup, and OTP-based password reset."""
 from adrf.views import APIView as AsyncAPIView
 from rest_framework import status, serializers
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -42,10 +43,18 @@ def _client_ip(request):
 User = get_user_model()
 
 
+
+class LoginRateThrottle(AnonRateThrottle):
+    """Tight per-IP throttle on the login endpoint — 10 attempts/min.
+    Limits brute-force credential stuffing without blocking legitimate users.
+    """
+    scope = "login"
+
 class LoginView(TokenObtainPairView):
     """POST email+password → {access, refresh, user}."""
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [LoginRateThrottle]
 
 
 class RefreshView(TokenRefreshView):
@@ -73,32 +82,35 @@ class LogoutView(AsyncAPIView):
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 
+async def _build_me_response(user):
+    """
+    Build the /me response dict: user data + feature map + KYC status.
+    Extracted to avoid repeating the same async DB calls in both GET and PATCH.
+    """
+    from myapp.Utils.features import auser_feature_map
+    from myapp.Models.Profile_models import CustomerProfile
+
+    data = UserSerializer(user).data
+    data["features"] = await auser_feature_map(user)
+    try:
+        profile = await CustomerProfile.objects.aget(user=user)
+        data["kyc_status"] = profile.kyc_status
+        objs = profile.kyc_objections or []
+        data["kyc_objections"] = objs if isinstance(objs, list) else []
+        data["kyc_objection_count"] = len(objs) if isinstance(objs, list) else 0
+    except CustomerProfile.DoesNotExist:
+        data["kyc_status"] = None
+        data["kyc_objections"] = []
+        data["kyc_objection_count"] = 0
+    return data
+
+
 class MeView(AsyncAPIView):
     """GET current user info / PATCH limited self-editable fields."""
     permission_classes = [IsAuthenticated]
 
     async def get(self, request):
-        # Build the base payload synchronously — UserSerializer no longer
-        # touches the ORM (we stripped the `features` method field for
-        # exactly this reason). Then layer on the feature map using the
-        # async helper so it's legal inside this async handler.
-        from myapp.Utils.features import auser_feature_map
-        from myapp.Models.Profile_models import CustomerProfile
-        data = UserSerializer(request.user).data
-        data["features"] = await auser_feature_map(request.user)
-        # Include kyc_status (and a small object-count for any open
-        # objections) so the frontend sidebar can decide whether to
-        # show the "Onboarding" nav item without a second round trip.
-        # Staff users have no CustomerProfile, so this stays null.
-        try:
-            profile = await CustomerProfile.objects.aget(user=request.user)
-            data["kyc_status"] = profile.kyc_status
-            objs = profile.kyc_objections or []
-            data["kyc_objection_count"] = len(objs) if isinstance(objs, list) else 0
-        except CustomerProfile.DoesNotExist:
-            data["kyc_status"] = None
-            data["kyc_objection_count"] = 0
-        return Response(data)
+        return Response(await _build_me_response(request.user))
 
     async def patch(self, request):
         user = request.user
@@ -132,19 +144,7 @@ class MeView(AsyncAPIView):
                     "had_picture": bool(user.profile_picture),
                 },
             )
-        from myapp.Utils.features import auser_feature_map
-        from myapp.Models.Profile_models import CustomerProfile
-        out = UserSerializer(user).data
-        out["features"] = await auser_feature_map(user)
-        try:
-            profile = await CustomerProfile.objects.aget(user=user)
-            out["kyc_status"] = profile.kyc_status
-            objs = profile.kyc_objections or []
-            out["kyc_objection_count"] = len(objs) if isinstance(objs, list) else 0
-        except CustomerProfile.DoesNotExist:
-            out["kyc_status"] = None
-            out["kyc_objection_count"] = 0
-        return Response(out)
+        return Response(await _build_me_response(user))
 
 
 class ChangePasswordView(AsyncAPIView):

@@ -11,6 +11,7 @@ spec, Clients and Companies are private to the customer). We still allow
 them to hit the endpoints so Django REST Framework doesn't 403 the whole
 route; they just see nothing.
 """
+from myapp.Utils.file_validators import validate_doc_file
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -1269,6 +1270,14 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             update_fields += ["status", "paid_at"]
 
         if proof_file is not None:
+            # Validate file type + size before doing anything with it.
+            try:
+                validate_doc_file(proof_file)
+            except Exception as exc:
+                from django.core.exceptions import ValidationError as DjangoValidationError
+                if isinstance(exc, DjangoValidationError):
+                    return Response({"detail": exc.message}, status=status.HTTP_400_BAD_REQUEST)
+                raise
             # Once a proof document is on file, it's locked — the
             # customer can edit the note but not swap the file. This
             # mirrors the frontend, which hides the file input after

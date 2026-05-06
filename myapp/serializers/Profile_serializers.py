@@ -1,6 +1,7 @@
 """Customer profile — CNIC + selfie + personal details + KYC."""
 from rest_framework import serializers
 from myapp.Models.Profile_models import CustomerProfile, CNIC_VALIDATOR
+from myapp.Utils.file_validators import validate_image_file
 
 
 class CustomerProfileSerializer(serializers.ModelSerializer):
@@ -18,6 +19,9 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     cnic_number = serializers.CharField(
         max_length=15, validators=[CNIC_VALIDATOR],
     )
+    cnic_front = serializers.ImageField(validators=[validate_image_file], required=False)
+    cnic_back  = serializers.ImageField(validators=[validate_image_file], required=False)
+    selfie     = serializers.ImageField(validators=[validate_image_file], required=False)
 
     class Meta:
         model = CustomerProfile
