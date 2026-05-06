@@ -85,19 +85,37 @@ def distribute_fee_for_payment(payment) -> list:
 
         if not eligible:
             log.info(
-                "No eligible partners for %s — full fee retained by PayBitnex.",
+                "No eligible partners for %s — fee not distributed (no active partners).",
                 payment.reference,
             )
             return []
 
-        # Allocate each partner's direct slice. share_pct is a
-        # number like 13 (meaning 13%), so we divide by 100 to
-        # convert to a fraction of the fee.
+        # Allocate each partner's slice PRO-RATA within the pool.
+        # Each partner's fraction = their_share / sum_of_all_shares.
+        # Example: A=3%, B=4%, C=7% → pool=14%.
+        #   A gets 3/14 × fee = 21.43%
+        #   B gets 4/14 × fee = 28.57%
+        #   C gets 7/14 × fee = 50.00%
+        # The company retains NOTHING — 100% of the fee is distributed
+        # to partners. If there are no partners, the fee stays in the
+        # books as unclaimed (no ledger entry is created; see above).
         created = []
-        for p, share_pct in eligible:
-            share_frac = share_pct / Decimal("100")
-            amt_foreign = _q(fee_foreign * share_frac)
-            amt_pkr = _q(fee_pkr * share_frac)
+        allocated_pkr = Decimal("0")
+        allocated_foreign = Decimal("0")
+
+        for idx, (p, share_pct) in enumerate(eligible):
+            is_last = (idx == len(eligible) - 1)
+            if is_last:
+                # Give the last partner the exact remainder to absorb
+                # rounding dust — ensures fee_total always == sum(entries).
+                amt_foreign = _q(fee_foreign - allocated_foreign)
+                amt_pkr = _q(fee_pkr - allocated_pkr)
+            else:
+                frac = share_pct / total_pct   # pro-rata fraction
+                amt_foreign = _q(fee_foreign * frac)
+                amt_pkr = _q(fee_pkr * frac)
+                allocated_foreign += amt_foreign
+                allocated_pkr += amt_pkr
 
             entry = PartnerLedgerEntry.objects.create(
                 partner=p,

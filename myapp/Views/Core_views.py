@@ -60,20 +60,24 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         if self.request.query_params.get("active_only") in ("1", "true", "True", "yes"):
             qs = qs.filter(is_active=True)
-        # for_me — restrict to the current customer's allowed-methods
-        # set. Staff users (admin / accountant) see the full list
-        # since they don't have customer grants. We import here to
-        # avoid a circular import with the invoicing models.
-        if self.request.query_params.get("for_me") in ("1", "true", "True", "yes"):
-            user = self.request.user
-            if getattr(user, "role", None) == "customer":
-                from myapp.Models.Invoicing_models import CustomerAllowedPaymentMethod
-                allowed_codes = set(CustomerAllowedPaymentMethod.objects.filter(
-                    customer=user,
-                ).values_list("payment_method_id", flat=True))
-                qs = qs.filter(code__in=allowed_codes)
-            # else: admin/accountant — full list (their work flows
-            # need to see every method to populate forms).
+        # Customer auto-filtering: any GET by a customer is restricted
+        # to the methods admin has granted, regardless of whether
+        # `for_me` was passed. The `for_me` query param remains
+        # supported for backward compatibility but is no longer
+        # required to enforce the limit. Belt-and-suspenders so a
+        # frontend page that forgets to add `?for_me=true` still
+        # can't expose un-granted methods to a customer. Staff
+        # (admin/accountant) keep the full list.
+        user = self.request.user
+        if (getattr(user, "is_authenticated", False)
+                and getattr(user, "role", None) == "customer"):
+            from myapp.Models.Invoicing_models import CustomerAllowedPaymentMethod
+            allowed_codes = set(
+                CustomerAllowedPaymentMethod.objects
+                .filter(customer=user)
+                .values_list("payment_method_id", flat=True)
+            )
+            qs = qs.filter(code__in=allowed_codes)
         return qs
 
 

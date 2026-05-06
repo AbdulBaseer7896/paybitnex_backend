@@ -1,27 +1,16 @@
 """
-Recomputes partner ledger entries using the corrected DIRECT-share
-distribution formula.
+Recomputes partner ledger entries using the pro-rata distribution formula.
 
-Background: an early version of `distribute_fee_for_payment`
-normalized partner shares against the sum of all active shares —
-so partners with 13% and 10% would split the entire fee 56.5/43.5
-between them, instead of receiving 13% and 10% of the fee with
-the remaining 77% going to the company.
+Each partner receives (their_share ÷ pool_total) × fee — 100% of every
+transaction fee goes to the active partners, split by their relative weights.
 
-The corrected formula treats each `share_percentage` as a DIRECT
-percentage of the gross fee:
+Example: A=3%, B=4%, C=7% (pool=14). On a $100 fee:
+  A gets 3/14 × $100 = $21.43
+  B gets 4/14 × $100 = $28.57
+  C gets 7/14 × $100 = $50.00
 
-    fee = $100. Partners A=13%, B=10%.
-    A receives $100 × 13% = $13.00
-    B receives $100 × 10% = $10.00
-    Company retains       = $77.00
-
-This matches the "PayBitnex's share of fee" card on the dashboard
-and is the formula `distribute_fee_for_payment` now uses for new
-payments.
-
-Run this command after deploying that fix to recompute every
-historical payment's ledger entries:
+Run this command after deploying to recompute every historical payment's
+ledger entries:
 
     # Dry run — show what WOULD change without touching the database.
     python manage.py recompute_partner_ledger --dry-run
@@ -33,10 +22,9 @@ historical payment's ledger entries:
     python manage.py recompute_partner_ledger --since 2026-01-01
 
 The command deletes existing PartnerLedgerEntry rows for each
-affected payment and creates fresh ones using the direct-share
-formula. It preserves the original share_snapshot values where
-they exist so historical "Partner A's share was 13%" labels stay
-correct.
+affected payment and creates fresh ones using the pro-rata formula.
+It preserves the original share_snapshot values where they exist so
+historical "Partner A's share was X%" labels stay correct.
 
 Idempotent — running it twice produces the same result.
 """
@@ -94,88 +82,79 @@ class Command(BaseCommand):
         if total == 0:
             return
 
-        # Use the currently-active partners' shares as the snapshot pool.
-        # (The OLD ledger entries contain historical share_snapshot values
-        # that we try to preserve; but for payments that lost entries
-        # we fall back to today's active shares.)
-        active_partners = list(
-            Partner.objects.filter(is_active=True).select_related("share"),
+        # Always use CURRENT partner shares — historical share_snapshot
+        # values in existing ledger entries may be corrupted from earlier
+        # bugs (e.g. all partners stored as 4% instead of their actual %).
+        # We always recompute using today's configured shares and write
+        # the correct share back as the new snapshot.
+        current_partners = [
+            (p.id, Decimal(str(p.share.percentage)))
+            for p in Partner.objects.filter(is_active=True).select_related("share")
+            if getattr(p, "share", None) and p.share.percentage
+            and Decimal(str(p.share.percentage)) > 0
+        ]
+        if not current_partners:
+            self.stdout.write(self.style.WARNING(
+                "No active partners with shares configured. Nothing to do."
+            ))
+            return
+
+        pool_total = sum(pct for _, pct in current_partners)
+        self.stdout.write(
+            f"Active partners: {len(current_partners)}, "
+            f"pool total: {pool_total}%"
         )
+        for pid, pct in current_partners:
+            self.stdout.write(f"  partner={pid} share={pct}%")
 
         changed = 0
         for i, payment in enumerate(qs, 1):
             fee_foreign = _q(payment.fee_amount_foreign)
             fee_pkr = _q(fee_foreign * payment.exchange_rate)
 
-            existing = list(PartnerLedgerEntry.objects.filter(payment=payment))
-
-            # Re-use the partner+snapshot pairs from the existing entries so
-            # historical partner allocations remain consistent. If none
-            # exist (e.g. distribution never ran), fall back to current
-            # active partners.
-            if existing:
-                pool_rows = [
-                    (e.partner_id, Decimal(e.share_snapshot))
-                    for e in existing if Decimal(e.share_snapshot) > 0
-                ]
-            else:
-                pool_rows = [
-                    (p.id, Decimal(p.share.percentage))
-                    for p in active_partners
-                    if getattr(p, "share", None) and p.share.percentage > 0
-                ]
-
-            if not pool_rows:
-                continue
-
-            # Each share_snapshot is a percent value (e.g. 13 means 13%).
-            # Direct interpretation: a partner with share=13 gets 13%
-            # of the fee. The remainder stays with the company.
-            # (Earlier this code normalized shares to a "pool sum"
-            # so partners between them split 100% of the fee — that
-            # was inconsistent with the dashboard's "PayBitnex's
-            # share" card and with how `distribute_fee_for_payment`
-            # now works.)
+            # Compute target amounts (pro-rata of current shares)
             new_rows = []
-            for pid, pct in pool_rows:
-                share_frac = pct / Decimal("100")
-                amt_foreign = _q(fee_foreign * share_frac)
-                amt_pkr = _q(fee_pkr * share_frac)
+            alloc_f, alloc_p = Decimal("0"), Decimal("0")
+            for idx, (pid, pct) in enumerate(current_partners):
+                is_last = (idx == len(current_partners) - 1)
+                if is_last:
+                    amt_foreign = _q(fee_foreign - alloc_f)
+                    amt_pkr = _q(fee_pkr - alloc_p)
+                else:
+                    frac = pct / pool_total
+                    amt_foreign = _q(fee_foreign * frac)
+                    amt_pkr = _q(fee_pkr * frac)
+                    alloc_f += amt_foreign
+                    alloc_p += amt_pkr
                 new_rows.append((pid, pct, amt_foreign, amt_pkr))
 
             # Compare against existing
-            needs_update = False
-            existing_map = {e.partner_id: e for e in existing}
-            for pid, pct, amt_f, amt_p in new_rows:
-                ex = existing_map.get(pid)
-                if not ex:
-                    needs_update = True
-                    break
-                if (Decimal(ex.amount_foreign) != amt_f
-                        or Decimal(ex.amount_pkr) != amt_p):
-                    needs_update = True
-                    break
+            existing = {e.partner_id: e
+                        for e in PartnerLedgerEntry.objects.filter(payment=payment)}
+            needs_update = (
+                len(existing) != len(new_rows)
+                or any(
+                    pid not in existing
+                    or _q(existing[pid].amount_foreign) != amt_f
+                    or _q(existing[pid].amount_pkr) != amt_p
+                    for pid, _, amt_f, amt_p in new_rows
+                )
+            )
 
             if not needs_update:
                 continue
 
             changed += 1
             if dry:
-                # Sum of share percentages across all eligible
-                # partners on this payment — the company keeps
-                # `100 - total_pct` percent of the fee.
-                total_pct = sum((pct for _, pct in pool_rows), Decimal("0"))
                 self.stdout.write(
-                    f"  [DRY] {payment.reference}: fee={fee_foreign} {payment.currency_id} "
-                    f"partners total={total_pct}% → {len(new_rows)} entries"
+                    f"  [DRY] {payment.reference}: fee={fee_foreign} {payment.currency_id}"
                 )
                 for pid, pct, amt_f, amt_p in new_rows:
-                    old = existing_map.get(pid)
-                    old_str = (f"was {old.amount_foreign}"
-                               if old else "NEW")
+                    old = existing.get(pid)
+                    old_str = f"was {old.amount_foreign}" if old else "NEW"
                     self.stdout.write(
-                        f"      partner={pid} share={pct}%  "
-                        f"→ {amt_f} {payment.currency_id} / {amt_p} PKR ({old_str})"
+                        f"      partner={pid} share={pct}% ({pct/pool_total*100:.2f}% of pool)"
+                        f" → {amt_f} / PKR {amt_p} ({old_str})"
                     )
                 continue
 
@@ -198,9 +177,9 @@ class Command(BaseCommand):
 
         if dry:
             self.stdout.write(self.style.WARNING(
-                f"Dry run complete. {changed} payments WOULD be recomputed."
+                f"Dry run complete. {changed}/{total} payments WOULD be recomputed."
             ))
         else:
             self.stdout.write(self.style.SUCCESS(
-                f"Done. Recomputed ledger entries for {changed} payments."
+                f"Done. Recomputed ledger entries for {changed}/{total} payments."
             ))

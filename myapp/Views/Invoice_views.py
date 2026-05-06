@@ -102,7 +102,12 @@ def single_invoice_pdf(request, payment_id):
     )
 
     builder = PDFReportBuilder(
-        title="Transaction Invoice",
+        # Body title also surfaces the customer name (e.g.
+        # "Ali — Transaction Invoice") so the PDF document itself,
+        # not just the filename, identifies whose invoice it is.
+        # Capped at a sensible length so very long full names don't
+        # overflow the cover block layout.
+        title=f"{customer_name[:36]} — Transaction Invoice",
         subtitle=_subtitle_single(payment),
         metadata=metadata,
         # Per-customer document — the header band should read with
@@ -159,8 +164,20 @@ def bulk_invoice_pdf(request):
         "Generated On": datetime.now().strftime("%b %d, %Y at %H:%M"),
     }
 
+    # Build a body-title that mirrors the header label — when all
+    # transactions in the bulk belong to one customer, surface
+    # that name so the PDF self-identifies; otherwise stay generic.
+    if len(customers) == 1:
+        single_cust_name = (
+            payments[0].customer.full_name
+            or (payments[0].customer.email or "Customer").split("@")[0]
+        )
+        body_title = f"{single_cust_name[:36]} — Bulk Transaction Invoice"
+    else:
+        body_title = "Bulk Transaction Invoice"
+
     builder = PDFReportBuilder(
-        title="Bulk Transaction Invoice",
+        title=body_title,
         subtitle=_subtitle_bulk(payments),
         metadata=metadata,
         # If every transaction in the bulk belongs to one customer,

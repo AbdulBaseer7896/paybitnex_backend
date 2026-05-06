@@ -358,6 +358,35 @@ def _compute_report(filters):
             row["partner_id"], "0",
         )
 
+    # ── Per-partner net earnings (after expenses shared pro-rata) ──────
+    # Net profit is split among partners by their pool ratios, exactly
+    # like the gross fee split. Each partner's net earnings =
+    # (their_share / pool_total) × net_profit_pkr.
+    # This is computed here so the closing report, PDF composers, and
+    # API response all show the same consistent figure.
+    net_profit_val = Decimal(_compute_net_profit(
+        totals_row["total_fees_pkr"],
+        partner_rollup,
+        expense_totals["total_pkr_equivalent"],
+    ))
+    pool_total = sum(
+        Decimal(str(r.get("current_share_pct") or 0)) for r in partner_rollup
+    )
+    if pool_total > 0:
+        allocated_net = Decimal("0")
+        for idx, row in enumerate(partner_rollup):
+            share = Decimal(str(row.get("current_share_pct") or 0))
+            is_last = (idx == len(partner_rollup) - 1)
+            if is_last:
+                net_pkr = (net_profit_val - allocated_net).quantize(Decimal("0.01"))
+            else:
+                net_pkr = (net_profit_val * share / pool_total).quantize(Decimal("0.01"))
+                allocated_net += net_pkr
+            row["net_pkr"] = str(net_pkr)
+    else:
+        for row in partner_rollup:
+            row["net_pkr"] = "0.00"
+
     return {
         "filters": {
             "period": filters["period"],
@@ -374,13 +403,7 @@ def _compute_report(filters):
             "total_received_pkr": str(totals_row["total_received_pkr"] or 0),
             "total_fees_pkr": str(totals_row["total_fees_pkr"] or 0),
             "total_net_pkr": str(totals_row["total_net_pkr"] or 0),
-            # Net profit = fees collected - partner payouts - all expenses
-            # (PKR + foreign converted at current rate).
-            "net_profit_pkr": _compute_net_profit(
-                totals_row["total_fees_pkr"],
-                partner_rollup,
-                expense_totals["total_pkr_equivalent"],
-            ),
+            "net_profit_pkr": str(net_profit_val),
         },
         "customer_rollup": customer_rollup,
         "partner_rollup": partner_rollup,
@@ -399,70 +422,26 @@ def __uuid(s):
 
 def _compute_net_profit(total_fees_pkr, partner_rollup, total_expense_pkr):
     """
-    Company's net profit from the fees collected.
+    Net profit after expenses.
 
-    The fee on each transaction is split between the company and the
-    partners pro-rata of the partner share pool. Partner payouts are
-    therefore ALREADY a slice of `total_fees_pkr` — subtracting them a
-    second time would double-count.
+    Under the pro-rata pool model, 100% of each transaction fee goes to
+    the active partners (each gets their_share / pool_total × fee). The
+    company has NO retained slice — gross profit equals the total of all
+    partner earnings, which equals total fees collected. Net profit is
+    simply gross profit (= total fees) minus total expenses.
 
-    Correct formula:
-        company_share_of_fees  = total_fees_pkr − partner_payouts
-        net_profit             = company_share_of_fees − expenses
+    Expenses are shared across partners; when deducted they reduce each
+    partner's net. The overall net profit for the operation is:
 
-    Which is algebraically:
-        net = fees − partner_payouts − expenses
+        net_profit = total_fees_pkr − total_expense_pkr
 
-    That's what the previous version computed. But under the old broken
-    distribution math (`fee × share/100`), partner payouts were tiny
-    (e.g. 0.5% instead of 5/12 ≈ 42%), so the subtraction left most of
-    the fee as "profit". After the pool-based fix, partner payouts are
-    the FULL pro-rata slice — and in cases where shares sum close to
-    100% (or whenever pool math consumes the whole fee), the formula
-    correctly produces 0 remaining. What changed is not the formula,
-    it's the meaning of partner_payouts.
-
-    However: when the old broken ledger entries are still in the DB,
-    `partner_rollup` shows the OLD tiny amounts, so `fees − partners`
-    looks too generous. When the recompute command has been run with
-    the pool fix, partner_rollup sums to exactly `fees`, leaving 0 for
-    the company. That IS correct given the partners' shares — a pool
-    covering 100% of the fee leaves nothing for the company.
-
-    For the typical Bitnex config where partner shares sum to e.g. 12%,
-    partner_rollup sums to fees × 12/12 = fees (!). That is the bug
-    you're hitting. The fix: partner payouts under the pool model
-    always equal the full fee, regardless of the pool size. The
-    company's slice of the fee is separate from this — it's `fees ×
-    (1 − pool/100)` where pool = sum of active shares.
-
-    So the net-profit formula has to be rewritten in terms of the POOL
-    not the partner payouts:
-
-        company_retained = fees × (100 − pool) / 100
-        net_profit       = company_retained − expenses
-
-    We no longer need partner_rollup at all for this calculation; we
-    use the live partner_share_pool percentage.
+    This is what the closing reports and partner dashboards should show.
+    The old formula (fees × company_retained_pct − expenses) no longer
+    applies because the company has no retained slice.
     """
-    from myapp.Models.Partner_models import Partner
-
     fees = Decimal(str(total_fees_pkr or 0))
     expenses = Decimal(str(total_expense_pkr or 0))
-
-    # Sum of active partner shares — the "pool" that gets the fee slices.
-    # The rest is retained by the company.
-    pool = Decimal("0")
-    for p in Partner.objects.filter(is_active=True).select_related("share"):
-        share = getattr(p, "share", None)
-        if share and share.percentage and share.percentage > 0:
-            pool += Decimal(str(share.percentage))
-    # Clamp — pool shouldn't exceed 100, but sanity check anyway.
-    if pool > Decimal("100"):
-        pool = Decimal("100")
-
-    company_retained = fees * ((Decimal("100") - pool) / Decimal("100"))
-    net = company_retained - expenses
+    net = fees - expenses
     return str(net.quantize(Decimal("0.01")))
 
 

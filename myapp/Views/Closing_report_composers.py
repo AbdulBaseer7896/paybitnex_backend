@@ -81,63 +81,99 @@ def compose_profit_analysis(report):
         (Decimal(str(p.get("total_pkr") or 0)) for p in partner_rollup),
         Decimal(0),
     )
-    expense_total_pkr = Decimal(str(expense_totals.get("total_pkr_only") or 0))
+    # Use the FULL PKR-equivalent expenses (PKR + foreign converted
+    # at current rate). Earlier this composer used `total_pkr_only`
+    # by design — but that meant the displayed derivation table
+    # didn't reconcile with the bottom-line "Net profit" KPI which
+    # always uses the full equivalent. Switching here so the math
+    # adds up: every line item visible in the table contributes to
+    # the bottom number.
+    expense_total_pkr = Decimal(
+        str(expense_totals.get("total_pkr_equivalent")
+            or expense_totals.get("total_pkr_only") or 0)
+    )
+    expense_pkr_only = Decimal(str(expense_totals.get("total_pkr_only") or 0))
+    expense_foreign_converted = expense_total_pkr - expense_pkr_only
 
     # Resolve the active partner pool so we can show the company's retained
     # slice transparently in the derivation table.
-    pool_pct = Decimal("0")
-    for p in Partner.objects.filter(is_active=True).select_related("share"):
-        share = getattr(p, "share", None)
-        if share and share.percentage and share.percentage > 0:
-            pool_pct += Decimal(str(share.percentage))
-    if pool_pct > Decimal("100"):
-        pool_pct = Decimal("100")
-    company_pct = Decimal("100") - pool_pct
-    company_retained = (fees_pkr * company_pct / Decimal("100")).quantize(Decimal("0.01"))
+def compose_profit_analysis(report):
+    """
+    Dedicated gross-vs-net profit analysis section.
+
+    Under the pro-rata pool model:
+      - 100% of each fee goes to active partners, each receiving
+        (their_share / pool_total) × fee.
+      - The company has NO retained slice.
+      - Gross profit = total fees = sum of all partner earnings.
+      - Net profit = gross profit − total expenses.
+    """
+    from decimal import Decimal
+
+    totals = report["totals"]
+    expense_totals = report.get("expense_totals", {})
+    partner_rollup = report.get("partner_rollup", [])
+
+    fees_pkr = Decimal(str(totals.get("total_fees_pkr") or 0))
+    net_profit_pkr = Decimal(str(totals.get("net_profit_pkr") or 0))
+    partner_total_pkr = sum(
+        (Decimal(str(p.get("total_pkr") or 0)) for p in partner_rollup),
+        Decimal(0),
+    )
+    expense_total_pkr = Decimal(
+        str(expense_totals.get("total_pkr_equivalent")
+            or expense_totals.get("total_pkr_only") or 0)
+    )
+    expense_pkr_only = Decimal(str(expense_totals.get("total_pkr_only") or 0))
+    expense_foreign_converted = expense_total_pkr - expense_pkr_only
 
     sections = []
     sections.append({"type": "heading", "text": "Profit Analysis — Gross vs Net"})
     sections.append({"type": "paragraph", "text":
-        f"Fee pool split: partners own <b>{pool_pct:,.2f}%</b> of each fee; "
-        f"PayBitnex retains <b>{company_pct:,.2f}%</b>. "
-        f"Net profit is the company-retained slice minus expenses."})
+        "<b>All transaction fees go to the active partners</b> — 100% distributed, "
+        "none retained by the company. Each partner receives "
+        "<b>(their share ÷ pool total) × fee</b>. "
+        "Gross profit = total fees collected = sum of partner earnings. "
+        "Net profit = gross profit − expenses shared across partners."
+    })
 
-    # Side-by-side KPI grid
     sections.append({
         "type": "kpi_grid",
         "items": [
-            {"label": "Gross profit (total fees)",    "value": _money(fees_pkr)},
-            {"label": f"Partners ({pool_pct:,.2f}% of fee)",
-                                                       "value": _money(partner_total_pkr)},
-            {"label": f"Company retains ({company_pct:,.2f}%)",
-                                                       "value": _money(company_retained)},
-            {"label": "Net profit (after expenses)",   "value": _money(net_profit_pkr)},
+            {"label": "Gross profit (total fees = partner earnings)",
+             "value": _money(fees_pkr)},
+            {"label": "Total expenses (PKR equiv.)",
+             "value": _money(expense_total_pkr)},
+            {"label": "Net profit (after expenses)",
+             "value": _money(net_profit_pkr)},
         ],
     })
     sections.append({"type": "spacer", "height": 10})
 
-    # Breakdown table — line-by-line derivation
     sections.append({"type": "heading", "text": "Derivation"})
+    running = fees_pkr
+    derivation_rows = [
+        ["Gross fees (= partner earnings total)", _money(fees_pkr), _money(running)],
+        ["Less: PKR expenses",
+         "-" + _money(expense_pkr_only),
+         _money(running - expense_pkr_only)],
+    ]
+    running -= expense_pkr_only
+    if expense_foreign_converted > 0:
+        derivation_rows.append([
+            "Less: Foreign expenses (converted to PKR)",
+            "-" + _money(expense_foreign_converted),
+            _money(net_profit_pkr),
+        ])
     sections.append({
         "type": "table",
         "headers": ["Line item", "Amount (PKR)", "Running"],
-        "rows": [
-            ["Gross fees collected",                   _money(fees_pkr),           _money(fees_pkr)],
-            [f"Less: Partner payouts ({pool_pct:,.2f}% of fees)",
-                                                       "-" + _money(partner_total_pkr),
-                                                         _money(company_retained)],
-            [f"Company retained ({company_pct:,.2f}%)", "",                        _money(company_retained)],
-            ["Less: Expenses (PKR-denominated)",       "-" + _money(expense_total_pkr),
-                                                         _money(net_profit_pkr)],
-        ],
+        "rows": derivation_rows,
         "col_widths": [3.5, 1.4, 1.4],
         "align": ["left", "right", "right"],
         "total_row": ["Net profit (bottom line)", "", _money(net_profit_pkr)],
     })
 
-    # Expense breakdown by currency (non-PKR shown for reference; they're
-    # excluded from the net calculation above since the composer uses
-    # total_pkr_only by design).
     by_currency = expense_totals.get("by_currency") or []
     if by_currency:
         sections.append({"type": "spacer", "height": 10})
@@ -155,28 +191,44 @@ def compose_profit_analysis(report):
             "align": ["left", "right", "right"],
         })
         sections.append({"type": "paragraph", "text":
-            "<i>All expenses are converted to PKR (using the current rate "
-            "for non-PKR currencies) and subtracted from net profit above.</i>"})
+            "<i>All expenses are converted to PKR and shared across partners.</i>"})
 
-    # Partner payout detail — who got paid, how much, and their share
     if partner_rollup:
         sections.append({"type": "spacer", "height": 10})
-        sections.append({"type": "heading", "text": "Partner payouts (gross)"})
+        sections.append({"type": "heading", "text": "Partner earnings breakdown"})
+        pool_sum = sum(
+            Decimal(str(p.get("current_share_pct") or 0)) for p in partner_rollup
+        )
         rows = []
         for p in partner_rollup:
+            raw_share = Decimal(str(p.get("current_share_pct") or 0))
+            pct_of_pool = (
+                (raw_share / pool_sum * 100).quantize(Decimal("0.01"))
+                if pool_sum else Decimal("0")
+            )
             rows.append([
                 p.get("partner_name") or "—",
-                f'{Decimal(str(p.get("current_share_pct") or 0)):,.3f}%',
+                f"{raw_share:,.3f}% → {pct_of_pool}% of pool",
                 str(p.get("tx_count") or 0),
                 _money(p.get("total_pkr") or 0),
+                _money(p.get("net_pkr") or 0),
             ])
         sections.append({
             "type": "table",
-            "headers": ["Partner", "Share %", "Tx", "PKR paid"],
+            "headers": ["Partner", "Share (% of pool)", "Tx", "Gross (PKR)", "Net (PKR)"],
             "rows": rows,
-            "col_widths": [2.5, 1.0, 0.7, 1.8],
-            "align": ["left", "right", "right", "right"],
-            "total_row": ["Total", "", "", _money(partner_total_pkr)],
+            "col_widths": [2.0, 1.6, 0.4, 1.4, 1.4],
+            "align": ["left", "left", "right", "right", "right"],
+            "total_row": [
+                "Total", "", "",
+                _money(sum(Decimal(str(p.get("total_pkr") or 0)) for p in partner_rollup)),
+                _money(net_profit_pkr),
+            ],
+        })
+        sections.append({"type": "paragraph", "text":
+            "<i>Gross = pro-rata share of total fees. "
+            "Net = gross minus partner's share of expenses. "
+            "Net total equals the overall net profit.</i>"
         })
 
     return sections
@@ -210,35 +262,41 @@ def compose_simple_general(report):
 
     sections.append({"type": "heading", "text": "Profit calculation"})
     sections.append({"type": "paragraph", "text":
-        "Net profit is derived as: "
-        "<b>Fees collected − Partner payouts − Expenses (PKR equivalent)</b>. "
-        "Foreign-currency expenses are converted to PKR at the current rate "
-        "before subtraction. Only <b>completed</b> transactions contribute to "
-        "profit (money we've actually disbursed to customers)."
+        "Net profit = <b>Total fees collected − Expenses</b>. "
+        "Under the pro-rata pool model, 100% of fees go to the active partners "
+        "(each receives their_share ÷ pool_total × fee). "
+        "Gross profit equals total fees. Net profit subtracts shared expenses."
     })
 
-    partner_total = _partner_payouts_from_pool(totals["total_fees_pkr"])
-    # Use the PKR-equivalent of ALL expenses (PKR + foreign
-    # converted at current rate). The earlier `total_pkr_only`
-    # silently dropped USD/EUR expenses from the displayed row,
-    # so users saw "Less: PKR expenses (0.00)" while the Net
-    # profit total below was actually computed including those
-    # foreign expenses — making the line items not add up to
-    # the bottom line. Using `total_pkr_equivalent` keeps the
-    # display consistent with the math.
-    expense_pkr = Decimal(report["expense_totals"].get("total_pkr_equivalent")
-                          or report["expense_totals"]["total_pkr_only"] or 0)
+    # Remove partner_total — no longer subtracted from gross.
+    # Expenses are shared across partners; they reduce net profit directly.
+    expense_pkr_only = Decimal(
+        report["expense_totals"].get("total_pkr_only") or 0
+    )
+    expense_pkr_equiv = Decimal(
+        report["expense_totals"].get("total_pkr_equivalent") or 0
+    )
+    expense_foreign_in_pkr = expense_pkr_equiv - expense_pkr_only
+
+    # Under the pro-rata model, 100% of fees go to partners —
+    # gross profit = total fees collected = sum of partner earnings.
+    # Net profit = gross profit − expenses. No "Less: Partner payouts"
+    # row since partners DO receive 100% of the fee (that's the full
+    # gross number, not a deduction from a company-retained slice).
+    rows = [
+        ["Gross profit (total fees = partner earnings)",
+         _short(totals["total_fees_pkr"])],
+        ["Less: PKR expenses",      f"({_short(expense_pkr_only)})"],
+    ]
+    if expense_foreign_in_pkr > 0:
+        rows.append([
+            "Less: Foreign expenses (converted to PKR)",
+            f"({_short(expense_foreign_in_pkr)})",
+        ])
 
     sections.append({"type": "table",
         "headers": ["Line item", "Amount (PKR)"],
-        "rows": [
-            ["Fees collected",               _short(totals["total_fees_pkr"])],
-            ["Less: Partner payouts",        f"({_short(partner_total)})"],
-            # Renamed from "PKR expenses" → "Expenses (PKR equiv.)"
-            # so it's clear the line includes foreign-currency
-            # spend converted to PKR at current rates.
-            ["Less: Expenses (PKR equiv.)",  f"({_short(expense_pkr)})"],
-        ],
+        "rows": rows,
         "total_row": ["Net profit (PKR)", _short(totals["net_profit_pkr"])],
         "col_widths": [4.2, 2.6],
         "align": [None, "right"],
@@ -406,28 +464,35 @@ def compose_customer_wise(report):
 # ─────────────────────────────────────────────────────────────────────
 def compose_partner_wise(report):
     rows = report["partner_rollup"]
+    totals = report["totals"]
+    expense_totals = report.get("expense_totals", {})
     sections = []
 
     sections.append({"type": "paragraph", "text":
-        "This report breaks down partner payouts for the selected date range. "
-        "Each partner's share is calculated from the immutable ledger entries "
-        "at the historical snapshot percentage (i.e. the split that was in "
-        "effect on the day each transaction was recorded)."
+        "This report breaks down partner earnings for the selected date range. "
+        "<b>Gross earnings</b> are each partner's pro-rata share of the total fees "
+        "collected. <b>Net earnings</b> are gross minus the partner's share of expenses "
+        "(split by pool ratio). Net earnings sum equals the overall net profit."
     })
 
-    total_partner_pkr = sum(Decimal(r["total_pkr"] or 0) for r in rows)
+    from decimal import Decimal
+    total_gross_pkr = sum(Decimal(r["total_pkr"] or 0) for r in rows)
+    total_net_pkr = sum(Decimal(r.get("net_pkr") or 0) for r in rows)
     total_tx = sum(int(r["tx_count"] or 0) for r in rows)
+    net_profit = Decimal(str(totals.get("net_profit_pkr") or 0))
+    total_expense_pkr = Decimal(str(
+        expense_totals.get("total_pkr_equivalent")
+        or expense_totals.get("total_pkr_only") or 0
+    ))
 
     sections.append({"type": "heading", "text": "Top-line"})
     sections.append({"type": "kpi_grid", "items": [
-        {"label": "Partners", "value": str(len(rows)),
-         "sub": "with activity"},
+        {"label": "Partners",       "value": str(len(rows)), "sub": "with activity"},
         {"label": "Ledger entries", "value": str(total_tx)},
-        {"label": "Total payouts", "value": _short(total_partner_pkr),
-         "sub": "PKR"},
-        {"label": "Fees this range",
-         "value": _short(report["totals"]["total_fees_pkr"]),
-         "sub": "total fees collected"},
+        {"label": "Gross fees",     "value": _short(totals["total_fees_pkr"]),
+         "sub": "split 100% among partners"},
+        {"label": "Net profit",     "value": _short(net_profit),
+         "sub": "gross − expenses"},
     ]})
 
     sections.append({"type": "heading", "text": "Partner breakdown"})
@@ -442,25 +507,24 @@ def compose_partner_wise(report):
             f"{Decimal(r['current_share_pct'] or 0):.2f}%",
             str(r["tx_count"]),
             _short(r["total_pkr"]),
+            _short(r.get("net_pkr") or 0),
         ]
         for r in rows
     ]
 
     sections.append({"type": "table",
-        "headers": ["Partner", "Current share %", "Entries", "Earned (PKR)"],
+        "headers": ["Partner", "Share %", "Entries", "Gross (PKR)", "Net (PKR)"],
         "rows": table_rows,
-        "total_row": ["TOTAL", "", str(total_tx), _short(total_partner_pkr)],
-        "col_widths": [2.8, 1.7, 0.9, 1.6],
-        "align": [None, "right", "right", "right"],
+        "total_row": ["TOTAL", "", str(total_tx),
+                      _short(total_gross_pkr), _short(total_net_pkr)],
+        "col_widths": [2.2, 1.2, 0.7, 1.7, 1.7],
+        "align": [None, "right", "right", "right", "right"],
     })
 
-    sections.append({"type": "heading", "text": "Note on share snapshots"})
     sections.append({"type": "paragraph", "text":
-        "The <b>Current share %</b> column shows each partner's configured "
-        "share right now, for reference. However the earned amounts above "
-        "use the <i>historical</i> share snapshot that was stored with each "
-        "ledger entry — so if the split has changed during the period, the "
-        "numbers still reflect the original agreement for each transaction."
+        f"<b>Gross</b> = each partner's pro-rata share of total fees (pool-based). "
+        f"<b>Net</b> = gross minus their share of ₨{_short(total_expense_pkr)} "
+        f"in expenses (split by pool ratio). Net total = ₨{_short(net_profit)}."
     })
 
     return sections

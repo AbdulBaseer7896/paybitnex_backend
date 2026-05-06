@@ -203,6 +203,14 @@ class PaymentMethodConfigViewSet(viewsets.ModelViewSet):
     Customers can only GET the list (so their invoice form knows what's
     available), but all detail fields are still returned — the data is
     public-by-design since it's printed on invoices the client sees.
+
+    For customer GETs (list/retrieve), we automatically restrict the
+    queryset to methods the admin has granted via
+    `CustomerAllowedPaymentMethod`. This is a safety net so any
+    customer-side UI that happens to hit this endpoint (instead of
+    the canonical `/core/payment-methods/?for_me=true`) still gets a
+    properly-filtered list. Staff (admin/accountant) always see the
+    full list — they need it for assignment / review flows.
     """
     queryset = PaymentMethod.objects.all().order_by("sort_order", "label")
     serializer_class = PaymentMethodConfigSerializer
@@ -214,6 +222,27 @@ class PaymentMethodConfigViewSet(viewsets.ModelViewSet):
         if self.action in ("list", "retrieve"):
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsAdmin()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # Customer-facing GETs get the same filtering treatment as
+        # /core/payment-methods/?for_me=true. Belt-and-suspenders:
+        # if any frontend page accidentally fetches from this URL
+        # without the for_me flag, customers still don't leak access
+        # to methods they haven't been granted. Staff users keep
+        # the full list since they need it to populate admin forms.
+        user = self.request.user
+        if (self.action in ("list", "retrieve")
+                and getattr(user, "is_authenticated", False)
+                and getattr(user, "role", None) == "customer"):
+            from myapp.Models.Invoicing_models import CustomerAllowedPaymentMethod
+            allowed_codes = set(
+                CustomerAllowedPaymentMethod.objects
+                .filter(customer=user)
+                .values_list("payment_method_id", flat=True)
+            )
+            qs = qs.filter(code__in=allowed_codes)
+        return qs
 
     def perform_create(self, serializer):
         obj = serializer.save()
