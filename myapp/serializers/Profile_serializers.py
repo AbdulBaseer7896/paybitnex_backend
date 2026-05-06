@@ -23,6 +23,34 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     cnic_back  = serializers.ImageField(validators=[validate_image_file], required=False)
     selfie     = serializers.ImageField(validators=[validate_image_file], required=False)
 
+    # Safe method fields for the two columns added in migration 0033.
+    # These return None/[] gracefully if the DB column doesn't exist yet,
+    # preventing a crash when the migration is recorded but not applied.
+    kyc_last_resubmit_at = serializers.SerializerMethodField()
+    kyc_last_resubmit_changes = serializers.SerializerMethodField()
+
+    def get_kyc_last_resubmit_at(self, obj):
+        # Check if field is deferred (excluded by .defer()) or column missing.
+        # Accessing a deferred field fires a new SELECT which fails if the column
+        # doesn't exist — so we check the deferred_fields set first.
+        deferred = getattr(obj, "get_deferred_fields", lambda: set())()
+        if "kyc_last_resubmit_at" in deferred:
+            return None
+        try:
+            return obj.kyc_last_resubmit_at
+        except Exception:
+            return None
+
+    def get_kyc_last_resubmit_changes(self, obj):
+        deferred = getattr(obj, "get_deferred_fields", lambda: set())()
+        if "kyc_last_resubmit_changes" in deferred:
+            return []
+        try:
+            v = obj.kyc_last_resubmit_changes
+            return v if isinstance(v, list) else []
+        except Exception:
+            return []
+
     class Meta:
         model = CustomerProfile
         fields = [

@@ -398,7 +398,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         # Gate: require KYC-approved profile before any payment can be submitted.
         from myapp.Models.Profile_models import CustomerProfile
-        profile = CustomerProfile.objects.filter(user=request.user).first()
+        profile = CustomerProfile.objects.only("kyc_status").filter(user=request.user).first()
         if not profile or profile.kyc_status != CustomerProfile.KYC_APPROVED:
             return Response(
                 {
@@ -856,6 +856,14 @@ def customers_with_tx_counts(request):
     qs = (User.objects
           .filter(role=UserRole.CUSTOMER)
           .select_related("profile")
+          # defer() the two resubmit-diff fields added in migration 0033.
+          # This lets the view work even if the migration columns are missing
+          # from the DB (e.g. a fresh restore or a migration that was recorded
+          # but not actually applied). We never display these fields here anyway.
+          .defer(
+              "profile__kyc_last_resubmit_at",
+              "profile__kyc_last_resubmit_changes",
+          )
           .annotate(
               total_tx=Count("incoming_payments"),
               pending_tx=Count(

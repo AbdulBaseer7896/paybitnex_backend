@@ -166,6 +166,8 @@ class CustomerProfileView(AsyncAPIView):
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
+            ).defer(
+                "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
             ).aget(
                 user=request.user
             )
@@ -208,6 +210,8 @@ class CustomerProfileView(AsyncAPIView):
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
+            ).defer(
+                "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
             ).aget(user=request.user)
         except CustomerProfile.DoesNotExist:
             return Response({"detail": "Profile not set up."},
@@ -269,10 +273,15 @@ class CustomerProfileView(AsyncAPIView):
             profile.kyc_status = CustomerProfile.KYC_RESUBMITTED
             profile.kyc_last_resubmit_at = timezone.now()
             profile.kyc_last_resubmit_changes = changed
-            await profile.asave(update_fields=[
-                "kyc_status", "kyc_last_resubmit_at",
-                "kyc_last_resubmit_changes", "updated_at",
-            ])
+            try:
+                await profile.asave(update_fields=[
+                    "kyc_status", "kyc_last_resubmit_at",
+                    "kyc_last_resubmit_changes", "updated_at",
+                ])
+            except Exception:
+                # Migration 0033 columns may not exist yet — fall back
+                # to saving only the status change.
+                await profile.asave(update_fields=["kyc_status", "updated_at"])
             await AuditLog.arecord(
                 user=request.user, action=AuditLog.ACTION_UPDATE, target=profile,
                 description=(
@@ -326,6 +335,8 @@ class KYCReviewView(AsyncAPIView):
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
+            ).defer(
+                "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
             ).aget(pk=profile_id)
         except CustomerProfile.DoesNotExist:
             return Response({"detail": "Not found."},
@@ -360,7 +371,13 @@ class KYCReviewView(AsyncAPIView):
                 "kyc_last_resubmit_changes", "kyc_last_resubmit_at",
             ]
 
-        await profile.asave(update_fields=update_fields)
+        try:
+            await profile.asave(update_fields=update_fields)
+        except Exception:
+            # Migration 0033 columns missing — retry without them.
+            safe_fields = [f for f in update_fields
+                           if f not in ("kyc_last_resubmit_at", "kyc_last_resubmit_changes")]
+            await profile.asave(update_fields=safe_fields)
         await AuditLog.arecord(
             user=request.user, action=AuditLog.ACTION_KYC_REVIEW, target=profile,
             description=f"KYC {before} → {profile.kyc_status} for {profile.full_name}",
@@ -403,6 +420,8 @@ class KYCRaiseObjectionsView(AsyncAPIView):
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
+            ).defer(
+                "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
             ).aget(pk=profile_id)
         except CustomerProfile.DoesNotExist:
             return Response({"detail": "Not found."},
@@ -441,13 +460,21 @@ class KYCRaiseObjectionsView(AsyncAPIView):
         # changed last time" is now stale and would be misleading
         # if the customer never updates anything before the next
         # admin review.
-        profile.kyc_last_resubmit_changes = []
-        profile.kyc_last_resubmit_at = None
-        await profile.asave(update_fields=[
+        # Guard: only include resubmit fields in update_fields if columns exist.
+        obj_update_fields = [
             "kyc_objections", "kyc_objection_round", "kyc_status",
             "kyc_notes", "kyc_reviewed_by", "kyc_reviewed_at",
-            "kyc_last_resubmit_changes", "kyc_last_resubmit_at",
-        ])
+        ]
+        profile.kyc_last_resubmit_changes = []
+        profile.kyc_last_resubmit_at = None
+        obj_update_fields += ["kyc_last_resubmit_changes", "kyc_last_resubmit_at"]
+        try:
+            await profile.asave(update_fields=obj_update_fields)
+        except Exception:
+            # Migration 0033 columns missing — retry without them.
+            safe_fields = [f for f in obj_update_fields
+                           if f not in ("kyc_last_resubmit_at", "kyc_last_resubmit_changes")]
+            await profile.asave(update_fields=safe_fields)
 
         await AuditLog.arecord(
             user=request.user, action=AuditLog.ACTION_KYC_REVIEW, target=profile,
@@ -526,7 +553,9 @@ class PendingKYCListView(AsyncAPIView):
                 CustomerProfile.KYC_PENDING,
                 CustomerProfile.KYC_RESUBMITTED,
             ],
-        ).select_related("user", "kyc_reviewed_by").order_by("created_at")
+        ).select_related("user", "kyc_reviewed_by").defer(
+            "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
+        ).order_by("created_at")
         results = [
             CustomerProfileSerializer(p, context={"request": request}).data
             async for p in qs
@@ -551,6 +580,8 @@ class CustomerOnboardingListView(ListAPIView):
     def get_queryset(self):
         qs = CustomerProfile.objects.select_related(
             "user", "kyc_reviewed_by",
+        ).defer(
+            "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
         ).order_by("-created_at")
         p = self.request.query_params
         # Accept either `kyc_status` or the shorter `kyc` from older UIs.
