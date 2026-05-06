@@ -93,7 +93,14 @@ async def _build_me_response(user):
     data = UserSerializer(user).data
     data["features"] = await auser_feature_map(user)
     try:
-        profile = await CustomerProfile.objects.aget(user=user)
+        # .only() keeps this lean and migration-safe: a new column that
+        # hasn't been applied to prod yet cannot cause an UndefinedColumn
+        # crash on /auth/me/ (same risk as the login serializer).
+        profile = await (
+            CustomerProfile.objects
+            .only("kyc_status", "kyc_objections")
+            .aget(user=user)
+        )
         data["kyc_status"] = profile.kyc_status
         objs = profile.kyc_objections or []
         data["kyc_objections"] = objs if isinstance(objs, list) else []

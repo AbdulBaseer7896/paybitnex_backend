@@ -154,7 +154,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # field stays null and the sidebar item simply doesn't show.
         from myapp.Models.Profile_models import CustomerProfile
         try:
-            profile = CustomerProfile.objects.get(user=self.user)
+            # Use .only() so this query fetches ONLY the two fields we
+            # need — not the full row. This means a missing migration
+            # (e.g. a new column that hasn't been applied to prod yet)
+            # cannot break login by hitting an UndefinedColumn error.
+            profile = (
+                CustomerProfile.objects
+                .only("kyc_status", "kyc_objections")
+                .get(user=self.user)
+            )
             user_payload["kyc_status"] = profile.kyc_status
             objs = profile.kyc_objections or []
             user_payload["kyc_objection_count"] = (
