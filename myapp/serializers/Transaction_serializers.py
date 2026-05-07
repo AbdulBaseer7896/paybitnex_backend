@@ -20,7 +20,7 @@ from myapp.Models.Core_models import PaymentMethod
 class PaymentMethodSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
-        fields = ["code", "label", "is_active", "sort_order"]
+        fields = ["code", "label", "is_active", "is_default", "sort_order"]
 
 
 class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
@@ -59,6 +59,10 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "screenshot_transaction": {"validators": [validate_image_file]},
             "extra_document": {"validators": [validate_doc_file]},
+            # Remove Django's auto UniqueValidator for external_transaction_id.
+            # Our custom validate_external_transaction_id() handles this with
+            # rejected-payment awareness — it allows reuse of IDs from rejected txns.
+            "external_transaction_id": {"validators": []},
         }
 
     def __init__(self, *args, **kwargs):
@@ -104,10 +108,17 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
     def validate_external_transaction_id(self, value):
         if not value:
             return value
-        if IncomingPayment.objects.filter(external_transaction_id=value).exists():
+        # Allow reuse of external IDs from REJECTED payments — they are considered
+        # released and can be resubmitted by the customer.
+        from myapp.Models.Transaction_models import TransactionStatus
+        existing = IncomingPayment.objects.filter(external_transaction_id=value)
+        # Exclude the current instance in update scenarios
+        if self.instance:
+            existing = existing.exclude(pk=self.instance.pk)
+        # Only block if there is a non-rejected payment with this ID
+        if existing.exclude(status=TransactionStatus.REJECTED).exists():
             raise serializers.ValidationError(
-                "This external transaction ID is already recorded on another payment. "
-                "Each sender-bank reference must be used only once."
+                "Incoming payment with this external transaction id already exists."
             )
         return value
 

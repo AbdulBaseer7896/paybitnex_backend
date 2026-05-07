@@ -53,3 +53,11 @@ class AuditLogSerializer(serializers.ModelSerializer):
         model = AuditLog
         fields = _AUDIT_BASE_FIELDS + ["user_email"] + _AUDIT_OPTIONAL_FIELDS
         read_only_fields = fields
+
+
+class PaymentMethodFullSerializer(serializers.ModelSerializer):
+    """Full serializer including is_default for admin views."""
+    class Meta:
+        from myapp.Models.Core_models import PaymentMethod
+        model = PaymentMethod
+        fields = ["code", "label", "is_active", "is_default", "sort_order"]

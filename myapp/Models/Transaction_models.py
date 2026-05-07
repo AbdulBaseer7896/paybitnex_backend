@@ -64,8 +64,10 @@ class IncomingPayment(models.Model):
     sender_bank_name = models.CharField(max_length=150, blank=True)
     sender_account_last4 = models.CharField(max_length=10, blank=True)
     external_transaction_id = models.CharField(
-        max_length=100, unique=True, db_index=True,
-        help_text="Unique ID from sender's bank / platform — unique across all transactions",
+        max_length=100, db_index=True,
+        help_text="Unique ID from sender's bank / platform. "
+                  "Rejected payments release their ID for reuse — "
+                  "uniqueness is enforced at the serializer level (not DB).",
     )
 
     # Amount received

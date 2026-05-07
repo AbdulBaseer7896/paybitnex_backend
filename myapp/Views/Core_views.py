@@ -4,7 +4,7 @@ Core views: currencies, system settings, audit log, dashboard summary.
 from decimal import Decimal
 from django.db.models import Sum, Count, Q
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView
@@ -79,6 +79,55 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             )
             qs = qs.filter(code__in=allowed_codes)
         return qs
+
+    @action(detail=True, methods=["post"], url_path="set-default",
+            permission_classes=[IsAuthenticated, IsAdmin])
+    def set_default(self, request, code=None):
+        """Toggle is_default on a payment method.
+        When setting a method as default, optionally clear others (exclusive mode).
+        Pass ?exclusive=true to make this the ONLY default."""
+        method = self.get_object()
+        exclusive = request.query_params.get("exclusive", "false").lower() in ("1", "true")
+
+        with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
+            if exclusive and not method.is_default:
+                # Clear all others first
+                PaymentMethod.objects.exclude(code=method.code).filter(
+                    is_default=True
+                ).update(is_default=False)
+            method.is_default = not method.is_default
+            method.save(update_fields=["is_default"])
+
+        from myapp.Models.Audit_models import AuditLog
+        AuditLog.record(
+            user=request.user, action=AuditLog.ACTION_UPDATE,
+            target=method,
+            description=f"Payment method {method.code} is_default set to {method.is_default}",
+        )
+        return Response({"code": method.code, "is_default": method.is_default})
+
+    @action(detail=False, methods=["post"], url_path="set-defaults",
+            permission_classes=[IsAuthenticated, IsAdmin])
+    def set_defaults(self, request):
+        """Bulk set defaults. Body: {defaults: [code, ...], exclusive: bool}
+        Sets is_default=True for all listed codes.
+        If exclusive=true, clears is_default on all others first."""
+        codes = request.data.get("defaults", [])
+        exclusive = request.data.get("exclusive", False)
+
+        with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
+            if exclusive:
+                PaymentMethod.objects.all().update(is_default=False)
+            PaymentMethod.objects.filter(code__in=codes).update(is_default=True)
+
+        from myapp.Models.Audit_models import AuditLog
+        AuditLog.record(
+            user=request.user, action=AuditLog.ACTION_UPDATE,
+            description=f"Default payment methods set: {codes} (exclusive={exclusive})",
+        )
+        updated = PaymentMethod.objects.all().order_by("sort_order", "label")
+        from myapp.serializers.Core_serializers import PaymentMethodFullSerializer
+        return Response(PaymentMethodFullSerializer(updated, many=True).data)
 
 
 class SystemSettingViewSet(viewsets.ModelViewSet):

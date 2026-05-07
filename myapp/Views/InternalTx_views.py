@@ -163,7 +163,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                     "currency", "fee_currency", "created_by",
                     "source_usa_bank", "source_credit_card",
                     "dest_usa_bank", "dest_vendor", "dest_pk_bank",
-                    "fee_expense",
+                    "fee_expense", "fee_dist_partner",
                 ))
     serializer_class = InternalTransactionSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -214,7 +214,63 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         return ""
 
     @dbtx.atomic
-    def _sync_fee_expense(self, tx):
+
+    def _sync_fee_distribution(self, tx, expense, custom_splits=None):
+        """
+        After creating/updating the fee expense, create distributions:
+          - company: full fee → company slice
+          - partner: full fee → single partner slice
+          - custom:  use custom_splits list [{partner_id|None, amount}, ...]
+                     If no custom_splits provided, keep existing distributions.
+        """
+        from myapp.Models.Expense_models import ExpenseDistribution
+        from decimal import Decimal
+
+        dist_type = getattr(tx, "fee_dist_type", "company") or "company"
+        fee = Decimal(str(tx.fee_amount or "0"))
+        if fee <= 0:
+            expense.distributions.all().delete()
+            return
+
+        if dist_type == "custom":
+            if not custom_splits:
+                # No splits provided — leave existing distributions untouched
+                return
+            # Save custom splits
+            expense.distributions.all().delete()
+            for s in custom_splits:
+                partner_id = s.get("partnerId") or s.get("partner_id") or None
+                amount = Decimal(str(s.get("amount", 0)))
+                if amount <= 0:
+                    continue
+                ExpenseDistribution.objects.create(
+                    expense=expense,
+                    partner_id=partner_id,
+                    amount=amount,
+                    updated_by=tx.created_by,
+                )
+            return
+
+        # Clear and rebuild auto-distributions
+        expense.distributions.all().delete()
+
+        if dist_type == "partner" and tx.fee_dist_partner_id:
+            ExpenseDistribution.objects.create(
+                expense=expense,
+                partner_id=tx.fee_dist_partner_id,
+                amount=fee,
+                updated_by=tx.created_by,
+            )
+        else:
+            # company (default)
+            ExpenseDistribution.objects.create(
+                expense=expense,
+                partner=None,
+                amount=fee,
+                updated_by=tx.created_by,
+            )
+
+    def _sync_fee_expense(self, tx, custom_splits=None):
         """Create / update / delete the linked Expense based on fee.
 
         Idempotent — safe to call after every save. Decisions:
@@ -262,6 +318,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             exp.purpose = purpose
             exp.spent_on = tx.occurred_on
             exp.save()
+            self._sync_fee_distribution(tx, exp, custom_splits=custom_splits)
             return
 
         exp = Expense.objects.create(
@@ -277,13 +334,24 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         # Atomic link-back so we never lose track.
         tx.fee_expense = exp
         tx.save(update_fields=["fee_expense", "updated_at"])
+        # Create expense distribution based on fee_dist_type
+        self._sync_fee_distribution(tx, exp, custom_splits=custom_splits)
 
     # ------------------------------------------------------------------
     # CRUD lifecycle hooks
     # ------------------------------------------------------------------
     def perform_create(self, serializer):
         obj = serializer.save(created_by=self.request.user)
-        self._sync_fee_expense(obj)
+        # Parse custom splits from request data if present
+        raw_splits = self.request.data.get("fee_custom_splits")
+        custom_splits = None
+        if raw_splits:
+            try:
+                import json
+                custom_splits = json.loads(raw_splits)
+            except Exception:
+                custom_splits = None
+        self._sync_fee_expense(obj, custom_splits=custom_splits)
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
             target=obj,
@@ -309,7 +377,15 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             "currency": serializer.instance.currency_id,
         }
         obj = serializer.save()
-        self._sync_fee_expense(obj)
+        raw_splits = self.request.data.get("fee_custom_splits")
+        custom_splits = None
+        if raw_splits:
+            try:
+                import json
+                custom_splits = json.loads(raw_splits)
+            except Exception:
+                custom_splits = None
+        self._sync_fee_expense(obj, custom_splits=custom_splits)
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_UPDATE,
             target=obj,

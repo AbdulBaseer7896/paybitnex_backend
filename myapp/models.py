@@ -21,7 +21,7 @@ from myapp.Models.Partner_models import Partner, PartnerShare, PartnerLedgerEntr
 from myapp.Models.Report_models import DailyReport, WeeklyReport, MonthlyReport
 from myapp.Models.Core_models import SystemSetting, Currency, PaymentMethod
 from myapp.Models.Audit_models import AuditLog
-from myapp.Models.Expense_models import Expense, ExpenseCategory
+from myapp.Models.Expense_models import Expense, ExpenseCategory, ExpenseDistribution
 from myapp.Models.EmailOTP_models import EmailOTP
 from myapp.Models.Invoicing_models import (
     Client, CustomerCompany, CustomerAllowedPaymentMethod,
@@ -49,7 +49,7 @@ __all__ = [
     "DailyReport", "WeeklyReport", "MonthlyReport",
     "SystemSetting", "Currency", "PaymentMethod",
     "AuditLog",
-    "Expense", "ExpenseCategory",
+    "Expense", "ExpenseCategory", "ExpenseDistribution",
     "EmailOTP",
     "Client", "CustomerCompany", "CustomerAllowedPaymentMethod",
     "Invoice", "InvoiceLineItem", "InvoiceStatus", "InvoicePaymentMethod",

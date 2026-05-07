@@ -49,6 +49,10 @@ class PaymentMethod(models.Model):
     code = models.CharField(max_length=32, primary_key=True)
     label = models.CharField(max_length=80)
     is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(
+        default=False,
+        help_text="Show this method to all customers by default (pre-selected).",
+    )
     sort_order = models.PositiveSmallIntegerField(default=0)
 
     # ---- receiving details (per-method; all optional so the admin can

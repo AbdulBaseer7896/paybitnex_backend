@@ -344,6 +344,25 @@ class InternalTransaction(models.Model):
         null=True, blank=True, related_name="internal_transaction_fees",
     )
 
+    FEE_DIST_COMPANY = "company"
+    FEE_DIST_PARTNER = "partner"
+    FEE_DIST_CUSTOM  = "custom"
+    FEE_DIST_CHOICES = [
+        (FEE_DIST_COMPANY, "Company"),
+        (FEE_DIST_PARTNER, "Single partner"),
+        (FEE_DIST_CUSTOM,  "Custom split (see expense distributions)"),
+    ]
+
+    fee_dist_type = models.CharField(
+        max_length=10, choices=FEE_DIST_CHOICES, default=FEE_DIST_COMPANY,
+        help_text="Who absorbs this transfer fee.",
+    )
+    fee_dist_partner = models.ForeignKey(
+        "myapp.Partner", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="internal_tx_fees",
+        help_text="Partner who absorbs the fee (when fee_dist_type=partner).",
+    )
+
     # Bookkeeping
     created_by = models.ForeignKey(
         "myapp.User", on_delete=models.PROTECT,

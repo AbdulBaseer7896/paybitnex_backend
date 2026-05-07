@@ -105,12 +105,18 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
     fee_expense_id = serializers.PrimaryKeyRelatedField(
         source="fee_expense", read_only=True,
     )
+    fee_dist_partner_name = serializers.SerializerMethodField()
     created_by_email = serializers.CharField(
         source="created_by.email", read_only=True,
     )
     created_by_name = serializers.CharField(
         source="created_by.full_name", read_only=True,
     )
+
+    def get_fee_dist_partner_name(self, obj):
+        if obj.fee_dist_partner_id and hasattr(obj, "fee_dist_partner") and obj.fee_dist_partner:
+            return obj.fee_dist_partner.name
+        return None
 
     class Meta:
         model = InternalTransaction
@@ -128,6 +134,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "currency", "currency_code", "amount",
             "fee_amount", "fee_currency", "fee_currency_code",
             "fee_expense_id",
+            "fee_dist_type", "fee_dist_partner_name", "fee_dist_partner", "fee_dist_partner_name",
             # Method + meta
             "method", "method_display",
             "reference", "description", "occurred_on",
@@ -140,6 +147,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "id", "source_label", "destination_label",
             "method_display", "source_type_display", "destination_type_display",
             "currency_code", "fee_currency_code", "fee_expense_id",
+            "fee_dist_type", "fee_dist_partner_name",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
         ]

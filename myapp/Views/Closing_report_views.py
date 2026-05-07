@@ -328,20 +328,32 @@ def _compute_report(filters):
             "total_pkr_equiv": str(pkr_equiv) if pkr_equiv is not None else None,
         })
 
+    # Per-expense rows for the detailed table in PDF
+    expense_rows = []
+    for exp in expenses.select_related("currency").order_by("spent_on", "category")[:500]:
+        rate = rate_map.get(exp.currency_id)
+        pkr_equiv = (Decimal(str(exp.amount)) * rate).quantize(Decimal("0.01")) if rate else None
+        expense_rows.append({
+            "date": exp.spent_on.isoformat() if exp.spent_on else "",
+            "title": exp.title or "",
+            "category": exp.get_category_display() if hasattr(exp, "get_category_display") else exp.category,
+            "vendor": exp.vendor or "—",
+            "currency": exp.currency_id,
+            "amount": str(exp.amount),
+            "pkr_equiv": str(pkr_equiv) if pkr_equiv is not None else None,
+        })
+
     expense_totals = {
         "count": expenses.count(),
         "by_currency": expense_by_currency_with_pkr,
+        "rows": expense_rows,
         # PKR-only subtotal (kept for back-compat with the
         # individual-currency breakdown card).
         "total_pkr_only": str(
             expenses.filter(currency_id="PKR").aggregate(
                 total=Sum("amount"))["total"] or 0
         ),
-        # New: total of ALL expenses (PKR + foreign converted at
-        # current rate). This is the authoritative number used in
-        # the net-profit formula. The composer's "Less: Expenses"
-        # line uses this so foreign-currency expenses no longer
-        # silently disappear.
+        # Total of ALL expenses (PKR + foreign converted at current rate).
         "total_pkr_equivalent": str(total_expense_pkr_all),
     }
 
@@ -364,28 +376,28 @@ def _compute_report(filters):
     # (their_share / pool_total) × net_profit_pkr.
     # This is computed here so the closing report, PDF composers, and
     # API response all show the same consistent figure.
+    # Per-partner net: gross earnings minus their expense distribution slices
+    from myapp.Utils.partner_ledger import partner_expense_deduction
+    for row in partner_rollup:
+        gross = Decimal(str(row.get("total_pkr") or 0))
+        # Fetch distribution-based expense deduction for this partner
+        partner_obj = Partner.objects.filter(id=row["partner_id"]).first()
+        if partner_obj:
+            exp_ded = partner_expense_deduction(
+                partner_obj,
+                date_from=filters["date_from"],
+                date_to=filters["date_to"],
+            )
+        else:
+            exp_ded = Decimal("0")
+        row["expense_deduction_pkr"] = str(exp_ded)
+        row["net_pkr"] = str((gross - exp_ded).quantize(Decimal("0.01")))
+
     net_profit_val = Decimal(_compute_net_profit(
         totals_row["total_fees_pkr"],
         partner_rollup,
         expense_totals["total_pkr_equivalent"],
     ))
-    pool_total = sum(
-        Decimal(str(r.get("current_share_pct") or 0)) for r in partner_rollup
-    )
-    if pool_total > 0:
-        allocated_net = Decimal("0")
-        for idx, row in enumerate(partner_rollup):
-            share = Decimal(str(row.get("current_share_pct") or 0))
-            is_last = (idx == len(partner_rollup) - 1)
-            if is_last:
-                net_pkr = (net_profit_val - allocated_net).quantize(Decimal("0.01"))
-            else:
-                net_pkr = (net_profit_val * share / pool_total).quantize(Decimal("0.01"))
-                allocated_net += net_pkr
-            row["net_pkr"] = str(net_pkr)
-    else:
-        for row in partner_rollup:
-            row["net_pkr"] = "0.00"
 
     return {
         "filters": {
@@ -422,26 +434,26 @@ def __uuid(s):
 
 def _compute_net_profit(total_fees_pkr, partner_rollup, total_expense_pkr):
     """
-    Net profit after expenses.
+    Company net profit.
 
-    Under the pro-rata pool model, 100% of each transaction fee goes to
-    the active partners (each gets their_share / pool_total × fee). The
-    company has NO retained slice — gross profit equals the total of all
-    partner earnings, which equals total fees collected. Net profit is
-    simply gross profit (= total fees) minus total expenses.
+    Distribution model:
+      - Partner payout = transaction_amount × partner_share%
+      - Company retained from fees = total_fees − sum(partner_payouts)
+      - Company net profit = company_retained − company_expenses
 
-    Expenses are shared across partners; when deducted they reduce each
-    partner's net. The overall net profit for the operation is:
-
-        net_profit = total_fees_pkr − total_expense_pkr
-
-    This is what the closing reports and partner dashboards should show.
-    The old formula (fees × company_retained_pct − expenses) no longer
-    applies because the company has no retained slice.
+    For the closing report summary we show:
+        net_profit = total_fees − partner_payouts − total_expenses
+    (company's share of fees after paying partners and all expenses)
     """
     fees = Decimal(str(total_fees_pkr or 0))
+    partner_total = sum(
+        (Decimal(str(r.get("total_pkr") or 0)) for r in partner_rollup),
+        Decimal("0"),
+    )
     expenses = Decimal(str(total_expense_pkr or 0))
-    net = fees - expenses
+    # company_retained = fees - partner_payouts
+    # company_net = company_retained - expenses
+    net = fees - partner_total - expenses
     return str(net.quantize(Decimal("0.01")))
 
 
@@ -488,7 +500,13 @@ def closing_report_csv(request):
                      report["totals"]["total_fees_pkr"],
                      report["totals"]["total_net_pkr"]])
     writer.writerow([])
-    writer.writerow(["Net Profit (fees - partners - PKR expenses):",
+    total_partner_pkr = sum(
+        float(p.get("total_pkr") or 0) for p in report.get("partner_rollup", [])
+    )
+    writer.writerow(["Partner payouts (PKR):", f"{total_partner_pkr:.2f}"])
+    writer.writerow(["Total Expenses (PKR equiv.):",
+                     report["expense_totals"].get("total_pkr_equivalent", "0")])
+    writer.writerow(["Net Profit (fees - partner payouts - expenses):",
                      report["totals"]["net_profit_pkr"]])
     writer.writerow([])
 
@@ -505,11 +523,14 @@ def closing_report_csv(request):
 
     # Partner rollup
     writer.writerow(["-- Partner Rollup --"])
-    writer.writerow(["Partner", "Current Share %", "Transactions", "PKR Earned"])
+    writer.writerow(["Partner", "Share % (direct of fee)", "Transactions",
+                     "Gross PKR Earned", "Expense Deduction", "Net PKR"])
     for p in report["partner_rollup"]:
         writer.writerow([
-            p["partner_name"], p["current_share_pct"],
+            p["partner_name"], p.get("current_share_pct", "0"),
             p["tx_count"], p["total_pkr"],
+            p.get("expense_deduction_pkr", "0.00"),
+            p.get("net_pkr", "0.00"),
         ])
     writer.writerow([])
 

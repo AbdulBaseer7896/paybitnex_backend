@@ -153,8 +153,6 @@ class PartnerViewSet(viewsets.ModelViewSet):
             return Response({"updated": 0, "scanned": 0, "affected_payments": [],
                              "detail": "No active partners with shares configured."})
 
-        pool_total = sum(pct for _, pct in current_partners)
-
         qs = IncomingPayment.objects.filter(
             status__in=[TransactionStatus.COMPLETED, TransactionStatus.PKR_SENT],
         ).exclude(fee_amount_foreign__isnull=True).exclude(exchange_rate__isnull=True)
@@ -164,24 +162,18 @@ class PartnerViewSet(viewsets.ModelViewSet):
         affected = []
 
         for payment in qs:
+            # Partner gets % of TRANSACTION AMOUNT, not the fee
+            tx_f = _q(payment.amount)
+            tx_p = _q(tx_f * payment.exchange_rate)
             fee_f = _q(payment.fee_amount_foreign)
             fee_p = _q(fee_f * payment.exchange_rate)
 
-            # Compute what the entries SHOULD be (pro-rata of current shares)
-            alloc_f = Decimal("0")
-            alloc_p = Decimal("0")
+            # Direct %: each partner gets share_pct% of the TRANSACTION AMOUNT
+            # Company retains: fee_collected - sum(partner payouts)
             target = []
-            for idx, (pid, pct) in enumerate(current_partners):
-                is_last = (idx == len(current_partners) - 1)
-                if is_last:
-                    amt_f = _q(fee_f - alloc_f)
-                    amt_p = _q(fee_p - alloc_p)
-                else:
-                    frac = pct / pool_total
-                    amt_f = _q(fee_f * frac)
-                    amt_p = _q(fee_p * frac)
-                    alloc_f += amt_f
-                    alloc_p += amt_p
+            for pid, pct in current_partners:
+                amt_f = _q(tx_f * pct / Decimal("100"))
+                amt_p = _q(tx_p * pct / Decimal("100"))
                 target.append((pid, pct, amt_f, amt_p))
 
             # Compare with existing — rebuild only if something differs
@@ -219,8 +211,8 @@ class PartnerViewSet(viewsets.ModelViewSet):
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_UPDATE,
             description=(
-                f"Recomputed partner ledger (pro-rata) for {updated} payments "
-                f"(pool={pool_total}%, {len(current_partners)} partners)"
+                f"Recomputed partner ledger (direct-%) for {updated} payments "
+                f"({len(current_partners)} partners)"
             ),
             after={"affected_references": affected[:50]},
         )
@@ -308,58 +300,50 @@ class PartnerViewSet(viewsets.ModelViewSet):
 
         # ── Expense deduction (net mode only) ─────────────────────────
         expense_deduction = Decimal("0")
+        expense_items = []   # list of dicts for the expenses table in PDF
         if profit_type == "net":
-            # Fetch total expenses in PKR for this date range — reuse the
-            # live-rate conversion from the Expense view's logic.
-            from myapp.Models.Expense_models import Expense
+            from myapp.Utils.partner_ledger import partner_expense_deduction
+            from myapp.Models.Expense_models import ExpenseDistribution
             from myapp.Models.Rate_models import ExchangeRate
-            from django.db.models import Sum
-            exp_qs = Expense.objects.all()
-            if date_from:
-                exp_qs = exp_qs.filter(spent_on__gte=date_from)
-            if date_to:
-                exp_qs = exp_qs.filter(spent_on__lte=date_to)
-            rates = {r.currency_id: Decimal(str(r.rate_to_pkr or 0))
-                     for r in ExchangeRate.objects.all()}
-            rates["PKR"] = Decimal("1")
-            total_expenses_pkr = Decimal("0")
-            for row in exp_qs.values("currency_id").annotate(t=Sum("amount")):
-                amt = Decimal(str(row["t"] or 0))
-                total_expenses_pkr += (amt * rates.get(row["currency_id"], Decimal("0")))
 
-            # This partner's slice of those expenses. Matches the frontend
-            # logic exactly — sum across all active partners equals the
-            # total expenses, with this partner taking their share.
-            active_partners = list(
-                Partner.objects.filter(is_active=True).select_related("share"),
+            expense_deduction = partner_expense_deduction(
+                partner, date_from=date_from, date_to=date_to,
             )
-            n = len(active_partners)
-            if n > 0 and total_expenses_pkr > 0:
-                if expense_split == "equal":
-                    expense_deduction = (
-                        total_expenses_pkr / n
-                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                else:
-                    # by-share
-                    pool = sum(
-                        (Decimal(str(p.share.percentage))
-                         for p in active_partners
-                         if getattr(p, "share", None) and p.share.percentage),
-                        Decimal("0"),
-                    )
-                    my_share = Decimal(
-                        str(partner.share.percentage)
-                        if getattr(partner, "share", None) else 0,
-                    )
-                    if pool > 0:
-                        expense_deduction = (
-                            total_expenses_pkr * (my_share / pool)
-                        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                    else:
-                        # Fall back to equal split
-                        expense_deduction = (
-                            total_expenses_pkr / n
-                        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            # Fetch per-expense breakdown for the expenses table
+            rates = {"PKR": Decimal("1")}
+            for r in ExchangeRate.objects.all():
+                rates[r.currency_id] = Decimal(str(r.rate_to_pkr or 0))
+
+            dist_qs = (
+                ExpenseDistribution.objects
+                .filter(partner=partner)
+                .select_related("expense__currency")
+            )
+            if date_from:
+                dist_qs = dist_qs.filter(expense__spent_on__gte=date_from)
+            if date_to:
+                dist_qs = dist_qs.filter(expense__spent_on__lte=date_to)
+
+            for d in dist_qs:
+                exp = d.expense
+                code = exp.currency_id
+                rate = rates.get(code) or Decimal("0")
+                my_pkr = (Decimal(str(d.amount)) * rate).quantize(Decimal("0.01"))
+                # Get other slices for this expense
+                other_slices = []
+                for od in exp.distributions.select_related("partner").exclude(id=d.id):
+                    other_name = od.partner.name if od.partner_id else "Company"
+                    other_slices.append(f"{other_name}: {od.amount} {code}")
+                expense_items.append({
+                    "title": exp.title,
+                    "total": exp.amount,
+                    "currency": code,
+                    "my_amount": d.amount,
+                    "my_pkr": my_pkr,
+                    "other": ", ".join(other_slices) if other_slices else "sole",
+                    "spent_on": str(exp.spent_on),
+                })
 
         net_pkr = total_gross_pkr - expense_deduction
 
@@ -411,7 +395,7 @@ class PartnerViewSet(viewsets.ModelViewSet):
         ]
         if profit_type == "net":
             kpi_items.append({
-                "label": f"Expense deduction ({expense_split})",
+                "label": "Expense deduction (from distributions)",
                 "value": "-" + money_pkr(expense_deduction),
             })
             kpi_items.append({
@@ -464,16 +448,17 @@ class PartnerViewSet(viewsets.ModelViewSet):
                     e.payment.reference or "—",
                     cust.full_name if cust else "—",
                     e.currency_code or "—",
+                    money(e.payment.amount or 0, e.currency_code or ""),
                     money(e.amount_foreign or 0, e.currency_code or ""),
                     f"{e.share_snapshot}%",
                     money_pkr(e.amount_pkr or 0),
                 ])
             sections.append({
                 "type": "table",
-                "headers": ["Date", "Ref", "Customer", "Cur", "Your cut", "Share", "PKR"],
+                "headers": ["Date", "Ref", "Customer", "Cur", "Tx Amount", "Your cut", "Share", "PKR"],
                 "rows": rows,
-                "col_widths": [0.9, 0.9, 1.7, 0.5, 1.1, 0.7, 1.1],
-                "align": ["left", "left", "left", "left", "right", "right", "right"],
+                "col_widths": [0.9, 0.9, 1.5, 0.5, 1.0, 1.0, 0.6, 1.0],
+                "align": ["left", "left", "left", "left", "right", "right", "right", "right"],
             })
             if len(ledger) > 500:
                 sections.append({
@@ -483,18 +468,45 @@ class PartnerViewSet(viewsets.ModelViewSet):
 
         if profit_type == "net":
             sections.append({"type": "spacer", "height": 10})
+
+            # Expenses table
+            sections.append({"type": "heading", "text": "Expenses charged to this partner"})
+            if expense_items:
+                exp_rows = []
+                for ei in expense_items:
+                    exp_rows.append([
+                        ei["spent_on"],
+                        ei["title"],
+                        f"{ei['currency']} {ei['total']:.2f}",
+                        f"− {ei['currency']} {ei['my_amount']:.2f}",
+                        f"− {money_pkr(ei['my_pkr'])}",
+                        ei["other"],
+                    ])
+                sections.append({
+                    "type": "table",
+                    "headers": ["Date", "Expense", "Total", "Your share", "PKR deduction", "Other parties"],
+                    "rows": exp_rows,
+                    "col_widths": [0.8, 1.8, 0.9, 0.9, 1.1, 1.4],
+                    "align": ["left", "left", "right", "right", "right", "left"],
+                    "total_row": [
+                        "Total deducted", "", "", "",
+                        f"− {money_pkr(expense_deduction)}", "",
+                    ],
+                })
+            else:
+                sections.append({
+                    "type": "paragraph",
+                    "text": "No expense distributions assigned to this partner for the selected range.",
+                })
+
+            sections.append({"type": "spacer", "height": 10})
             sections.append({"type": "heading", "text": "Profit calculation"})
-            split_label = ("Expenses divided equally among active partners"
-                           if expense_split == "equal"
-                           else "Expenses pro-rata by partner share %")
             sections.append({
                 "type": "paragraph",
                 "text": (
-                    f"{split_label}. This partner's slice of total expenses "
-                    f"for the selected range: {money_pkr(expense_deduction)}. "
-                    f"Gross earnings {money_pkr(total_gross_pkr)} − expense "
-                    f"deduction {money_pkr(expense_deduction)} = net earnings "
-                    f"{money_pkr(net_pkr)}."
+                    f"Gross earnings {money_pkr(total_gross_pkr)} "
+                    f"− expense deductions {money_pkr(expense_deduction)} "
+                    f"= net earnings {money_pkr(net_pkr)}."
                 ),
             })
 
