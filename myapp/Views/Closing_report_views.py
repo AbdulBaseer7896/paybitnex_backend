@@ -399,6 +399,35 @@ def _compute_report(filters):
         expense_totals["total_pkr_equivalent"],
     ))
 
+    # ── Company rate-spread profit ─────────────────────────────────
+    # (real_exchange_rate - exchange_rate) * amount for each payment.
+    # Partners receive their share at the customer/tangent rate — the
+    # spread on every dollar (customer portion AND partner portions) stays
+    # with the company. So total rate spread = (real - tangent) * full_amount.
+    rate_spread_total = Decimal("0")
+    for tx in payments.filter(
+        real_exchange_rate__isnull=False
+    ).values("amount", "exchange_rate", "real_exchange_rate"):
+        spread = max(
+            Decimal(str(tx["real_exchange_rate"])) - Decimal(str(tx["exchange_rate"])),
+            Decimal("0"),
+        )
+        rate_spread_total += (Decimal(str(tx["amount"])) * spread).quantize(Decimal("0.01"))
+
+    # Partner rate spread (informational subset — already part of rate_spread_total)
+    from myapp.Models.Partner_models import PartnerLedgerEntry as PLE
+    from django.db.models import Sum as DSum
+    _raw_spread = PLE.objects.filter(payment__in=payments).aggregate(
+        s=DSum("rate_spread_profit_pkr")
+    )["s"] or 0
+    partner_rate_spread = Decimal(str(_raw_spread)).quantize(Decimal("0.01"))
+
+    # Total company profit = fee margin (net_profit_val) + rate spread
+    # net_profit_val = fees - partner_payouts - expenses  (fee-based margin)
+    # rate_spread_total = (real_rate - tangent_rate) × total_amount
+    # Together these are ALL company earnings
+    total_company_profit = net_profit_val + rate_spread_total
+
     return {
         "filters": {
             "period": filters["period"],
@@ -416,6 +445,9 @@ def _compute_report(filters):
             "total_fees_pkr": str(totals_row["total_fees_pkr"] or 0),
             "total_net_pkr": str(totals_row["total_net_pkr"] or 0),
             "net_profit_pkr": str(net_profit_val),
+            "rate_spread_profit_pkr": str(rate_spread_total),
+            "partner_rate_spread_pkr": str(partner_rate_spread),
+            "total_company_profit_pkr": str(total_company_profit),
         },
         "customer_rollup": customer_rollup,
         "partner_rollup": partner_rollup,

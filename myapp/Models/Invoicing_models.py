@@ -161,6 +161,22 @@ class CustomerAllowedPaymentMethod(models.Model):
     )
     is_primary = models.BooleanField(default=False)
 
+    # Auto-assignment tracking
+    auto_assigned = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when created automatically because payment_method.is_default=True. "
+            "False for manually granted methods."
+        ),
+    )
+    admin_excluded = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when an admin explicitly removed this auto-assigned default for "
+            "this specific customer. Prevents re-assignment on default sync runs."
+        ),
+    )
+
     granted_at = models.DateTimeField(auto_now_add=True)
     granted_by = models.ForeignKey(
         "myapp.User", on_delete=models.SET_NULL,

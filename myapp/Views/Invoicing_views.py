@@ -303,7 +303,7 @@ class CustomerAllowedPaymentMethodViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = CustomerAllowedPaymentMethod.objects.select_related(
             "payment_method", "granted_by",
-        )
+        ).filter(admin_excluded=False)  # Never show admin-excluded rows
         customer_id = self.request.query_params.get("customer")
         if customer_id:
             qs = qs.filter(customer_id=customer_id)
@@ -334,11 +334,22 @@ class CustomerAllowedPaymentMethodViewSet(viewsets.ModelViewSet):
         cid = instance.customer_id
         pmid = instance.payment_method_id
         was_primary = instance.is_primary
-        instance.delete()
+        was_auto = instance.auto_assigned
+
+        if was_auto:
+            # Don't physically delete auto-assigned rows — mark as excluded
+            # so the next sync run doesn't re-add it to this customer.
+            instance.admin_excluded = True
+            instance.is_primary = False
+            instance.save(update_fields=["admin_excluded", "is_primary"])
+        else:
+            instance.delete()
+
         # If we removed the primary, promote the most recently granted.
         if was_primary:
             nxt = CustomerAllowedPaymentMethod.objects.filter(
                 customer_id=cid,
+                admin_excluded=False,
             ).order_by("-granted_at").first()
             if nxt:
                 nxt.is_primary = True
@@ -346,7 +357,10 @@ class CustomerAllowedPaymentMethodViewSet(viewsets.ModelViewSet):
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_DELETE,
             target=None,
-            description=f"Revoked {pmid} from customer {cid}",
+            description=(
+                f"Removed {'(excluded auto-assigned) ' if was_auto else ''}"
+                f"{pmid} from customer {cid}"
+            ),
         )
 
     @action(detail=True, methods=["post"], url_path="make-primary")

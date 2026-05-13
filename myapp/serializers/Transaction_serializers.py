@@ -178,6 +178,16 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
     transfer_recorded_at = serializers.SerializerMethodField()
     transfer_recorded_by_email = serializers.SerializerMethodField()
 
+    # Rate spread profit (company internal — show only to admin/accountant)
+    rate_spread_profit_pkr = serializers.SerializerMethodField()
+
+    def get_rate_spread_profit_pkr(self, obj):
+        """Company profit from rate spread = (real - tangent) * amount."""
+        try:
+            return str(obj.compute_rate_spread_profit())
+        except Exception:
+            return "0.00"
+
     def get_has_pkr_transfer(self, obj):
         return hasattr(obj, "outgoing_transfer") and obj.outgoing_transfer is not None
 
@@ -231,9 +241,11 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "verified_note", "verified_document",
             "verified_by", "verified_by_email", "verified_by_name",
             "verified_at",
-            "exchange_rate", "fee_percentage",
+            "exchange_rate", "real_exchange_rate", "fee_allocation",
+            "fee_percentage",
             "fee_amount_foreign", "net_amount_foreign",
             "gross_pkr", "net_pkr",
+            "rate_spread_profit_pkr",
             "is_rate_fee_applied",
             "status", "status_display",
             "accountant_notes", "accountant_document",
@@ -253,6 +265,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "is_verified", "is_rate_fee_applied",
             "verified_by_email", "verified_by_name",
             "fee_amount_foreign", "net_amount_foreign", "gross_pkr", "net_pkr",
+            "rate_spread_profit_pkr",
             "handled_by", "status_history",
             "payment_method_code", "payment_method_label",
             "customer_confirmed_at", "is_stale",
@@ -271,11 +284,42 @@ class PaymentVerifySerializer(serializers.Serializer):
 
 
 class AccountantApplySerializer(serializers.Serializer):
-    """Accountant applies rate + fee; net amounts computed automatically."""
+    """Accountant applies rate + fee; net amounts computed automatically.
+    
+    exchange_rate = tangent/customer rate (what customer sees)
+    real_exchange_rate = actual market rate (admin can edit later; default = exchange_rate)
+    fee_allocation = optional override for under-fee transactions
+    """
     exchange_rate = serializers.DecimalField(max_digits=14, decimal_places=6)
+    real_exchange_rate = serializers.DecimalField(
+        max_digits=14, decimal_places=6, required=False, allow_null=True,
+        help_text="Actual market rate. Defaults to exchange_rate if not provided.",
+    )
     fee_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    fee_allocation = serializers.JSONField(
+        required=False, allow_null=True,
+        help_text=(
+            "Custom fee split for under-fee transactions. "
+            '{"company": <pct>, "partners": {"<uuid>": <pct>}}'
+        ),
+    )
     accountant_notes = serializers.CharField(required=False, allow_blank=True)
     mark_verified = serializers.BooleanField(default=False)
+
+    def validate(self, attrs):
+        tangent = attrs.get("exchange_rate")
+        real = attrs.get("real_exchange_rate")
+        if tangent and real and real < tangent:
+            raise serializers.ValidationError({
+                "real_exchange_rate": (
+                    "Actual rate cannot be less than the customer (tangent) rate. "
+                    "The customer rate is what they receive — it must be ≤ actual rate."
+                )
+            })
+        # Default real_exchange_rate to exchange_rate if not provided
+        if tangent and not real:
+            attrs["real_exchange_rate"] = tangent
+        return attrs
 
 
 class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
@@ -319,3 +363,36 @@ class CustomerConfirmSerializer(serializers.Serializer):
 class ForceCompleteSerializer(serializers.Serializer):
     """Admin force-completes an unresponsive-customer stale payment."""
     reason = serializers.CharField(required=True, max_length=500)
+
+
+class UpdateRealRateSerializer(serializers.Serializer):
+    """Admin/accountant updates the real (actual) exchange rate on a transaction.
+    Only real_exchange_rate is editable post-transfer.
+    """
+    real_exchange_rate = serializers.DecimalField(
+        max_digits=14, decimal_places=6,
+        help_text="Actual market rate (must be >= customer/tangent rate).",
+    )
+
+
+class FeeAllocationSerializer(serializers.Serializer):
+    """Validate fee allocation for under-fee transactions (Update #3)."""
+    company = serializers.DecimalField(
+        max_digits=6, decimal_places=3, min_value=0, max_value=100,
+    )
+    partners = serializers.DictField(
+        child=serializers.DecimalField(max_digits=6, decimal_places=3,
+                                       min_value=0, max_value=100),
+        required=False,
+        help_text="{'<partner_uuid>': <percentage_of_fee>}",
+    )
+
+    def validate(self, attrs):
+        company_pct = attrs.get("company", 0)
+        partners = attrs.get("partners", {})
+        total = company_pct + sum(partners.values())
+        if abs(total - 100) > 0.01:
+            raise serializers.ValidationError(
+                f"Company + all partner percentages must sum to 100 (got {total})."
+            )
+        return attrs

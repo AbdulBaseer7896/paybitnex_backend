@@ -140,6 +140,33 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        # Before calling super() (which raises a generic AuthenticationFailed),
+        # check if the email exists so we can give specific error messages:
+        #   - Email not found → "This account does not exist."
+        #   - Email found but wrong password → "Your password is incorrect."
+        email = attrs.get("email", "").lower()
+        try:
+            user_obj = User.objects.get(email__iexact=email)
+            # Email exists — now check if the password is wrong
+            if not user_obj.check_password(attrs.get("password", "")):
+                from rest_framework_simplejwt.exceptions import AuthenticationFailed
+                raise AuthenticationFailed(
+                    "Your password is incorrect. Please try again.",
+                    code="incorrect_password",
+                )
+            if not user_obj.is_active:
+                from rest_framework_simplejwt.exceptions import AuthenticationFailed
+                raise AuthenticationFailed(
+                    "This account has been deactivated. Please contact support.",
+                    code="account_deactivated",
+                )
+        except User.DoesNotExist:
+            from rest_framework_simplejwt.exceptions import AuthenticationFailed
+            raise AuthenticationFailed(
+                "This account does not exist. Please check your email or sign up.",
+                code="account_not_found",
+            )
+
         data = super().validate(attrs)
         # Login endpoint is sync (TokenObtainPairView), so the sync
         # helper is the correct one here. This keeps the frontend's

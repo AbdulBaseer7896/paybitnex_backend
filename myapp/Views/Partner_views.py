@@ -113,6 +113,171 @@ class PartnerViewSet(viewsets.ModelViewSet):
         })
 
     @action(
+        detail=False, methods=["get"], url_path="company-summary",
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+    )
+    def company_summary(self, request):
+        """
+        Company profit summary for the partner page.
+        Admin/accountant only — never exposed to customers.
+        """
+        from myapp.Models.Transaction_models import IncomingPayment, TransactionStatus
+        from myapp.Models.Partner_models import PartnerLedgerEntry
+        from django.db.models import Sum, Count, F, ExpressionWrapper
+        from django.db.models import DecimalField as DjDecimalField
+        from django.db.models.functions import TruncMonth
+        from decimal import Decimal
+
+        def _d(x):
+            return Decimal(str(x or 0)).quantize(Decimal("0.01"))
+
+        qs = IncomingPayment.objects.filter(status=TransactionStatus.COMPLETED)
+
+        # Grand totals
+        totals = qs.aggregate(
+            tx_count=Count("id"),
+            total_received_pkr=Sum("gross_pkr"),
+            total_fees_pkr=Sum(
+                ExpressionWrapper(
+                    F("gross_pkr") - F("net_pkr"),
+                    output_field=DjDecimalField(max_digits=18, decimal_places=2),
+                )
+            ),
+        )
+        total_received = _d(totals["total_received_pkr"])
+        total_fees = _d(totals["total_fees_pkr"])
+
+        partner_total_pkr = _d(
+            PartnerLedgerEntry.objects.filter(payment__in=qs).aggregate(
+                s=Sum("amount_pkr")
+            )["s"]
+        )
+
+        # Rate spread profit
+        rate_spread_total = Decimal("0")
+        for tx in qs.filter(real_exchange_rate__isnull=False).values(
+            "amount", "exchange_rate", "real_exchange_rate"
+        ):
+            spread = max(
+                Decimal(str(tx["real_exchange_rate"])) - Decimal(str(tx["exchange_rate"])),
+                Decimal("0"),
+            )
+            rate_spread_total += Decimal(str(tx["amount"])) * spread
+        rate_spread_total = rate_spread_total.quantize(Decimal("0.01"))
+
+        company_base = total_fees - partner_total_pkr
+        total_company = company_base + rate_spread_total
+        avg_company_pct = float(
+            (total_company / total_received * 100).quantize(Decimal("0.01"))
+        ) if total_received > 0 else 0
+
+        summary = {
+            "tx_count": totals["tx_count"] or 0,
+            "total_received_pkr": str(total_received),
+            "total_fees_pkr": str(total_fees),
+            "partner_payouts_pkr": str(partner_total_pkr),
+            "company_base_profit_pkr": str(company_base),
+            "rate_spread_profit_pkr": str(rate_spread_total),
+            "total_company_profit_pkr": str(total_company),
+        }
+
+        # Monthly buckets — pre-aggregate rate spread and partner payouts
+        rate_spread_by_month = {}
+        for tx in qs.filter(real_exchange_rate__isnull=False).values(
+            "amount", "exchange_rate", "real_exchange_rate", "created_at"
+        ):
+            if tx["created_at"]:
+                mk = tx["created_at"].strftime("%Y-%m")
+                sp = max(
+                    Decimal(str(tx["real_exchange_rate"])) - Decimal(str(tx["exchange_rate"])),
+                    Decimal("0"),
+                )
+                rate_spread_by_month[mk] = (
+                    rate_spread_by_month.get(mk, Decimal("0"))
+                    + Decimal(str(tx["amount"])) * sp
+                )
+
+        partner_by_month = {}
+        for entry in PartnerLedgerEntry.objects.filter(payment__in=qs).values(
+            "payment__created_at", "amount_pkr"
+        ):
+            if entry["payment__created_at"]:
+                mk = entry["payment__created_at"].strftime("%Y-%m")
+                partner_by_month[mk] = (
+                    partner_by_month.get(mk, Decimal("0"))
+                    + Decimal(str(entry["amount_pkr"] or 0))
+                )
+
+        monthly_rows = (
+            qs.annotate(month=TruncMonth("created_at"))
+            .values("month")
+            .annotate(
+                tx_count=Count("id"),
+                total_received_pkr=Sum("gross_pkr"),
+                total_fees_pkr=Sum(
+                    ExpressionWrapper(
+                        F("gross_pkr") - F("net_pkr"),
+                        output_field=DjDecimalField(max_digits=18, decimal_places=2),
+                    )
+                ),
+            )
+            .order_by("month")
+        )
+
+        monthly_data = []
+        for row in monthly_rows:
+            month_dt = row["month"]
+            if not month_dt:
+                continue
+            mk = month_dt.strftime("%Y-%m")
+            fees = _d(row["total_fees_pkr"])
+            recv = _d(row["total_received_pkr"])
+            p_out = partner_by_month.get(mk, Decimal("0")).quantize(Decimal("0.01"))
+            sp = rate_spread_by_month.get(mk, Decimal("0")).quantize(Decimal("0.01"))
+            base = fees - p_out
+            total_co = base + sp
+            avg = float(
+                (total_co / recv * 100).quantize(Decimal("0.01"))
+            ) if recv > 0 else 0
+            monthly_data.append({
+                "month": mk,
+                "month_label": month_dt.strftime("%b %Y"),
+                "tx_count": row["tx_count"] or 0,
+                "total_received_pkr": str(recv),
+                "fees_pkr": str(fees),
+                "partner_payouts_pkr": str(p_out),
+                "company_base_pkr": str(base),
+                "rate_spread_pkr": str(sp),
+                "total_company_pkr": str(total_co),
+                "avg_company_pct": avg,
+            })
+
+        # Partner shares
+        partner_shares = []
+        for p in Partner.objects.filter(is_active=True).select_related("share"):
+            share = getattr(p, "share", None)
+            pct = float(share.percentage) if share else 0
+            t_pkr = _d(
+                PartnerLedgerEntry.objects.filter(partner=p).aggregate(
+                    s=Sum("amount_pkr")
+                )["s"]
+            )
+            partner_shares.append({
+                "partner_id": str(p.id),
+                "name": p.name,
+                "share_pct": pct,
+                "total_pkr": str(t_pkr),
+            })
+
+        return Response({
+            "summary": summary,
+            "avg_company_pct": avg_company_pct,
+            "monthly": monthly_data,
+            "partner_shares": partner_shares,
+        })
+
+
+    @action(
         detail=False, methods=["post"], url_path="recompute-ledger",
         permission_classes=[IsAuthenticated, IsAdmin],
     )

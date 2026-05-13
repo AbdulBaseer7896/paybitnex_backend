@@ -6,5 +6,6 @@ class MyappConfig(AppConfig):
     name = "myapp"
 
     def ready(self):
-        # Import signals if any
-        pass
+        # Register auto-assign signals for default payment methods
+        from myapp.Utils.payment_method_signals import register
+        register()

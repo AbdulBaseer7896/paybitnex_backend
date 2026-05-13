@@ -312,12 +312,14 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             "External tx ID",
             "Currency",
             "Amount",
-            "Exchange rate",
+            "Customer Rate (Tangent)",
+            "Actual Rate (Real)",
             "Fee %",
             "Fee (foreign)",
             "Net (foreign)",
             "Gross PKR",
             "Net PKR",
+            "Rate Spread Profit (PKR)",
             "Status",
             "Verified by",
             "Verified at",
@@ -337,6 +339,11 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         for tx in qs.iterator(chunk_size=500):
             cust = tx.customer
             pm = tx.payment_method
+            # Compute rate spread profit for this row
+            try:
+                rate_spread_profit = str(tx.compute_rate_spread_profit())
+            except Exception:
+                rate_spread_profit = "0.00"
             writer.writerow([
                 tx.reference,
                 fmt_dt(tx.created_at),
@@ -349,11 +356,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 tx.currency_id or "",
                 s(tx.amount),
                 s(tx.exchange_rate),
+                s(tx.real_exchange_rate),
                 s(tx.fee_percentage),
                 s(tx.fee_amount_foreign),
                 s(tx.net_amount_foreign),
                 s(tx.gross_pkr),
                 s(tx.net_pkr),
+                rate_spread_profit,
                 tx.status or "",
                 (tx.verified_by.full_name or tx.verified_by.email) if tx.verified_by_id else "",
                 fmt_dt(tx.verified_at),
@@ -530,7 +539,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         before_status = payment.status
         with dbtx.atomic():
             payment.exchange_rate = s.validated_data["exchange_rate"]
+            # Store the real/actual rate; default to tangent rate if not provided
+            payment.real_exchange_rate = s.validated_data.get(
+                "real_exchange_rate"
+            ) or s.validated_data["exchange_rate"]
             payment.fee_percentage = s.validated_data["fee_percentage"]
+            # Store fee allocation override (for under-fee transactions)
+            payment.fee_allocation = s.validated_data.get("fee_allocation")
             if "accountant_notes" in s.validated_data:
                 payment.accountant_notes = s.validated_data["accountant_notes"]
             payment.calculate_amounts()
@@ -759,6 +774,63 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                     f"Reason: {reason}"
                 ),
             )
+        return Response(IncomingPaymentSerializer(payment).data)
+
+    # ---- admin/accountant: update real exchange rate on existing transaction ----
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+        url_path="update-real-rate",
+    )
+    def update_real_rate(self, request, pk=None):
+        """
+        Update the actual/real exchange rate on an existing transaction.
+        
+        Only real_exchange_rate is editable post-transfer — the tangent rate
+        (exchange_rate) that was communicated to the customer cannot be changed.
+        All company rate-spread profit calculations update automatically.
+        Also re-distributes partner fee if payment is completed.
+        """
+        from myapp.serializers.Transaction_serializers import UpdateRealRateSerializer
+        from myapp.Utils.partner_ledger import redistribute_fee_for_payment
+
+        payment = self.get_object()
+        s = UpdateRealRateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+
+        new_real_rate = s.validated_data["real_exchange_rate"]
+
+        # Validate: real rate must be >= tangent rate
+        if payment.exchange_rate and new_real_rate < payment.exchange_rate:
+            return Response(
+                {"detail": (
+                    "Actual rate cannot be less than the customer (tangent) rate. "
+                    f"Tangent rate is {payment.exchange_rate}."
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        old_real_rate = payment.real_exchange_rate
+        with dbtx.atomic():
+            payment.real_exchange_rate = new_real_rate
+            payment.save(update_fields=["real_exchange_rate", "updated_at"])
+
+            # If payment is completed, update partner ledger entries
+            # with new rate_spread_profit_pkr values
+            if payment.status == TransactionStatus.COMPLETED:
+                redistribute_fee_for_payment(payment, update_rate_only=True)
+
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=(
+                    f"{payment.reference}: real exchange rate updated "
+                    f"{old_real_rate} → {new_real_rate}"
+                ),
+                before={"real_exchange_rate": str(old_real_rate)},
+                after={"real_exchange_rate": str(new_real_rate)},
+            )
+
         return Response(IncomingPaymentSerializer(payment).data)
 
 

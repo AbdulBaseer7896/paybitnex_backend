@@ -66,6 +66,7 @@ class PartnerLedgerEntrySerializer(serializers.ModelSerializer):
             "share_snapshot",
             "fee_total_foreign", "fee_total_pkr",
             "amount_foreign", "amount_pkr", "currency_code",
+            "real_exchange_rate_snapshot", "rate_spread_profit_pkr",
             "created_at",
         ]
         read_only_fields = fields

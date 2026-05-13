@@ -334,7 +334,7 @@ class SignupVerifyOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Create the user atomically
+        # Create the user atomically + auto-assign default payment methods
         with transaction.atomic():
             user = User.objects.create_user(
                 email=email,
@@ -347,6 +347,12 @@ class SignupVerifyOTPView(APIView):
                 target=user,
                 metadata={"email": email, "via": "email_otp"},
             )
+            # Auto-assign all is_default=True payment methods to this new customer
+            try:
+                from myapp.Utils.auto_assign_payment_methods import assign_defaults_to_user
+                assign_defaults_to_user(user, granted_by=None)
+            except Exception:
+                pass  # Never block registration
 
         # Issue JWT tokens for immediate sign-in
         refresh = RefreshToken.for_user(user)

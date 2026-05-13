@@ -143,7 +143,7 @@ class PaymentMethodConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
         fields = [
-            "code", "label", "is_active", "sort_order",
+            "code", "label", "is_active", "is_default", "sort_order",
             "email", "phone", "cashapp_tag",
             "holder_name",
             "account_number", "routing_number",

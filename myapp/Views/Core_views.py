@@ -84,34 +84,51 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
             permission_classes=[IsAuthenticated, IsAdmin])
     def set_default(self, request, code=None):
         """Toggle is_default on a payment method.
-        When setting a method as default, optionally clear others (exclusive mode).
+        When setting as default → auto-assigns to all existing customers
+        (respecting individual admin-exclusions).
         Pass ?exclusive=true to make this the ONLY default."""
         method = self.get_object()
         exclusive = request.query_params.get("exclusive", "false").lower() in ("1", "true")
 
         with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
             if exclusive and not method.is_default:
-                # Clear all others first
                 PaymentMethod.objects.exclude(code=method.code).filter(
                     is_default=True
                 ).update(is_default=False)
             method.is_default = not method.is_default
             method.save(update_fields=["is_default"])
 
+        # If we just turned default ON → auto-assign to all existing customers
+        if method.is_default:
+            try:
+                from myapp.Utils.auto_assign_payment_methods import sync_default_to_all_customers
+                count = sync_default_to_all_customers(method, admin_user=request.user)
+                sync_msg = f" Auto-assigned to {count} existing customer(s)."
+            except Exception as e:
+                sync_msg = f" (Auto-assign failed: {e})"
+        else:
+            sync_msg = ""
+
         from myapp.Models.Audit_models import AuditLog
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_UPDATE,
             target=method,
-            description=f"Payment method {method.code} is_default set to {method.is_default}",
+            description=(
+                f"Payment method {method.code} is_default set to {method.is_default}."
+                + sync_msg
+            ),
         )
-        return Response({"code": method.code, "is_default": method.is_default})
+        return Response({
+            "code": method.code,
+            "is_default": method.is_default,
+            "sync_message": sync_msg.strip(),
+        })
 
     @action(detail=False, methods=["post"], url_path="set-defaults",
             permission_classes=[IsAuthenticated, IsAdmin])
     def set_defaults(self, request):
         """Bulk set defaults. Body: {defaults: [code, ...], exclusive: bool}
-        Sets is_default=True for all listed codes.
-        If exclusive=true, clears is_default on all others first."""
+        Sets is_default=True for all listed codes and auto-assigns to all customers."""
         codes = request.data.get("defaults", [])
         exclusive = request.data.get("exclusive", False)
 
@@ -120,10 +137,23 @@ class PaymentMethodViewSet(viewsets.ModelViewSet):
                 PaymentMethod.objects.all().update(is_default=False)
             PaymentMethod.objects.filter(code__in=codes).update(is_default=True)
 
+        # Auto-assign newly-defaulted methods to all existing customers
+        total_synced = 0
+        try:
+            from myapp.Utils.auto_assign_payment_methods import sync_default_to_all_customers
+            for method in PaymentMethod.objects.filter(code__in=codes, is_default=True):
+                c = sync_default_to_all_customers(method, admin_user=request.user) or 0
+                total_synced += c
+        except Exception as e:
+            pass  # Log but don't fail the request
+
         from myapp.Models.Audit_models import AuditLog
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_UPDATE,
-            description=f"Default payment methods set: {codes} (exclusive={exclusive})",
+            description=(
+                f"Default payment methods set: {codes} (exclusive={exclusive}). "
+                f"Auto-assigned to {total_synced} customer(s)."
+            ),
         )
         updated = PaymentMethod.objects.all().order_by("sort_order", "label")
         from myapp.serializers.Core_serializers import PaymentMethodFullSerializer

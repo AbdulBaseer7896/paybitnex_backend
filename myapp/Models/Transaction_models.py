@@ -104,7 +104,26 @@ class IncomingPayment(models.Model):
     # Accountant-applied fields
     exchange_rate = models.DecimalField(
         max_digits=14, decimal_places=6, null=True, blank=True,
-        help_text="1 unit of `currency` = X PKR",
+        help_text=(
+            "Tangent rate: 1 unit of `currency` = X PKR — the rate "
+            "given to the customer and used to compute net_pkr. "
+            "Must never exceed real_exchange_rate."
+        ),
+    )
+    real_exchange_rate = models.DecimalField(
+        max_digits=14, decimal_places=6, null=True, blank=True,
+        help_text=(
+            "Actual market rate at time of transfer (admin-editable). "
+            "Company rate-spread profit = (real - tangent) * total_amount."
+        ),
+    )
+    # Fee allocation override for under-fee transactions (Update #3 fix)
+    fee_allocation = models.JSONField(
+        null=True, blank=True,
+        help_text=(
+            "Custom fee split when transaction fee < sum of partner shares. "
+            'JSON: {"company": <pct_of_fee>, "partners": {"<uuid>": <pct_of_fee>}}'
+        ),
     )
     fee_percentage = models.DecimalField(
         max_digits=5, decimal_places=2, null=True, blank=True,
@@ -190,7 +209,15 @@ class IncomingPayment(models.Model):
         return self.exchange_rate is not None and self.fee_percentage is not None
 
     def calculate_amounts(self):
-        """Recompute fee + net amounts (idempotent). Returns a dict of amounts."""
+        """Recompute fee + net amounts (idempotent). Returns a dict of amounts.
+        
+        exchange_rate = tangent/customer rate (what customer sees)
+        real_exchange_rate = actual market rate (company keeps the spread)
+        
+        Customer receives: net_amount_foreign * exchange_rate (tangent)
+        Company rate-spread profit:
+            (real_exchange_rate - exchange_rate) * amount  (on customer's net)
+        """
         if self.exchange_rate is None or self.fee_percentage is None:
             return None
         fee_pct = self.fee_percentage / Decimal("100")
@@ -204,6 +231,26 @@ class IncomingPayment(models.Model):
             "gross_pkr": self.gross_pkr,
             "net_pkr": self.net_pkr,
         }
+
+    def compute_rate_spread_profit(self):
+        """
+        Company profit purely from the exchange rate spread (internal only).
+        
+        = (real_exchange_rate - exchange_rate) * amount
+        
+        This is the hidden profit from the rate difference. Both the customer's
+        net amount AND the fee portions earn this spread for the company.
+        Partners only receive their fee portion at the tangent rate — the spread
+        on partner amounts also stays with the company.
+        
+        Returns Decimal in PKR, or Decimal('0') if real_exchange_rate not set.
+        """
+        if not self.real_exchange_rate or not self.exchange_rate:
+            return Decimal("0")
+        spread = Decimal(str(self.real_exchange_rate)) - Decimal(str(self.exchange_rate))
+        if spread <= 0:
+            return Decimal("0")
+        return (Decimal(str(self.amount)) * spread).quantize(Decimal("0.01"))
 
 
 class OutgoingPKRTransfer(models.Model):

@@ -61,6 +61,13 @@ class UserAdminViewSet(viewsets.ModelViewSet):
             user=self.request.user, action=AuditLog.ACTION_CREATE, target=user,
             description=f"Created {user.role} account for {user.email}",
         )
+        # Auto-assign default payment methods for new customers
+        if getattr(user, 'role', None) == 'customer':
+            try:
+                from myapp.Utils.auto_assign_payment_methods import assign_defaults_to_user
+                assign_defaults_to_user(user, granted_by=self.request.user)
+            except Exception:
+                pass  # Never block user creation
 
     def create(self, request, *args, **kwargs):
         s = self.get_serializer(data=request.data)

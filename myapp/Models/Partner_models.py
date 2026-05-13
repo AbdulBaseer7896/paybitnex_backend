@@ -86,9 +86,22 @@ class PartnerLedgerEntry(models.Model):
     )
     amount_pkr = models.DecimalField(
         max_digits=18, decimal_places=2,
-        help_text="This partner's share of the fee in PKR.",
+        help_text="This partner's share of the fee in PKR (at tangent rate).",
     )
     currency_code = models.CharField(max_length=3)
+
+    # Rate-spread profit: company earns spread on partner payouts too
+    real_exchange_rate_snapshot = models.DecimalField(
+        max_digits=14, decimal_places=6, null=True, blank=True,
+        help_text="Actual market rate at time of transaction (for spread calculation).",
+    )
+    rate_spread_profit_pkr = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text=(
+            "Company's rate-spread profit from this partner's payout portion: "
+            "(real_rate - tangent_rate) * amount_foreign"
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

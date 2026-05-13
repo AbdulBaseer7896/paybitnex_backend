@@ -118,3 +118,40 @@ def customer_effective_fee(request, user_id):
         "source": "override" if source == "customer_override" else "default",
         "notes": notes,
     })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def partner_shares_info(request):
+    """
+    GET /fees/partner-shares-info/
+    
+    Returns total active partner shares % and per-partner breakdown.
+    Used by the Apply Rate & Fee form to warn about under-fee conditions.
+    Admin/accountant use only.
+    """
+    from myapp.Models.Partner_models import Partner, PartnerShare
+    from decimal import Decimal
+
+    partners = list(
+        Partner.objects.filter(is_active=True)
+        .select_related("share")
+        .order_by("name")
+    )
+    
+    partner_list = []
+    total_pct = Decimal("0")
+    for p in partners:
+        share = getattr(p, "share", None)
+        pct = Decimal(str(share.percentage)) if share else Decimal("0")
+        total_pct += pct
+        partner_list.append({
+            "id": str(p.id),
+            "name": p.name,
+            "share_percentage": str(pct),
+        })
+    
+    return Response({
+        "total_partner_percentage": str(total_pct),
+        "partners": partner_list,
+    })
