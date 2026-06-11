@@ -48,6 +48,26 @@ class UserAdminViewSet(viewsets.ModelViewSet):
     filterset_fields = ["role", "is_active", "is_profile_complete"]
     search_fields = ["email", "full_name", "phone"]
 
+    def get_queryset(self):
+        """Admin user list.
+
+        The frontend search box sends its term as `?q=` (not DRF's default
+        `?search=`), so the built-in SearchFilter never received it and the
+        search box appeared broken. We honour `q` here explicitly, matching
+        against email, full name, and phone — case-insensitive, any-substring.
+        """
+        from django.db.models import Q
+
+        qs = super().get_queryset()
+        q = (self.request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(email__icontains=q)
+                | Q(full_name__icontains=q)
+                | Q(phone__icontains=q)
+            )
+        return qs
+
     def get_serializer_class(self):
         if self.action == "create":
             return AdminCreateUserSerializer

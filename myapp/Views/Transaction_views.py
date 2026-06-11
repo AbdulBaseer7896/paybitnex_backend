@@ -776,6 +776,91 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         return Response(IncomingPaymentSerializer(payment).data)
 
+    # ---- admin: force complete MANY stale payments at once ----
+    @action(
+        detail=False, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="force-complete-bulk",
+    )
+    def force_complete_bulk(self, request):
+        """
+        Admin-only bulk override for the "Awaiting customer confirmation"
+        queue. Completes every supplied PKR_SENT payment on the customer's
+        behalf, runs fee distribution, and logs the same reason against each
+        one for the audit trail.
+
+        Each payment is processed in its own atomic block so one bad row does
+        not roll back the others; the response reports which ids completed and
+        which were skipped (and why).
+        """
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+        from myapp.serializers.Transaction_serializers import (
+            ForceCompleteBulkSerializer,
+        )
+
+        s = ForceCompleteBulkSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        ids = s.validated_data["ids"]
+        reason = s.validated_data["reason"]
+
+        completed = []
+        skipped = []
+
+        # Only consider payments that are genuinely awaiting confirmation.
+        payments = {
+            str(p.id): p
+            for p in IncomingPayment.objects.filter(id__in=ids)
+        }
+
+        for raw_id in ids:
+            key = str(raw_id)
+            payment = payments.get(key)
+            if payment is None:
+                skipped.append({"id": key, "reason": "not found"})
+                continue
+            if payment.status != TransactionStatus.PKR_SENT:
+                skipped.append({
+                    "id": key,
+                    "reason": f"status is '{payment.status}', not pkr_sent",
+                })
+                continue
+            try:
+                before_status = payment.status
+                with dbtx.atomic():
+                    payment.force_completed_by = request.user
+                    payment.force_completed_at = timezone.now()
+                    payment.completed_at = timezone.now()
+                    payment.status = TransactionStatus.COMPLETED
+                    payment.is_stale = False
+                    payment.save(update_fields=[
+                        "force_completed_by", "force_completed_at",
+                        "completed_at", "status", "is_stale", "updated_at",
+                    ])
+                    _record_status_change(
+                        payment, before_status, TransactionStatus.COMPLETED,
+                        user=request.user,
+                        note=f"Force-completed by admin (bulk) — reason: {reason}",
+                    )
+                    distribute_fee_for_payment(payment)
+                    AuditLog.record(
+                        user=request.user, action=AuditLog.ACTION_UPDATE,
+                        target=payment,
+                        description=(
+                            f"{payment.reference}: force-completed by admin "
+                            f"(bulk). Reason: {reason}"
+                        ),
+                    )
+                completed.append(key)
+            except Exception as exc:  # noqa: BLE001 — never abort the batch
+                skipped.append({"id": key, "reason": str(exc)})
+
+        return Response({
+            "completed_count": len(completed),
+            "skipped_count": len(skipped),
+            "completed": completed,
+            "skipped": skipped,
+        })
+
     # ---- admin/accountant: update real exchange rate on existing transaction ----
     @action(
         detail=True, methods=["post"],

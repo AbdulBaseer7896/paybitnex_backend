@@ -365,6 +365,19 @@ class ForceCompleteSerializer(serializers.Serializer):
     reason = serializers.CharField(required=True, max_length=500)
 
 
+class ForceCompleteBulkSerializer(serializers.Serializer):
+    """Admin force-completes several stale payments in one action.
+
+    `ids` is the list of payment UUIDs to complete; `reason` is logged
+    against every one of them in the activity trail.
+    """
+    ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+    )
+    reason = serializers.CharField(required=True, max_length=500)
+
+
 class UpdateRealRateSerializer(serializers.Serializer):
     """Admin/accountant updates the real (actual) exchange rate on a transaction.
     Only real_exchange_rate is editable post-transfer.
