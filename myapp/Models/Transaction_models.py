@@ -261,6 +261,17 @@ class OutgoingPKRTransfer(models.Model):
     incoming_payment = models.OneToOneField(
         IncomingPayment, on_delete=models.PROTECT,
         related_name="outgoing_transfer",
+        null=True, blank=True,
+    )
+    # A single PKR transfer can settle MANY of a customer's payments at once
+    # (the company often sends one lump sum covering several USD receipts).
+    # `incoming_payment` above is kept for backward-compatibility with the
+    # single-payment flow and historical rows; new bulk transfers populate
+    # this M2M instead. All linked payments must belong to the same customer.
+    payments = models.ManyToManyField(
+        IncomingPayment,
+        related_name="covering_transfers",
+        blank=True,
     )
     customer_bank_account = models.ForeignKey(
         "myapp.CustomerBankAccount", on_delete=models.PROTECT,

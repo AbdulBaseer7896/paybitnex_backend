@@ -776,91 +776,6 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         return Response(IncomingPaymentSerializer(payment).data)
 
-    # ---- admin: force complete MANY stale payments at once ----
-    @action(
-        detail=False, methods=["post"],
-        permission_classes=[IsAuthenticated, IsAdmin],
-        url_path="force-complete-bulk",
-    )
-    def force_complete_bulk(self, request):
-        """
-        Admin-only bulk override for the "Awaiting customer confirmation"
-        queue. Completes every supplied PKR_SENT payment on the customer's
-        behalf, runs fee distribution, and logs the same reason against each
-        one for the audit trail.
-
-        Each payment is processed in its own atomic block so one bad row does
-        not roll back the others; the response reports which ids completed and
-        which were skipped (and why).
-        """
-        from myapp.Utils.partner_ledger import distribute_fee_for_payment
-        from myapp.serializers.Transaction_serializers import (
-            ForceCompleteBulkSerializer,
-        )
-
-        s = ForceCompleteBulkSerializer(data=request.data)
-        s.is_valid(raise_exception=True)
-        ids = s.validated_data["ids"]
-        reason = s.validated_data["reason"]
-
-        completed = []
-        skipped = []
-
-        # Only consider payments that are genuinely awaiting confirmation.
-        payments = {
-            str(p.id): p
-            for p in IncomingPayment.objects.filter(id__in=ids)
-        }
-
-        for raw_id in ids:
-            key = str(raw_id)
-            payment = payments.get(key)
-            if payment is None:
-                skipped.append({"id": key, "reason": "not found"})
-                continue
-            if payment.status != TransactionStatus.PKR_SENT:
-                skipped.append({
-                    "id": key,
-                    "reason": f"status is '{payment.status}', not pkr_sent",
-                })
-                continue
-            try:
-                before_status = payment.status
-                with dbtx.atomic():
-                    payment.force_completed_by = request.user
-                    payment.force_completed_at = timezone.now()
-                    payment.completed_at = timezone.now()
-                    payment.status = TransactionStatus.COMPLETED
-                    payment.is_stale = False
-                    payment.save(update_fields=[
-                        "force_completed_by", "force_completed_at",
-                        "completed_at", "status", "is_stale", "updated_at",
-                    ])
-                    _record_status_change(
-                        payment, before_status, TransactionStatus.COMPLETED,
-                        user=request.user,
-                        note=f"Force-completed by admin (bulk) — reason: {reason}",
-                    )
-                    distribute_fee_for_payment(payment)
-                    AuditLog.record(
-                        user=request.user, action=AuditLog.ACTION_UPDATE,
-                        target=payment,
-                        description=(
-                            f"{payment.reference}: force-completed by admin "
-                            f"(bulk). Reason: {reason}"
-                        ),
-                    )
-                completed.append(key)
-            except Exception as exc:  # noqa: BLE001 — never abort the batch
-                skipped.append({"id": key, "reason": str(exc)})
-
-        return Response({
-            "completed_count": len(completed),
-            "skipped_count": len(skipped),
-            "completed": completed,
-            "skipped": skipped,
-        })
-
     # ---- admin/accountant: update real exchange rate on existing transaction ----
     @action(
         detail=True, methods=["post"],
@@ -987,9 +902,129 @@ class OutgoingTransferViewSet(
             status=status.HTTP_201_CREATED,
         )
 
+    @action(
+        detail=False, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+        url_path="bulk",
+        parser_classes=[MultiPartParser, FormParser, JSONParser],
+    )
+    def bulk(self, request):
+        """
+        Record ONE PKR transfer covering several of a customer's payments.
 
-# ---------------------------------------------------------------------
-# CUSTOMERS WITH TRANSACTION COUNTS
+        Body: payment_ids[], customer_bank_account, amount_pkr,
+              bank_transaction_id, notes, receipt (optional file).
+
+        All selected payments must belong to the SAME customer, share one
+        currency, and be ready (rate+fee applied, not already settled).
+        Every payment is linked to the single transfer and flipped to
+        PKR_SENT together — the customer then sees the same bank
+        transaction ID + receipt on each of them.
+        """
+        from myapp.serializers.Transaction_serializers import (
+            OutgoingTransferBulkCreateSerializer,
+        )
+
+        # payment_ids may arrive as a JSON list or as repeated form fields.
+        data = request.data
+        if hasattr(data, "getlist"):
+            ids = data.getlist("payment_ids") or data.getlist("payment_ids[]")
+            if ids:
+                data = data.copy()
+                data.setlist("payment_ids", ids)
+
+        s = OutgoingTransferBulkCreateSerializer(data=data)
+        s.is_valid(raise_exception=True)
+        vd = s.validated_data
+        ids = [str(x) for x in vd["payment_ids"]]
+
+        payments = list(
+            IncomingPayment.objects.filter(id__in=ids).select_related("customer")
+        )
+        found_ids = {str(p.id) for p in payments}
+        missing = [i for i in ids if i not in found_ids]
+        if missing:
+            raise ValidationError({
+                "payment_ids": f"Unknown payment id(s): {', '.join(missing)}.",
+            })
+
+        # ── Same customer ────────────────────────────────────────────────
+        customers = {str(p.customer_id) for p in payments}
+        if len(customers) != 1:
+            raise ValidationError({
+                "payment_ids":
+                "All selected payments must belong to the same customer.",
+            })
+
+        # ── Same currency ────────────────────────────────────────────────
+        # `currency` is a FK with to_field="code", so currency_id IS the
+        # currency code string on the model instance (currency_code only
+        # exists on the serializer, not the model).
+        currencies = {p.currency_id for p in payments}
+        if len(currencies) != 1:
+            raise ValidationError({
+                "payment_ids":
+                "All selected payments must share the same currency.",
+            })
+
+        # ── All ready, none already settled ──────────────────────────────
+        not_ready = [p.reference for p in payments if not p.is_rate_fee_applied]
+        if not_ready:
+            raise ValidationError({
+                "payment_ids":
+                "Apply exchange rate and fee before recording the PKR "
+                f"transfer. Not ready: {', '.join(not_ready)}.",
+            })
+        already = [
+            p.reference for p in payments
+            if p.status in (TransactionStatus.PKR_SENT,
+                            TransactionStatus.COMPLETED)
+        ]
+        if already:
+            raise ValidationError({
+                "payment_ids":
+                f"Already settled: {', '.join(already)}.",
+            })
+
+        with dbtx.atomic():
+            ref = next_reference(OutgoingPKRTransfer, prefix="OUT")
+            transfer = OutgoingPKRTransfer.objects.create(
+                reference=ref,
+                sent_by=request.user,
+                incoming_payment=None,
+                customer_bank_account=vd["customer_bank_account"],
+                amount_pkr=vd["amount_pkr"],
+                bank_transaction_id=vd["bank_transaction_id"],
+                notes=vd.get("notes", "") or "",
+                receipt=vd.get("receipt"),
+            )
+            transfer.payments.set(payments)
+
+            for payment in payments:
+                before_status = payment.status
+                payment.status = TransactionStatus.PKR_SENT
+                payment.handled_by = request.user
+                payment.save(update_fields=["status", "handled_by", "updated_at"])
+                _record_status_change(
+                    payment, before_status, TransactionStatus.PKR_SENT,
+                    user=request.user,
+                    note=f"PKR sent (bulk) — ref {transfer.reference}",
+                )
+
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_CREATE,
+                target=transfer,
+                description=(
+                    f"{transfer.reference}: bulk PKR transfer covering "
+                    f"{len(payments)} payment(s) for customer "
+                    f"{payments[0].customer.email}."
+                ),
+            )
+
+        return Response(
+            OutgoingTransferSerializer(transfer).data,
+            status=status.HTTP_201_CREATED,
+        )
 #   GET /transactions/customers-summary/
 #
 # Used by the "User Transactions" page (admin + accountant). Returns one row

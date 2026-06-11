@@ -189,11 +189,30 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             return "0.00"
 
     def get_has_pkr_transfer(self, obj):
-        return hasattr(obj, "outgoing_transfer") and obj.outgoing_transfer is not None
+        if getattr(obj, "outgoing_transfer", None) is not None:
+            return True
+        # Bulk transfers link via the `covering_transfers` M2M instead of
+        # the single reverse OneToOne.
+        try:
+            return obj.covering_transfers.exists()
+        except Exception:
+            return False
 
     def _transfer(self, obj):
-        """Internal helper — returns the related OutgoingTransfer or None."""
-        return getattr(obj, "outgoing_transfer", None) if self.get_has_pkr_transfer(obj) else None
+        """Internal helper — returns the related OutgoingTransfer or None.
+
+        Prefers the single-payment transfer (legacy/standard flow); falls
+        back to the most recent bulk transfer covering this payment so the
+        customer sees the shared bank txn ID + receipt on every payment the
+        lump-sum settled.
+        """
+        single = getattr(obj, "outgoing_transfer", None)
+        if single is not None:
+            return single
+        try:
+            return obj.covering_transfers.order_by("-sent_at").first()
+        except Exception:
+            return None
 
     def get_transfer_receipt(self, obj):
         t = self._transfer(obj)
@@ -334,19 +353,59 @@ class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
 
 class OutgoingTransferSerializer(serializers.ModelSerializer):
     sent_by_email = serializers.CharField(source="sent_by.email", read_only=True)
+    payment_ids = serializers.SerializerMethodField()
+
+    def get_payment_ids(self, obj):
+        # All payments this transfer covers: the legacy single FK (if any)
+        # plus the M2M set, de-duplicated.
+        ids = set()
+        if obj.incoming_payment_id:
+            ids.add(str(obj.incoming_payment_id))
+        for p in obj.payments.all():
+            ids.add(str(p.id))
+        return list(ids)
 
     class Meta:
         model = OutgoingPKRTransfer
         fields = [
             "id", "reference",
-            "incoming_payment", "customer_bank_account",
+            "incoming_payment", "payment_ids", "customer_bank_account",
             "amount_pkr", "bank_transaction_id",
             "receipt", "notes",
             "sent_by", "sent_by_email", "sent_at",
         ]
         read_only_fields = [
-            "id", "reference", "sent_by", "sent_by_email", "sent_at",
+            "id", "reference", "payment_ids",
+            "sent_by", "sent_by_email", "sent_at",
         ]
+
+
+class OutgoingTransferBulkCreateSerializer(serializers.Serializer):
+    """Record ONE PKR transfer that settles many of a customer's payments.
+
+    The company frequently sends a single lump-sum PKR payment covering
+    several of a customer's USD receipts. This validates that every
+    selected payment belongs to the same customer, shares one currency,
+    and is ready (rate+fee applied, not already settled).
+    """
+    payment_ids = serializers.ListField(
+        child=serializers.UUIDField(), allow_empty=False,
+    )
+    # Accept the bank-account id as a UUID and resolve it in validate() so
+    # we don't need a relational field with an eager queryset at import time
+    # (which would assert at class-definition before any __init__ runs).
+    customer_bank_account = serializers.UUIDField()
+    amount_pkr = serializers.DecimalField(max_digits=18, decimal_places=2)
+    bank_transaction_id = serializers.CharField(max_length=100)
+    receipt = serializers.ImageField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_customer_bank_account(self, value):
+        from myapp.Models.Banking_models import CustomerBankAccount
+        try:
+            return CustomerBankAccount.objects.get(pk=value)
+        except CustomerBankAccount.DoesNotExist:
+            raise serializers.ValidationError("Unknown bank account.")
 
 
 class StatusUpdateSerializer(serializers.Serializer):
@@ -362,19 +421,6 @@ class CustomerConfirmSerializer(serializers.Serializer):
 
 class ForceCompleteSerializer(serializers.Serializer):
     """Admin force-completes an unresponsive-customer stale payment."""
-    reason = serializers.CharField(required=True, max_length=500)
-
-
-class ForceCompleteBulkSerializer(serializers.Serializer):
-    """Admin force-completes several stale payments in one action.
-
-    `ids` is the list of payment UUIDs to complete; `reason` is logged
-    against every one of them in the activity trail.
-    """
-    ids = serializers.ListField(
-        child=serializers.UUIDField(),
-        allow_empty=False,
-    )
     reason = serializers.CharField(required=True, max_length=500)
 
 

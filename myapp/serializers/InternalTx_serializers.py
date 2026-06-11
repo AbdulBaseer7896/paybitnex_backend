@@ -105,6 +105,9 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
     fee_expense_id = serializers.PrimaryKeyRelatedField(
         source="fee_expense", read_only=True,
     )
+    pk_fee_expense_id = serializers.PrimaryKeyRelatedField(
+        source="pk_fee_expense", read_only=True,
+    )
     fee_dist_partner_name = serializers.SerializerMethodField()
     created_by_email = serializers.CharField(
         source="created_by.email", read_only=True,
@@ -134,6 +137,10 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "currency", "currency_code", "amount",
             "fee_amount", "fee_currency", "fee_currency_code",
             "fee_expense_id",
+            # Pakistani-bank side (USA→PK only)
+            "pk_fee_percent", "pk_fee_amount",
+            "pk_conversion_rate", "pk_amount_pkr",
+            "pk_fee_expense_id",
             "fee_dist_type", "fee_dist_partner_name", "fee_dist_partner", "fee_dist_partner_name",
             # Method + meta
             "method", "method_display",
@@ -147,6 +154,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "id", "source_label", "destination_label",
             "method_display", "source_type_display", "destination_type_display",
             "currency_code", "fee_currency_code", "fee_expense_id",
+            "pk_amount_pkr", "pk_fee_expense_id",
             "fee_dist_type", "fee_dist_partner_name",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
@@ -251,5 +259,58 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "fee_amount": "Fee cannot be negative.",
             })
+
+        # ── Pakistani-bank fee + conversion rate (USA→PK only) ───────────
+        # Only meaningful when money lands in a PK bank. For other
+        # destinations we simply ignore/zero them so a stray value can't
+        # pollute reporting.
+        pk_pct = data.get("pk_fee_percent", None)
+        pk_amt = data.get("pk_fee_amount", None)
+        pk_rate = data.get("pk_conversion_rate", None)
+
+        if dst == InternalTxDestination.PK_BANK:
+            if pk_pct is not None and Decimal(str(pk_pct)) < 0:
+                raise serializers.ValidationError({
+                    "pk_fee_percent": "PK fee percent cannot be negative.",
+                })
+            if pk_amt is not None and Decimal(str(pk_amt)) < 0:
+                raise serializers.ValidationError({
+                    "pk_fee_amount": "PK fee amount cannot be negative.",
+                })
+            if pk_rate is not None and Decimal(str(pk_rate)) <= 0:
+                raise serializers.ValidationError({
+                    "pk_conversion_rate":
+                        "Conversion rate must be greater than zero.",
+                })
+
+            # Resolve the PK fee amount from the percentage when the caller
+            # didn't supply an explicit override. amount × pct / 100.
+            gross = merged.get("amount")
+            if gross is not None:
+                gross_d = Decimal(str(gross))
+                if (pk_amt in (None, "", 0, "0") and pk_pct not in (None, "")):
+                    data["pk_fee_amount"] = (
+                        gross_d * Decimal(str(pk_pct)) / Decimal("100")
+                    ).quantize(Decimal("0.01"))
+                resolved_fee = Decimal(str(
+                    data.get("pk_fee_amount",
+                             merged.get("pk_fee_amount") or "0")
+                ))
+                # Net PKR landed = (gross − pk_fee) × rate.
+                effective_rate = (
+                    pk_rate
+                    if pk_rate not in (None, "")
+                    else merged.get("pk_conversion_rate")
+                )
+                if effective_rate not in (None, ""):
+                    data["pk_amount_pkr"] = (
+                        (gross_d - resolved_fee) * Decimal(str(effective_rate))
+                    ).quantize(Decimal("0.01"))
+        else:
+            # Non-PK destination: never carry PK-side values.
+            data["pk_fee_percent"] = Decimal("0")
+            data["pk_fee_amount"] = Decimal("0")
+            data["pk_conversion_rate"] = None
+            data["pk_amount_pkr"] = None
 
         return data

@@ -313,6 +313,41 @@ class InternalTransaction(models.Model):
                   "as `currency`; left null = inherit from `currency`.",
     )
 
+    # ── Pakistani-bank side (only relevant for USA bank → PK bank) ──────
+    # The receiving PK bank charges its own fee, expressed as a percentage
+    # of the gross transferred amount (default 0.25%, but editable per
+    # transfer). We store BOTH the percentage and the resolved fee amount
+    # so historical rows stay correct even if the default rate changes.
+    pk_fee_percent = models.DecimalField(
+        max_digits=6, decimal_places=4, default=0,
+        help_text="Pakistani bank fee as a percent of the gross amount "
+                  "(e.g. 0.25 = 0.25%). Only used for USA→PK transfers.",
+    )
+    pk_fee_amount = models.DecimalField(
+        max_digits=18, decimal_places=2, default=0,
+        help_text="Resolved PK bank fee in `currency` (amount × "
+                  "pk_fee_percent / 100). Auto-pushed into Expenses in "
+                  "the BANKING category, like the USA-side fee.",
+    )
+    # The dollar rate the PK bank gave us, i.e. 1 unit of `currency` = N PKR.
+    # Used to compute how many PKR actually landed.
+    pk_conversion_rate = models.DecimalField(
+        max_digits=14, decimal_places=6, null=True, blank=True,
+        help_text="PKR the receiving bank paid per 1 unit of `currency` "
+                  "(1 USD = N PKR). Only used for USA→PK transfers.",
+    )
+    pk_amount_pkr = models.DecimalField(
+        max_digits=20, decimal_places=2, null=True, blank=True,
+        help_text="Net PKR that landed: (amount − pk_fee_amount) × "
+                  "pk_conversion_rate. Stored for reporting.",
+    )
+    # Separate Expense link for the PK-side fee (the USA-side fee uses
+    # `fee_expense`). Kept distinct so each fee is its own auditable row.
+    pk_fee_expense = models.ForeignKey(
+        "myapp.Expense", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="internal_transaction_pk_fees",
+    )
+
     # Method
     method = models.CharField(
         max_length=16, choices=InternalTxMethod.CHOICES,

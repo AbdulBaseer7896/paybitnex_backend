@@ -337,6 +337,68 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         # Create expense distribution based on fee_dist_type
         self._sync_fee_distribution(tx, exp, custom_splits=custom_splits)
 
+    def _sync_pk_fee_expense(self, tx):
+        """Create / update / delete the linked PK-bank fee Expense.
+
+        Mirrors `_sync_fee_expense` but for the Pakistani-bank fee
+        (`pk_fee_amount`), kept as its own Expense row so each side's fee
+        is independently auditable. The PK fee is always absorbed by the
+        company (it's a banking cost on our incoming funds), so no
+        partner-split logic is applied here.
+        """
+        pk_fee = Decimal(str(tx.pk_fee_amount or "0"))
+        # PK fee is charged in `currency` (the USD we send); the bank
+        # deducts it before converting. Record the expense in that currency.
+        fee_currency_code = tx.currency_id
+
+        if pk_fee <= 0:
+            if tx.pk_fee_expense_id:
+                old = tx.pk_fee_expense
+                tx.pk_fee_expense = None
+                tx.save(update_fields=["pk_fee_expense", "updated_at"])
+                if old is not None:
+                    try:
+                        old.delete()
+                    except Exception:
+                        pass
+            return
+
+        dest = tx.destination_label() or "PK bank"
+        title = f"PK bank fee — {dest}"[:200]
+        vendor_name = (
+            tx.dest_pk_bank.label if tx.dest_pk_bank_id else "PK bank"
+        )
+        purpose = (
+            f"Auto-recorded Pakistani-bank fee ({tx.pk_fee_percent}%) for "
+            f"internal transaction {tx.id} ({tx.amount} {tx.currency_id} "
+            f"USA → PK bank)."
+        )
+
+        if tx.pk_fee_expense_id:
+            exp = tx.pk_fee_expense
+            exp.title = title
+            exp.category = ExpenseCategory.BANKING
+            exp.vendor = vendor_name
+            exp.currency_id = fee_currency_code
+            exp.amount = pk_fee
+            exp.purpose = purpose
+            exp.spent_on = tx.occurred_on
+            exp.save()
+            return
+
+        exp = Expense.objects.create(
+            title=title,
+            category=ExpenseCategory.BANKING,
+            vendor=vendor_name,
+            currency_id=fee_currency_code,
+            amount=pk_fee,
+            purpose=purpose,
+            spent_on=tx.occurred_on,
+            created_by=tx.created_by,
+        )
+        tx.pk_fee_expense = exp
+        tx.save(update_fields=["pk_fee_expense", "updated_at"])
+
     # ------------------------------------------------------------------
     # CRUD lifecycle hooks
     # ------------------------------------------------------------------
@@ -352,6 +414,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             except Exception:
                 custom_splits = None
         self._sync_fee_expense(obj, custom_splits=custom_splits)
+        self._sync_pk_fee_expense(obj)
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
             target=obj,
@@ -386,6 +449,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             except Exception:
                 custom_splits = None
         self._sync_fee_expense(obj, custom_splits=custom_splits)
+        self._sync_pk_fee_expense(obj)
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_UPDATE,
             target=obj,
@@ -449,6 +513,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
               .annotate(
                   total=Sum("amount"),
                   fees=Sum("fee_amount"),
+                  pk_fees=Sum("pk_fee_amount"),
                   count=Count("id"),
               )
               .order_by("currency_id")
@@ -472,6 +537,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                     "currency": r["currency_id"],
                     "total": str(r["total"] or 0),
                     "fees": str(r["fees"] or 0),
+                    "pk_fees": str(r["pk_fees"] or 0),
                     "count": r["count"],
                 }
                 for r in by_currency
