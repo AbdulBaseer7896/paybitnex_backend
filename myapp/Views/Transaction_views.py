@@ -841,6 +841,117 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         return Response(IncomingPaymentSerializer(payment).data)
 
+    @action(
+        detail=False, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="bulk-force-complete",
+    )
+    def bulk_force_complete(self, request):
+        """
+        Force-complete MANY stale PKR_SENT payments in one request.
+
+        Body:
+            {
+              "ids": ["<uuid>", "<uuid>", ...],   # required, non-empty
+              "reason": "<text>"                  # required, applied to all
+            }
+
+        Each payment is processed in its own savepoint so one bad row
+        (e.g. already completed, or wrong status) doesn't roll back the
+        whole batch. Returns a per-id breakdown of what succeeded and what
+        was skipped, plus the updated rows.
+
+        Mirrors the single `force_complete` action exactly: same status
+        guard, same fee distribution, same status-history + audit logging,
+        and the same required-reason rule — just looped over a list.
+        """
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+
+        ids = request.data.get("ids")
+        reason = (request.data.get("reason") or "").strip()
+
+        if not isinstance(ids, (list, tuple)) or not ids:
+            return Response(
+                {"detail": "Provide a non-empty list of payment ids in `ids`."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not reason:
+            return Response(
+                {"detail": "A reason is required and is logged against every "
+                           "payment in the batch."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # De-dupe while preserving order.
+        seen = set()
+        ordered_ids = []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                ordered_ids.append(i)
+
+        payments = {
+            str(p.id): p
+            for p in IncomingPayment.objects.filter(id__in=ordered_ids)
+        }
+
+        completed = []
+        skipped = []
+
+        for pid in ordered_ids:
+            payment = payments.get(str(pid))
+            if payment is None:
+                skipped.append({"id": str(pid), "reason": "Not found."})
+                continue
+            if payment.status != TransactionStatus.PKR_SENT:
+                skipped.append({
+                    "id": str(pid),
+                    "reference": payment.reference,
+                    "reason": "Not awaiting confirmation (status is "
+                              f"'{payment.status}').",
+                })
+                continue
+            try:
+                with dbtx.atomic():
+                    before_status = payment.status
+                    payment.force_completed_by = request.user
+                    payment.force_completed_at = timezone.now()
+                    payment.completed_at = timezone.now()
+                    payment.status = TransactionStatus.COMPLETED
+                    payment.is_stale = False
+                    payment.save(update_fields=[
+                        "force_completed_by", "force_completed_at",
+                        "completed_at", "status", "is_stale", "updated_at",
+                    ])
+                    _record_status_change(
+                        payment, before_status, TransactionStatus.COMPLETED,
+                        user=request.user,
+                        note=f"Force-completed by admin (bulk) — reason: {reason}",
+                    )
+                    distribute_fee_for_payment(payment)
+                    AuditLog.record(
+                        user=request.user, action=AuditLog.ACTION_UPDATE,
+                        target=payment,
+                        description=(
+                            f"{payment.reference}: force-completed by admin "
+                            f"(bulk). Reason: {reason}"
+                        ),
+                    )
+                completed.append(payment)
+            except Exception as e:  # pragma: no cover — keep the batch going
+                skipped.append({
+                    "id": str(pid),
+                    "reference": getattr(payment, "reference", ""),
+                    "reason": f"Error: {e}",
+                })
+
+        return Response({
+            "completed_count": len(completed),
+            "skipped_count": len(skipped),
+            "completed": IncomingPaymentSerializer(completed, many=True).data,
+            "skipped": skipped,
+        })
+
     # ---- admin/accountant: update real exchange rate on existing transaction ----
     @action(
         detail=True, methods=["post"],
