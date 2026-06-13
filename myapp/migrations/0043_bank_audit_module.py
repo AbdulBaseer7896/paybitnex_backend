@@ -1,5 +1,5 @@
 """
-Migration 0042: Bank-reconciliation audit module.
+Migration 0043: Bank-reconciliation audit module.
 
 Additive only — two new tables, zero changes to existing models:
 
