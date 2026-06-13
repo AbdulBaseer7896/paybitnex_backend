@@ -530,8 +530,18 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
               .order_by("destination_type")
         )
 
+        # Total PKR that actually landed in our Pakistani banks via USA→PK
+        # internal transfers (sum of the computed `pk_amount_pkr`). This is
+        # the rupee pool the customer payouts are funded from.
+        pk_received_pkr = (
+            qs.filter(destination_type="pk_bank")
+              .aggregate(v=Sum("pk_amount_pkr"))["v"]
+            or 0
+        )
+
         return Response({
             "total_count": qs.count(),
+            "pk_received_pkr": str(pk_received_pkr),
             "by_currency": [
                 {
                     "currency": r["currency_id"],

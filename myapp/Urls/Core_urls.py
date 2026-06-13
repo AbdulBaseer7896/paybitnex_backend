@@ -4,7 +4,7 @@ from rest_framework.routers import DefaultRouter
 
 from myapp.Views.Core_views import (
     CurrencyViewSet, PaymentMethodViewSet, SystemSettingViewSet,
-    AuditLogListView, dashboard_summary, bank_balances,
+    AuditLogListView, dashboard_summary, bank_balances, bitnex_week,
 )
 from myapp.Views.Feature_views import FeatureRegistryView
 
@@ -19,5 +19,6 @@ urlpatterns = [
     path("activity/",  AuditLogListView.as_view(), name="activity"),
     path("dashboard/", dashboard_summary, name="dashboard"),
     path("bank-balances/", bank_balances, name="bank-balances"),
+    path("bitnex-week/", bitnex_week, name="bitnex-week"),
     path("features/", FeatureRegistryView.as_view(), name="feature-registry"),
 ]

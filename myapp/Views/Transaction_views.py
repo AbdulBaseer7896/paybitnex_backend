@@ -441,6 +441,71 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
 
     # ---- accountant: verify documents (STAGE 1) ----
     @action(
+        detail=False, methods=["post"], url_path="staff-create",
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+    )
+    def staff_create(self, request):
+        """Admin/accountant creates a payment ON BEHALF OF a customer.
+
+        Used when a customer doesn't enter their own transactions — staff
+        record them from the dashboard. Mirrors the customer `create` flow
+        but: (a) the customer is taken from the `customer` field in the body
+        rather than request.user, (b) no KYC gate (staff are trusted), and
+        (c) `handled_by` records which staff member entered it.
+
+        Body: customer (user id) + the usual payment fields
+              (payment_method, sender_name, sender_company,
+               external_transaction_id, amount, currency, screenshot_*).
+        """
+        customer_id = request.data.get("customer")
+        if not customer_id:
+            return Response(
+                {"customer": "Select a customer to record this payment for."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from myapp.Models.Auth_models import User
+        customer = User.objects.filter(
+            pk=customer_id, role=UserRole.CUSTOMER,
+        ).first()
+        if not customer:
+            return Response(
+                {"customer": "No such customer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        s = IncomingPaymentCreateSerializer(
+            data=request.data, context={"request": request},
+        )
+        s.is_valid(raise_exception=True)
+        with dbtx.atomic():
+            ref = next_reference(IncomingPayment, prefix="PBX")
+            payment = IncomingPayment.objects.create(
+                customer=customer,
+                reference=ref,
+                status=TransactionStatus.SUBMITTED,
+                handled_by=request.user,
+                **s.validated_data,
+            )
+            _record_status_change(
+                payment, from_status="", to_status=TransactionStatus.SUBMITTED,
+                user=request.user,
+                note=f"Submitted on behalf of {customer.email} by {request.user.email}",
+            )
+        AuditLog.record(
+            user=request.user, action=AuditLog.ACTION_CREATE, target=payment,
+            description=(
+                f"Recorded payment {payment.reference} on behalf of "
+                f"{customer.email} ({payment.amount} "
+                f"{getattr(payment.currency, 'code', '') or ''})"
+            ),
+        )
+        return Response(
+            IncomingPaymentSerializer(payment).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    # ---- accountant: verify documents (STAGE 1) ----
+    @action(
         detail=True, methods=["post"],
         permission_classes=[IsAuthenticated, IsAdminOrAccountant],
         url_path="verify",

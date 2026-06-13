@@ -9,6 +9,7 @@ Account views:
 """
 from adrf.views import APIView as AsyncAPIView
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.generics import ListAPIView
@@ -47,6 +48,25 @@ class UserAdminViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     filterset_fields = ["role", "is_active", "is_profile_complete"]
     search_fields = ["email", "full_name", "phone"]
+
+    def get_queryset(self):
+        """List users, with a free-text `q` search over email, name, phone.
+
+        The admin Users page sends `?q=` (not DRF's default `search`), so we
+        resolve it explicitly here rather than relying on SearchFilter. Each
+        whitespace-separated token must match at least one field, so
+        "john gmail" narrows to rows matching both.
+        """
+        qs = super().get_queryset()
+        q = (self.request.query_params.get("q") or "").strip()
+        if q:
+            for token in q.split():
+                qs = qs.filter(
+                    Q(email__icontains=token) |
+                    Q(full_name__icontains=token) |
+                    Q(phone__icontains=token)
+                )
+        return qs
 
     def get_serializer_class(self):
         if self.action == "create":

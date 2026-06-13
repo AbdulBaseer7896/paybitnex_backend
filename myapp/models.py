@@ -36,6 +36,7 @@ from myapp.Models.InternalTx_models import (
 from myapp.Models.Dispatch_models import (
     DispatchCompany, DispatchDriver, Dispatch, DispatchStatus,
 )
+from myapp.Models.BankAudit_models import BankAudit, BankAuditFile
 
 __all__ = [
     "User", "UserRole",
@@ -60,4 +61,6 @@ __all__ = [
     "InternalTxSource", "InternalTxDestination", "InternalTxMethod",
     # Dispatch module
     "DispatchCompany", "DispatchDriver", "Dispatch", "DispatchStatus",
+    # Bank reconciliation audit module
+    "BankAudit", "BankAuditFile",
 ]

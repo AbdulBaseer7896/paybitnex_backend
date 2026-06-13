@@ -174,6 +174,73 @@ class SystemSettingViewSet(viewsets.ModelViewSet):
         serializer.save(updated_by=self.request.user)
 
 
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def bitnex_week(request):
+    """Company-wide Bitnex-week config.
+
+    GET  → any authenticated user (accountant/customer need it for their
+           default date filter). Returns the configured start day, label,
+           and the current week's date range.
+    POST → admin/accountant only. Body: { start_day: 0..6, name?: str }.
+    """
+    from myapp.Utils.bitnex_week import (
+        get_week_config, current_week_range, WEEKDAY_NAMES,
+    )
+
+    if request.method == "POST":
+        role = getattr(request.user, "role", None)
+        if role not in (UserRole.ADMIN, UserRole.ACCOUNTANT):
+            return Response(
+                {"detail": "Only admins or accountants can change the week."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        raw_day = request.data.get("start_day")
+        try:
+            start_day = int(raw_day)
+        except (TypeError, ValueError):
+            return Response(
+                {"start_day": "Must be an integer 0 (Mon) … 6 (Sun)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if start_day < 0 or start_day > 6:
+            return Response(
+                {"start_day": "Must be 0 (Mon) … 6 (Sun)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        SystemSetting.objects.update_or_create(
+            key="bitnex_week_start_day",
+            defaults={"value": str(start_day), "updated_by": request.user},
+        )
+        name = (request.data.get("name") or "").strip()
+        if name:
+            SystemSetting.objects.update_or_create(
+                key="bitnex_week_name",
+                defaults={"value": name, "updated_by": request.user},
+            )
+        AuditLog.record(
+            user=request.user, action=AuditLog.ACTION_UPDATE,
+            target_label="bitnex_week",
+            description=(
+                f"Bitnex week set to start on {WEEKDAY_NAMES[start_day]}"
+                + (f" (name: {name})" if name else "")
+            ),
+        )
+
+    cfg = get_week_config()
+    wf, wt = current_week_range()
+    return Response({
+        "start_day": cfg["start_day"],
+        "start_day_name": cfg["start_day_name"],
+        "name": cfg["name"],
+        "weekday_names": WEEKDAY_NAMES,
+        "current_week": {
+            "from": wf.isoformat(),
+            "to": wt.isoformat(),
+        },
+    })
+
+
 class AuditLogListView(ListAPIView):
     """
     Full activity feed.
