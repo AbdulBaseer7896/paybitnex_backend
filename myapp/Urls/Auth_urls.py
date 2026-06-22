@@ -5,6 +5,7 @@ from myapp.Views.Auth_views import (
     SignupRequestOTPView, SignupVerifyOTPView,
     ForgotPasswordRequestOTPView, ForgotPasswordResetView,
     OnboardingStepView,
+    PaymentsPinView, PaymentsPinVerifyView, ForgotPaymentsPinView,
 )
 
 urlpatterns = [
@@ -13,6 +14,11 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="auth-logout"),
     path("me/", MeView.as_view(), name="auth-me"),
     path("change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("payments-pin/", PaymentsPinView.as_view(), name="auth-payments-pin"),
+    path("payments-pin/verify/", PaymentsPinVerifyView.as_view(),
+         name="auth-payments-pin-verify"),
+    path("payments-pin/forgot/", ForgotPaymentsPinView.as_view(),
+         name="auth-payments-pin-forgot"),
     path("onboarding-step/", OnboardingStepView.as_view(),
          name="auth-onboarding-step"),
 

@@ -64,6 +64,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
+    # Optional 4–8 digit PIN that locks the customer's "My Payments" page.
+    # Stored as a salted hash (never plaintext). Because it lives on the
+    # account (server-side), it's known across browsers/devices — but the
+    # *unlocked* state is tracked per-browser in localStorage, so signing in
+    # from a new browser starts locked until the PIN is entered. Blank = no
+    # PIN set (page is open).
+    payments_pin_hash = models.CharField(max_length=255, blank=True, default="")
+
     created_at = models.DateTimeField(default=timezone.now, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(

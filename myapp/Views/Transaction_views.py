@@ -422,13 +422,17 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         s = IncomingPaymentCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
+        validated = dict(s.validated_data)
+        # Business date defaults to today when the client didn't send one.
+        if not validated.get("occurred_on"):
+            validated["occurred_on"] = timezone.localdate()
         with dbtx.atomic():
             ref = next_reference(IncomingPayment, prefix="PBX")
             payment = IncomingPayment.objects.create(
                 customer=request.user,
                 reference=ref,
                 status=TransactionStatus.SUBMITTED,
-                **s.validated_data,
+                **validated,
             )
             _record_status_change(
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
@@ -477,6 +481,10 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             data=request.data, context={"request": request},
         )
         s.is_valid(raise_exception=True)
+        validated = dict(s.validated_data)
+        # Business date — staff may backdate a batch; defaults to today.
+        if not validated.get("occurred_on"):
+            validated["occurred_on"] = timezone.localdate()
         with dbtx.atomic():
             ref = next_reference(IncomingPayment, prefix="PBX")
             payment = IncomingPayment.objects.create(
@@ -484,7 +492,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 reference=ref,
                 status=TransactionStatus.SUBMITTED,
                 handled_by=request.user,
-                **s.validated_data,
+                **validated,
             )
             _record_status_change(
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,

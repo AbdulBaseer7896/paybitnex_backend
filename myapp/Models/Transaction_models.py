@@ -184,6 +184,14 @@ class IncomingPayment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
+    # Business / transaction date. `created_at` records when the row was
+    # *entered* into the system; `occurred_on` is the date the payment
+    # actually happened. Defaults to the entry date but staff (and the
+    # batch entry grid) can override it — e.g. when an accountant records
+    # a batch of payments a day or two after they were received. This is
+    # the date shown to the customer as the official payment date.
+    occurred_on = models.DateField(null=True, blank=True, db_index=True)
+
     class Meta:
         db_table = "incoming_payments"
         ordering = ["-created_at"]

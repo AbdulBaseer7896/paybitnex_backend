@@ -45,6 +45,9 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
     # import the Currency model at module-load time (avoids circular imports
     # in certain Django apps bootstrapping orders).
     currency = serializers.CharField(required=False, allow_blank=True)
+    # Business date of the payment. Optional — defaults to today (set in the
+    # view) when omitted. Lets staff / batch entry backdate a transaction.
+    occurred_on = serializers.DateField(required=False, allow_null=True)
 
     class Meta:
         model = IncomingPayment
@@ -55,6 +58,7 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
             "currency", "amount",
             "screenshot_transaction",
             "extra_document",
+            "occurred_on",
         ]
         extra_kwargs = {
             "screenshot_transaction": {"validators": [validate_image_file]},
@@ -271,6 +275,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "handled_by", "handled_by_email",
             "customer_confirmed_at", "is_stale",
             "force_completed_by", "force_completed_by_email", "force_completed_at",
+            "occurred_on",
             "created_at", "updated_at", "completed_at",
             "status_history",
             "has_pkr_transfer",
@@ -292,6 +297,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "has_pkr_transfer",
             "transfer_receipt", "transfer_notes", "transfer_bank_transaction_id",
             "transfer_amount_pkr", "transfer_recorded_at", "transfer_recorded_by_email",
+            "occurred_on",
             "created_at", "updated_at", "verified_at", "completed_at",
         ]
 

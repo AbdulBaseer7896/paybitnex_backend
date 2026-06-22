@@ -37,17 +37,32 @@ from myapp.Utils.email_tasks import send_email_async
 #  ADMIN USER CRUD
 # =====================================================================
 class UserAdminViewSet(viewsets.ModelViewSet):
-    """Admin-only: list / create / update / delete users.
+    """Admin (+ accountant for edits): list / create / update / delete users.
 
     Extra actions:
       POST /users/{id}/reset_password/   → force-reset password
       POST /users/{id}/toggle_active/    → flip is_active
+
+    Permissions:
+      - Admins have full access (create / update / delete / reset / toggle).
+      - Accountants may LIST, RETRIEVE and UPDATE users (so they can correct
+        a customer's email/name), but cannot create, delete, reset passwords
+        or toggle active state. This is enforced in `get_permissions`.
     """
     permission_classes = [IsAuthenticated, IsAdmin]
     queryset = User.objects.all().order_by("-created_at")
     serializer_class = UserSerializer
     filterset_fields = ["role", "is_active", "is_profile_complete"]
     search_fields = ["email", "full_name", "phone"]
+
+    # Actions an accountant is allowed to perform (everything else is admin-only).
+    _ACCOUNTANT_ALLOWED = {"list", "retrieve", "update", "partial_update"}
+
+    def get_permissions(self):
+        """Accountants get read + edit; admins get everything."""
+        if self.action in self._ACCOUNTANT_ALLOWED:
+            return [IsAuthenticated(), IsAdminOrAccountant()]
+        return [IsAuthenticated(), IsAdmin()]
 
     def get_queryset(self):
         """List users, with a free-text `q` search over email, name, phone.
@@ -106,17 +121,27 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         before = {
+            "email": instance.email,
             "full_name": instance.full_name, "role": instance.role,
             "is_active": instance.is_active, "phone": instance.phone,
         }
+        old_email = instance.email
         s = self.get_serializer(instance, data=request.data, partial=partial)
         s.is_valid(raise_exception=True)
         self.perform_update(s)
+        instance.refresh_from_db()
+        email_changed = old_email and instance.email and old_email != instance.email
+        desc = (
+            f"Admin changed email {old_email} → {instance.email}"
+            if email_changed else
+            f"Admin updated user {instance.email}"
+        )
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_UPDATE, target=instance,
-            description=f"Admin updated user {instance.email}",
+            description=desc,
             before=before,
             after={
+                "email": instance.email,
                 "full_name": instance.full_name, "role": instance.role,
                 "is_active": instance.is_active, "phone": instance.phone,
             },

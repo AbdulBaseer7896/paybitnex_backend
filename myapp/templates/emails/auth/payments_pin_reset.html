@@ -1,0 +1,29 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+<p style="margin:0 0 20px 0;">
+  We reset the PIN that locks your <b>My Payments</b> page on
+  {{ company_name }}. Use the new 8-digit PIN below to unlock it. You can
+  change this PIN any time from <b>Account settings → Payments PIN</b>.
+</p>
+
+<div style="text-align:center; margin:24px 0;">
+  <div style="display:inline-block;
+              background:#E7F1EC;
+              border:1px solid #0F3D30;
+              border-radius:8px;
+              padding:18px 32px;
+              font-family:'Courier New', monospace;
+              font-size:32px;
+              font-weight:700;
+              letter-spacing:6px;
+              color:#0F3D30;">
+    {{ pin }}
+  </div>
+</div>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If you didn't request this, please change your PIN and your account
+  password right away, and contact support.
+</p>
+{% endblock %}

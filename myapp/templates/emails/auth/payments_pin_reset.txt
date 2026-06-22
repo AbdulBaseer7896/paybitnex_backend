@@ -1,0 +1,15 @@
+Hi{% if name %} {{ name }}{% endif %},
+
+We reset the PIN that locks your "My Payments" page on {{ company_name }}.
+
+Your new 8-digit PIN is:
+
+    {{ pin }}
+
+Use it to unlock your payments page. You can change this PIN any time from
+Account settings -> Payments PIN.
+
+If you didn't request this, please change your PIN and your account password
+right away, and contact support.
+
+— {{ company_name }}

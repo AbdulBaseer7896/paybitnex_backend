@@ -171,6 +171,169 @@ class ChangePasswordView(AsyncAPIView):
         return Response({"detail": "Password changed."})
 
 
+class _SetPinSerializer(serializers.Serializer):
+    """Validate a 4–8 digit numeric PIN for the My-Payments lock."""
+    pin = serializers.RegexField(
+        r"^\d{4,8}$", error_messages={"invalid": "PIN must be 4–8 digits."},
+    )
+    # Required when a PIN already exists (changing it) and when removing it.
+    current_pin = serializers.CharField(required=False, allow_blank=True)
+
+
+class PaymentsPinView(APIView):
+    """Customer self-service for the optional "My Payments" PIN.
+
+    GET    → { is_set: bool }
+    POST   → set or change the PIN. Body: { pin, current_pin? }.
+             If a PIN already exists, current_pin must match.
+    DELETE → remove the PIN. Body: { current_pin } must match.
+    The PIN is stored only as a salted hash. Unlock state is tracked
+    per-browser on the client (localStorage), so a new browser starts locked.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"is_set": bool(request.user.payments_pin_hash)})
+
+    def post(self, request):
+        from django.contrib.auth.hashers import make_password, check_password
+        user = request.user
+        s = _SetPinSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        new_pin = s.validated_data["pin"]
+        current = s.validated_data.get("current_pin") or ""
+        # If a PIN already exists, require the current one to change it.
+        if user.payments_pin_hash:
+            if not check_password(current, user.payments_pin_hash):
+                return Response(
+                    {"current_pin": "Current PIN is incorrect."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        user.payments_pin_hash = make_password(new_pin)
+        user.save(update_fields=["payments_pin_hash", "updated_at"])
+        AuditLog.record(
+            user=user, action=AuditLog.ACTION_UPDATE, target=user,
+            description="Set/changed My-Payments PIN",
+        )
+        return Response({"is_set": True})
+
+    def delete(self, request):
+        from django.contrib.auth.hashers import check_password
+        user = request.user
+        if not user.payments_pin_hash:
+            return Response({"is_set": False})
+        current = request.data.get("current_pin") or ""
+        if not check_password(current, user.payments_pin_hash):
+            return Response(
+                {"current_pin": "Current PIN is incorrect."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user.payments_pin_hash = ""
+        user.save(update_fields=["payments_pin_hash", "updated_at"])
+        AuditLog.record(
+            user=user, action=AuditLog.ACTION_UPDATE, target=user,
+            description="Removed My-Payments PIN",
+        )
+        return Response({"is_set": False})
+
+
+class PaymentsPinVerifyView(APIView):
+    """Verify a PIN to unlock the My-Payments page in the current browser.
+
+    POST { pin } → { ok: bool }. Returns 200 with ok=false on mismatch so the
+    client can show an inline error without treating it as a hard failure.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.contrib.auth.hashers import check_password
+        user = request.user
+        if not user.payments_pin_hash:
+            # No PIN configured → nothing to unlock.
+            return Response({"ok": True, "is_set": False})
+        pin = str(request.data.get("pin") or "")
+        ok = check_password(pin, user.payments_pin_hash)
+        return Response({"ok": ok, "is_set": True})
+
+
+class _ForgotPinSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class ForgotPaymentsPinView(APIView):
+    """Reset the logged-in customer's My-Payments PIN by email.
+
+    POST /auth/payments-pin/forgot/   {email}
+
+    Flow:
+      - The customer is already authenticated (they're on their own
+        settings page). They type their email to confirm identity.
+      - If the email matches their OWN account, generate a fresh random
+        8-digit PIN, store its hash, and email the new PIN to that
+        address. The customer can then use it to unlock and, if they
+        want, change it from settings.
+      - If the email doesn't match their account, return 400 so the UI
+        can show "that's not the email on this account".
+
+    The new PIN is sent ONLY to the account's email — never returned in
+    the API response — so seeing it requires access to the inbox.
+    A light per-user rate limit prevents spamming the mailbox.
+    """
+    permission_classes = [IsAuthenticated]
+
+    RATE_LIMIT_MAX = 5
+    RATE_LIMIT_TTL = 60 * 60   # 5 resets per hour per user
+
+    def post(self, request):
+        import secrets
+        from django.contrib.auth.hashers import make_password
+
+        user = request.user
+        s = _ForgotPinSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        email = s.validated_data["email"].strip().lower()
+
+        # The email must belong to THIS account.
+        if email != (user.email or "").strip().lower():
+            return Response(
+                {"email": "That email doesn't match this account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Per-user rate limit.
+        cache_key = f"forgot_pin_rl:{user.id}"
+        attempts = cache.get(cache_key, 0)
+        if attempts >= self.RATE_LIMIT_MAX:
+            return Response(
+                {"detail": "Too many PIN reset requests. Please try again later."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        cache.set(cache_key, attempts + 1, self.RATE_LIMIT_TTL)
+
+        # Generate a fresh 8-digit PIN (allowing leading zeros).
+        new_pin = "".join(secrets.choice("0123456789") for _ in range(8))
+        user.payments_pin_hash = make_password(new_pin)
+        user.save(update_fields=["payments_pin_hash", "updated_at"])
+
+        send_email_async(
+            to=[user.email],
+            subject="Your new payments PIN",
+            template="auth/payments_pin_reset",
+            context={
+                "name": user.full_name or "",
+                "pin": new_pin,
+            },
+        )
+
+        AuditLog.record(
+            user=user, action=AuditLog.ACTION_UPDATE, target=user,
+            description="Reset My-Payments PIN via email",
+        )
+        return Response({
+            "detail": "A new 8-digit PIN has been sent to your email.",
+        })
+
+
 class _OnboardingStepSerializer(serializers.Serializer):
     """Validate the step number — clamped to 0..3 since onboarding has 4 steps."""
     step = serializers.IntegerField(min_value=0, max_value=3)

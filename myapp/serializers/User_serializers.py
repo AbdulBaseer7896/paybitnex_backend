@@ -25,6 +25,8 @@ class UserSerializer(serializers.ModelSerializer):
     user who had any CustomerFeatureAccess rows.
     """
     profile_picture_url = serializers.SerializerMethodField()
+    # Whether the customer has set a "My Payments" PIN (never the PIN itself).
+    payments_pin_set = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -32,12 +34,16 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "email", "full_name", "role", "phone",
             "is_active", "is_profile_complete", "onboarding_step",
             "profile_picture_url",
+            "payments_pin_set",
             "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "created_at", "updated_at", "is_profile_complete",
-            "profile_picture_url",
+            "profile_picture_url", "payments_pin_set",
         ]
+
+    def get_payments_pin_set(self, obj):
+        return bool(getattr(obj, "payments_pin_hash", ""))
 
     def get_profile_picture_url(self, obj):
         # Explicit profile picture takes priority.
@@ -95,14 +101,35 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
 
 
 class AdminUpdateUserSerializer(serializers.ModelSerializer):
-    """Admin edits an existing user."""
+    """Admin / accountant edits an existing user.
+
+    `email` is now editable so staff can correct a mistyped email after a
+    user/customer account was created (e.g. xyz@gmail.com → abc@gmail.com).
+    Uniqueness is checked manually (case-insensitive) so this stays safe
+    inside async views and gives a clear field-level error.
+    """
+    email = serializers.EmailField(required=False)
+
     class Meta:
         model = User
-        fields = ["full_name", "phone", "role", "is_active"]
+        fields = ["email", "full_name", "phone", "role", "is_active"]
 
     def validate_role(self, value):
         if value not in UserRole.values:
             raise serializers.ValidationError("Invalid role.")
+        return value
+
+    def validate_email(self, value):
+        if not value:
+            return value
+        value = value.strip()
+        qs = User.objects.filter(email__iexact=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                "A user with that email already exists."
+            )
         return value
 
 
