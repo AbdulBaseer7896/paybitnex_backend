@@ -184,6 +184,33 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
         src = merged.get("source_type")
         dst = merged.get("destination_type")
 
+        # ── Normalise stale FKs when the type is being changed ───────────
+        # On a PATCH the instance may still hold the OLD source/destination
+        # FK. If the caller changes the *type* without also blanking the old
+        # FK (e.g. the bulk sheet flips destination_type usa_bank → pk_bank),
+        # the merged view would carry a mismatched FK and fail the "must be
+        # empty" checks below. So whenever a type is present in the incoming
+        # payload, we explicitly null out the FKs that don't belong to the
+        # new type — both in `data` (persisted) and `merged` (validated).
+        def _clear(field):
+            data[field] = None
+            merged[field] = None
+
+        if "source_type" in data:
+            if src == InternalTxSource.USA_BANK and merged.get("source_credit_card"):
+                _clear("source_credit_card")
+            if src == InternalTxSource.CREDIT_CARD and merged.get("source_usa_bank"):
+                _clear("source_usa_bank")
+        if "destination_type" in data:
+            keep = {
+                InternalTxDestination.USA_BANK: "dest_usa_bank",
+                InternalTxDestination.VENDOR:   "dest_vendor",
+                InternalTxDestination.PK_BANK:  "dest_pk_bank",
+            }.get(dst)
+            for f in ("dest_usa_bank", "dest_vendor", "dest_pk_bank"):
+                if f != keep and merged.get(f):
+                    _clear(f)
+
         # ── Source validation ────────────────────────────────────────
         if src == InternalTxSource.USA_BANK:
             if not merged.get("source_usa_bank"):
