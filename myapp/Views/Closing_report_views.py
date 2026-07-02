@@ -426,7 +426,24 @@ def _compute_report(filters):
     # net_profit_val = fees - partner_payouts - expenses  (fee-based margin)
     # rate_spread_total = (real_rate - tangent_rate) × total_amount
     # Together these are ALL company earnings
-    total_company_profit = net_profit_val + rate_spread_total
+    # ── Card-transaction PKR profit ────────────────────────────────
+    # Credit-card internal transactions book the rupee value of the card
+    # spend (amount × card_dollar_rate) as company profit. Summed over the
+    # same reporting window (by occurred_on) and added to company profit.
+    from myapp.Models.InternalTx_models import InternalTransaction as _ITX
+    _card_qs = _ITX.objects.filter(
+        source_type="credit_card",
+        occurred_on__gte=filters["date_from"],
+        occurred_on__lte=filters["date_to"],
+        card_profit_pkr__isnull=False,
+    )
+    if filters["currency"] and filters["currency"] != "all":
+        _card_qs = _card_qs.filter(currency_id=filters["currency"])
+    card_profit_total = Decimal(str(
+        _card_qs.aggregate(s=Sum("card_profit_pkr"))["s"] or 0
+    )).quantize(Decimal("0.01"))
+
+    total_company_profit = net_profit_val + rate_spread_total + card_profit_total
 
     return {
         "filters": {
@@ -447,6 +464,7 @@ def _compute_report(filters):
             "net_profit_pkr": str(net_profit_val),
             "rate_spread_profit_pkr": str(rate_spread_total),
             "partner_rate_spread_pkr": str(partner_rate_spread),
+            "card_profit_pkr": str(card_profit_total),
             "total_company_profit_pkr": str(total_company_profit),
         },
         "customer_rollup": customer_rollup,
@@ -540,6 +558,12 @@ def closing_report_csv(request):
                      report["expense_totals"].get("total_pkr_equivalent", "0")])
     writer.writerow(["Net Profit (fees - partner payouts - expenses):",
                      report["totals"]["net_profit_pkr"]])
+    writer.writerow(["Rate-spread Profit (PKR):",
+                     report["totals"].get("rate_spread_profit_pkr", "0")])
+    writer.writerow(["Internal Card Transactions Profit (PKR):",
+                     report["totals"].get("card_profit_pkr", "0")])
+    writer.writerow(["Total Company Profit (PKR):",
+                     report["totals"].get("total_company_profit_pkr", "0")])
     writer.writerow([])
 
     # Customer rollup

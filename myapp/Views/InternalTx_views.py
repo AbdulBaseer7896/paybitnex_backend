@@ -539,9 +539,18 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             or 0
         )
 
+        # Total company profit booked from card transactions in the window
+        # (sum of the computed card_profit_pkr on credit-card-source rows).
+        card_profit_pkr = (
+            qs.filter(source_type="credit_card")
+              .aggregate(v=Sum("card_profit_pkr"))["v"]
+            or 0
+        )
+
         return Response({
             "total_count": qs.count(),
             "pk_received_pkr": str(pk_received_pkr),
+            "card_profit_pkr": str(card_profit_pkr),
             "by_currency": [
                 {
                     "currency": r["currency_id"],

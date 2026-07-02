@@ -255,6 +255,14 @@ class DispatchViewSet(viewsets.ModelViewSet):
             qs = qs.filter(invoice__isnull=False)
         elif p.get("invoiced") in ("0", "false", "False"):
             qs = qs.filter(invoice__isnull=True)
+        # Origin / destination city filters. pickup_location and
+        # dropoff_location are free-text ("City, ST"), so we match on
+        # substring (case-insensitive) — selecting a city shows every load
+        # whose origin/destination contains that city name.
+        if p.get("origin_city"):
+            qs = qs.filter(pickup_location__icontains=p.get("origin_city").strip())
+        if p.get("dest_city"):
+            qs = qs.filter(dropoff_location__icontains=p.get("dest_city").strip())
         search = (p.get("search") or "").strip()
         if search:
             qs = qs.filter(
@@ -436,6 +444,41 @@ class DispatchViewSet(viewsets.ModelViewSet):
             "paid_dispatch_fee": str(paid["paid_dispatch_fee"] or Decimal("0")),
             "unpaid_count": unpaid["unpaid_count"] or 0,
             "unpaid_dispatch_fee": str(unpaid["unpaid_dispatch_fee"] or Decimal("0")),
+        })
+
+    @action(detail=False, methods=["get"])
+    def cities(self, request):
+        """Distinct origin (pickup) and destination (dropoff) values for
+        the current customer's loads — used to populate the Origin city /
+        Dest city filter dropdowns on the loads list.
+
+        Returns:
+            { "origins": ["Chicago, IL", ...], "destinations": [...] }
+
+        Both lists are de-duplicated case-insensitively, sorted
+        alphabetically, and exclude blanks. The customer scope comes from
+        the base queryset; the city filters themselves are intentionally
+        ignored here so picking one filter doesn't shrink the other's list.
+        """
+        if not _is_customer(request):
+            return Response({"origins": [], "destinations": []})
+        base = Dispatch.objects.filter(customer=request.user)
+
+        def _distinct(field):
+            seen = {}
+            for val in (base.exclude(**{f"{field}": ""})
+                            .values_list(field, flat=True)):
+                v = (val or "").strip()
+                if not v:
+                    continue
+                key = v.lower()
+                if key not in seen:
+                    seen[key] = v
+            return sorted(seen.values(), key=lambda s: s.lower())
+
+        return Response({
+            "origins": _distinct("pickup_location"),
+            "destinations": _distinct("dropoff_location"),
         })
 
     @action(detail=True, methods=["post"], url_path="generate-invoice")

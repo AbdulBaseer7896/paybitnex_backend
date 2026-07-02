@@ -141,6 +141,8 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "pk_fee_percent", "pk_fee_amount",
             "pk_conversion_rate", "pk_amount_pkr",
             "pk_fee_expense_id",
+            # Card-transaction dollar rate + PKR profit (credit_card source)
+            "card_dollar_rate", "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name", "fee_dist_partner", "fee_dist_partner_name",
             # Method + meta
             "method", "method_display",
@@ -155,6 +157,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "method_display", "source_type_display", "destination_type_display",
             "currency_code", "fee_currency_code", "fee_expense_id",
             "pk_amount_pkr", "pk_fee_expense_id",
+            "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
@@ -173,6 +176,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
                 "source_usa_bank", "source_credit_card",
                 "dest_usa_bank", "dest_vendor", "dest_pk_bank",
                 "amount", "fee_amount", "currency", "fee_currency",
+                "card_dollar_rate",
             ):
                 merged[f] = getattr(self.instance, f, None)
         merged.update(data)
@@ -312,5 +316,33 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             data["pk_fee_amount"] = Decimal("0")
             data["pk_conversion_rate"] = None
             data["pk_amount_pkr"] = None
+
+        # ── Card-transaction dollar rate → PKR profit ────────────────────
+        # For credit-card source transactions the rupee value of the spend
+        # (amount × card_dollar_rate) is booked as company profit. For any
+        # other source we clear the card_* fields so a stray value can't
+        # leak into profit reporting.
+        card_rate = data.get("card_dollar_rate", None)
+        if src == InternalTxSource.CREDIT_CARD:
+            if card_rate is not None and card_rate != "" and Decimal(str(card_rate)) < 0:
+                raise serializers.ValidationError({
+                    "card_dollar_rate": "Dollar rate cannot be negative.",
+                })
+            effective_rate = (
+                card_rate
+                if card_rate not in (None, "")
+                else merged.get("card_dollar_rate")
+            )
+            gross = merged.get("amount")
+            if effective_rate not in (None, "") and gross is not None:
+                data["card_profit_pkr"] = (
+                    Decimal(str(gross)) * Decimal(str(effective_rate))
+                ).quantize(Decimal("0.01"))
+            elif effective_rate in (None, ""):
+                # No rate supplied → no card profit recorded.
+                data["card_profit_pkr"] = None
+        else:
+            data["card_dollar_rate"] = None
+            data["card_profit_pkr"] = None
 
         return data

@@ -348,6 +348,27 @@ class InternalTransaction(models.Model):
         null=True, blank=True, related_name="internal_transaction_pk_fees",
     )
 
+    # ── Card-transaction dollar rate + PKR profit ──────────────────────
+    # For CREDIT CARD source transactions the company spends foreign
+    # currency on the card and books the rupee value of that spend as
+    # company profit. We store the rate the company used (1 unit of
+    # `currency` = N PKR) and the resolved rupee profit so it counts in the
+    # overview and closing reports. Independent of the USA→PK pk_* fields
+    # above (those model money that lands in a PK bank; this models profit
+    # realised on card spend).
+    card_dollar_rate = models.DecimalField(
+        max_digits=14, decimal_places=6, null=True, blank=True,
+        help_text="PKR value per 1 unit of `currency` for a card "
+                  "transaction (1 USD = N PKR). Only used when "
+                  "source_type = 'credit_card'.",
+    )
+    card_profit_pkr = models.DecimalField(
+        max_digits=20, decimal_places=2, null=True, blank=True,
+        help_text="Company profit in PKR from this card transaction: "
+                  "amount × card_dollar_rate. Counted as company profit "
+                  "in the overview and closing reports.",
+    )
+
     # Method
     method = models.CharField(
         max_length=16, choices=InternalTxMethod.CHOICES,
