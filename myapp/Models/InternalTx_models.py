@@ -302,8 +302,12 @@ class InternalTransaction(models.Model):
     fee_amount = models.DecimalField(
         max_digits=18, decimal_places=2, default=0,
         help_text="Bank / wire / processing fee charged on this "
-                  "transfer, in `currency`. Auto-pushed into Expenses "
-                  "in the BANKING category.",
+                  "transfer, in `currency`. For bank transfers it is "
+                  "auto-pushed into Expenses in the BANKING category. "
+                  "For CREDIT-CARD transactions the fee belongs to the "
+                  "company: it is shown as the bank fee but booked as "
+                  "PROFIT (folded into card_profit_pkr), never as an "
+                  "expense.",
     )
     fee_currency = models.ForeignKey(
         "myapp.Currency", on_delete=models.PROTECT, to_field="code",
@@ -365,8 +369,10 @@ class InternalTransaction(models.Model):
     card_profit_pkr = models.DecimalField(
         max_digits=20, decimal_places=2, null=True, blank=True,
         help_text="Company profit in PKR from this card transaction: "
-                  "amount × card_dollar_rate. Counted as company profit "
-                  "in the overview and closing reports.",
+                  "(amount + fee_amount) × card_dollar_rate. The bank "
+                  "fee on card spend belongs to the company, so it is "
+                  "included here. Counted as company profit in the "
+                  "overview and closing reports.",
     )
 
     # Method

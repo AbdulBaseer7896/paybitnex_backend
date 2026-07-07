@@ -346,9 +346,14 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
 
         # ── Card-transaction dollar rate → PKR profit ────────────────────
         # For credit-card source transactions the rupee value of the spend
-        # (amount × card_dollar_rate) is booked as company profit. For any
-        # other source we clear the card_* fields so a stray value can't
-        # leak into profit reporting.
+        # PLUS the bank fee — (amount + fee_amount) × card_dollar_rate — is
+        # booked as company profit. The fee is still displayed as the bank
+        # fee on the transaction, but for card payments it belongs to the
+        # company (it is NOT pushed into Expenses — see the viewset's
+        # `_sync_fee_expense`), so it counts toward profit at the same
+        # dollar rate as the spend itself. For any other source we clear
+        # the card_* fields so a stray value can't leak into profit
+        # reporting.
         card_rate = data.get("card_dollar_rate", None)
         if src == InternalTxSource.CREDIT_CARD:
             if card_rate is not None and card_rate != "" and Decimal(str(card_rate)) < 0:
@@ -361,9 +366,13 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
                 else merged.get("card_dollar_rate")
             )
             gross = merged.get("amount")
+            fee = merged.get("fee_amount")
+            fee_d = Decimal(str(fee)) if fee not in (None, "") else Decimal("0")
+            if fee_d < 0:
+                fee_d = Decimal("0")
             if effective_rate not in (None, "") and gross is not None:
                 data["card_profit_pkr"] = (
-                    Decimal(str(gross)) * Decimal(str(effective_rate))
+                    (Decimal(str(gross)) + fee_d) * Decimal(str(effective_rate))
                 ).quantize(Decimal("0.01"))
             elif effective_rate in (None, ""):
                 # No rate supplied → no card profit recorded.

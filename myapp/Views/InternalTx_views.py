@@ -274,15 +274,39 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         """Create / update / delete the linked Expense based on fee.
 
         Idempotent — safe to call after every save. Decisions:
+          * CREDIT-CARD source → NEVER an expense. The bank fee on a card
+            transaction belongs to the company: it is still shown as the
+            bank fee on the transaction, but it's booked as PROFIT (it's
+            folded into `card_profit_pkr` = (amount + fee) × dollar rate
+            by the serializer). Any previously linked fee expense is
+            removed so the overview / closing reports don't double-count
+            it as a cost.
           * fee > 0  + linked expense missing → create
           * fee > 0  + linked expense exists  → update fields in place
           * fee == 0 + linked expense exists  → delete linked expense
           * fee == 0 + no linked expense      → no-op
         """
+        from myapp.Models.InternalTx_models import InternalTxSource
+
         fee = Decimal(str(tx.fee_amount or "0"))
         fee_currency_code = (
             tx.fee_currency_id or tx.currency_id
         )
+
+        # Card transactions: the fee is company profit, not a cost. Drop
+        # any linked expense (e.g. from before this rule, or after the
+        # source_type was edited to credit_card) and bail out.
+        if tx.source_type == InternalTxSource.CREDIT_CARD:
+            if tx.fee_expense_id:
+                old = tx.fee_expense
+                tx.fee_expense = None
+                tx.save(update_fields=["fee_expense", "updated_at"])
+                if old is not None:
+                    try:
+                        old.delete()
+                    except Exception:
+                        pass
+            return
 
         if fee <= 0:
             # Drop any stale linked expense so the dashboard doesn't

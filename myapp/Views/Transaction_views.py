@@ -136,7 +136,11 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         "reference", "external_transaction_id",
         "sender_name", "sender_company", "customer__email",
     ]
-    ordering_fields = ["created_at", "amount", "status"]
+    # `tx_date` is an annotation added in get_queryset — the *business* /
+    # transaction date (occurred_on, falling back to the entry date for
+    # legacy rows). Lists sort by it so the admin sees payments in true
+    # transaction-date order, not just entry order.
+    ordering_fields = ["created_at", "occurred_on", "tx_date", "amount", "status"]
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -145,7 +149,20 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         u = self.request.user
-        qs = self.queryset
+        # Annotate the *transaction* date: `occurred_on` (the business date
+        # the customer / staff entered for the payment), falling back to the
+        # entry date for legacy rows that predate the field. Filtering AND
+        # ordering both use this so "the date" always means the transaction
+        # date, with `created_at` kept purely as the submitted-at reference.
+        from django.db.models.functions import Coalesce, TruncDate
+        from django.db.models import DateField
+        qs = self.queryset.annotate(
+            tx_date=Coalesce(
+                "occurred_on",
+                TruncDate("created_at"),
+                output_field=DateField(),
+            ),
+        )
         if u.role == UserRole.CUSTOMER:
             # Customers see every one of their own payments, including stale
             # ones — they're the ones who need to confirm those.
@@ -195,12 +212,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     def _apply_date_filter(self, qs):
         """Apply ?date_from / ?date_to query params if present.
 
-        Both bounds are inclusive and operate on `created_at::date` so
-        users get the calendar-day intuition they expect ("from Apr 1 to
-        Apr 30" includes anything on Apr 1 from 00:00 onward and
-        anything on Apr 30 up to 23:59:59). Invalid strings are ignored
-        silently — DRF would 400 on a filter, but we don't want a
-        malformed URL to break the page.
+        Both bounds are inclusive and operate on the TRANSACTION date
+        (`occurred_on`, falling back to `created_at::date` for legacy
+        rows via the `tx_date` annotation). The submitted-at timestamp
+        (`created_at`) is reference-only — date filters always mean
+        "payments that HAPPENED between these dates". Invalid strings
+        are ignored silently — DRF would 400 on a filter, but we don't
+        want a malformed URL to break the page.
         """
         from datetime import datetime
         p = self.request.query_params
@@ -209,10 +227,10 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         try:
             if df:
                 df_date = datetime.strptime(df, "%Y-%m-%d").date()
-                qs = qs.filter(created_at__date__gte=df_date)
+                qs = qs.filter(tx_date__gte=df_date)
             if dt:
                 dt_date = datetime.strptime(dt, "%Y-%m-%d").date()
-                qs = qs.filter(created_at__date__lte=dt_date)
+                qs = qs.filter(tx_date__lte=dt_date)
         except (ValueError, TypeError):
             # Bad date string → just skip filtering rather than raising.
             pass
@@ -278,22 +296,32 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 | Q(sender_company__icontains=search)
                 | Q(customer__email__icontains=search)
             )
-        # Date range — inclusive of both bounds, calendar-day semantics
+        # Date range — inclusive of both bounds, calendar-day semantics.
+        # Filters on the TRANSACTION date (occurred_on, falling back to
+        # the entry date for legacy rows) — same semantics as the list.
+        from django.db.models.functions import Coalesce, TruncDate
+        from django.db.models import DateField
+        qs = qs.annotate(
+            tx_date=Coalesce(
+                "occurred_on", TruncDate("created_at"),
+                output_field=DateField(),
+            ),
+        )
         try:
             df = request.query_params.get("date_from")
             dt_ = request.query_params.get("date_to")
             if df:
                 qs = qs.filter(
-                    created_at__date__gte=datetime.strptime(df, "%Y-%m-%d").date(),
+                    tx_date__gte=datetime.strptime(df, "%Y-%m-%d").date(),
                 )
             if dt_:
                 qs = qs.filter(
-                    created_at__date__lte=datetime.strptime(dt_, "%Y-%m-%d").date(),
+                    tx_date__lte=datetime.strptime(dt_, "%Y-%m-%d").date(),
                 )
         except (ValueError, TypeError):
             pass
 
-        qs = qs.order_by("-created_at")
+        qs = qs.order_by("-tx_date", "-created_at")
 
         # Build the CSV in memory. For the data sets this app handles
         # (low thousands per customer), in-memory is fine. If we ever
@@ -303,6 +331,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         writer = csv.writer(buf)
         writer.writerow([
             "Reference",
+            "Date",
             "Submitted at",
             "Customer name",
             "Customer email",

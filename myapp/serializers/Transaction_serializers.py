@@ -9,6 +9,7 @@ Transaction serializers (revised for new flow):
 - CustomerConfirmSerializer / ForceCompleteSerializer: new completion flow.
 """
 from myapp.Utils.file_validators import validate_image_file, validate_doc_file
+from decimal import Decimal
 from rest_framework import serializers
 
 from myapp.Models.Transaction_models import (
@@ -442,12 +443,16 @@ class UpdateRealRateSerializer(serializers.Serializer):
 
 class FeeAllocationSerializer(serializers.Serializer):
     """Validate fee allocation for under-fee transactions (Update #3)."""
+    # NOTE: DRF wants Decimal instances (not ints) for min_value/max_value
+    # on DecimalField — ints work but emit a UserWarning on every startup.
     company = serializers.DecimalField(
-        max_digits=6, decimal_places=3, min_value=0, max_value=100,
+        max_digits=6, decimal_places=3,
+        min_value=Decimal("0"), max_value=Decimal("100"),
     )
     partners = serializers.DictField(
         child=serializers.DecimalField(max_digits=6, decimal_places=3,
-                                       min_value=0, max_value=100),
+                                       min_value=Decimal("0"),
+                                       max_value=Decimal("100")),
         required=False,
         help_text="{'<partner_uuid>': <percentage_of_fee>}",
     )
