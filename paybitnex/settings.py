@@ -235,10 +235,23 @@ AWS_S3_OBJECT_PARAMETERS = {
 # S3Storage.exists() call would fail with 403 and break every
 # upload (company logo, profile pic, KYC doc, invoice PDF). See
 # myapp/Utils/s3_storage.py for the full rationale.
+# Local development has no S3 bucket configured, and an empty
+# AWS_STORAGE_BUCKET_NAME makes botocore raise ParamValidationError
+# ("Invalid bucket name") the moment anything serializes a FileField —
+# which takes down /transactions/payments/, /customers-summary/, and any
+# other endpoint that returns a receipt or profile picture.
+#
+# So: fall back to Django's local FileSystemStorage whenever S3 isn't
+# actually configured. Set USE_S3=True (and the AWS_* vars) to opt in.
+USE_S3 = config("USE_S3", default=bool(AWS_STORAGE_BUCKET_NAME), cast=bool)
+
+if USE_S3 and AWS_STORAGE_BUCKET_NAME:
+    _default_storage = {"BACKEND": "myapp.Utils.s3_storage.SilentS3Storage"}
+else:
+    _default_storage = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
+
 STORAGES = {
-    "default": {
-        "BACKEND": "myapp.Utils.s3_storage.SilentS3Storage",
-    },
+    "default": _default_storage,
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
@@ -307,7 +320,7 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-MEDIA_URL = "media/"
+MEDIA_URL = "/media/"   # leading slash → absolute URLs, not relative to the current path
 MEDIA_ROOT = BASE_DIR / "media"
 
 EMAIL_BACKEND = config(

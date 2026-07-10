@@ -422,14 +422,15 @@ def _compute_report(filters):
     )["s"] or 0
     partner_rate_spread = Decimal(str(_raw_spread)).quantize(Decimal("0.01"))
 
-    # Total company profit = fee margin (net_profit_val) + rate spread
-    # net_profit_val = fees - partner_payouts - expenses  (fee-based margin)
-    # rate_spread_total = (real_rate - tangent_rate) × total_amount
-    # Together these are ALL company earnings
-    # ── Card-transaction PKR profit ────────────────────────────────
-    # Credit-card internal transactions book the rupee value of the card
-    # spend (amount × card_dollar_rate) as company profit. Summed over the
-    # same reporting window (by occurred_on) and added to company profit.
+    # ── Card-transaction PKR RECEIVED ──────────────────────────────
+    # Credit-card internal transactions convert card spend into rupees that
+    # land in our Pakistani banks: (amount + fee_amount) × card_dollar_rate.
+    #
+    # This is NOT company profit — it is money received, exactly like a
+    # USA→PK bank transfer. It belongs in the PKR reconciliation pool that
+    # funds customer payouts, and must be excluded from every profit total.
+    # (The DB column is still named `card_profit_pkr` for historical
+    # reasons; no migration is needed to change its meaning.)
     from myapp.Models.InternalTx_models import InternalTransaction as _ITX
     _card_qs = _ITX.objects.filter(
         source_type="credit_card",
@@ -439,11 +440,15 @@ def _compute_report(filters):
     )
     if filters["currency"] and filters["currency"] != "all":
         _card_qs = _card_qs.filter(currency_id=filters["currency"])
-    card_profit_total = Decimal(str(
+    card_received_total = Decimal(str(
         _card_qs.aggregate(s=Sum("card_profit_pkr"))["s"] or 0
     )).quantize(Decimal("0.01"))
 
-    total_company_profit = net_profit_val + rate_spread_total + card_profit_total
+    # Total company profit = fee margin (net_profit_val) + rate spread.
+    # net_profit_val   = fees - partner_payouts - expenses (fee-based margin)
+    # rate_spread_total = (real_rate - tangent_rate) × total_amount
+    # Card transactions are deliberately NOT added here.
+    total_company_profit = net_profit_val + rate_spread_total
 
     return {
         "filters": {
@@ -464,7 +469,10 @@ def _compute_report(filters):
             "net_profit_pkr": str(net_profit_val),
             "rate_spread_profit_pkr": str(rate_spread_total),
             "partner_rate_spread_pkr": str(partner_rate_spread),
-            "card_profit_pkr": str(card_profit_total),
+            # PKR received into PK banks from card transactions. Not profit.
+            "card_received_pkr": str(card_received_total),
+            # Back-compat alias only — do NOT add to any profit total.
+            "card_profit_pkr": str(card_received_total),
             "total_company_profit_pkr": str(total_company_profit),
         },
         "customer_rollup": customer_rollup,
@@ -560,10 +568,13 @@ def closing_report_csv(request):
                      report["totals"]["net_profit_pkr"]])
     writer.writerow(["Rate-spread Profit (PKR):",
                      report["totals"].get("rate_spread_profit_pkr", "0")])
-    writer.writerow(["Internal Card Transactions Profit (PKR):",
-                     report["totals"].get("card_profit_pkr", "0")])
     writer.writerow(["Total Company Profit (PKR):",
                      report["totals"].get("total_company_profit_pkr", "0")])
+    writer.writerow([])
+    # Card transactions are PKR RECEIVED into the PK banks, not profit —
+    # reported separately, below and outside the profit block.
+    writer.writerow(["PKR Received from Card Transactions:",
+                     report["totals"].get("card_received_pkr", "0")])
     writer.writerow([])
 
     # Customer rollup

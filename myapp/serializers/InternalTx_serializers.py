@@ -87,6 +87,14 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
     """
     source_label = serializers.CharField(read_only=True)
     destination_label = serializers.CharField(read_only=True)
+    # PKR received into our PK banks from this card transaction:
+    # (amount + fee_amount) × card_dollar_rate. Reads the legacy
+    # `card_profit_pkr` column — the name is historical, the value is
+    # RECEIVED MONEY, not profit.
+    card_received_pkr = serializers.DecimalField(
+        source="card_profit_pkr", max_digits=20, decimal_places=2,
+        read_only=True,
+    )
     method_display = serializers.CharField(
         source="get_method_display", read_only=True,
     )
@@ -141,8 +149,10 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "pk_fee_percent", "pk_fee_amount",
             "pk_conversion_rate", "pk_amount_pkr",
             "pk_fee_expense_id",
-            # Card-transaction dollar rate + PKR profit (credit_card source)
-            "card_dollar_rate", "card_profit_pkr",
+            # Card-transaction dollar rate + PKR RECEIVED (credit_card source).
+            # `card_profit_pkr` is a back-compat alias of card_received_pkr;
+            # it is money received into PK banks, NOT company profit.
+            "card_dollar_rate", "card_received_pkr", "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name", "fee_dist_partner", "fee_dist_partner_name",
             # Method + meta
             "method", "method_display",
@@ -157,7 +167,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "method_display", "source_type_display", "destination_type_display",
             "currency_code", "fee_currency_code", "fee_expense_id",
             "pk_amount_pkr", "pk_fee_expense_id",
-            "card_profit_pkr",
+            "card_received_pkr", "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
@@ -344,16 +354,18 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             data["pk_conversion_rate"] = None
             data["pk_amount_pkr"] = None
 
-        # ── Card-transaction dollar rate → PKR profit ────────────────────
+        # ── Card-transaction dollar rate → PKR RECEIVED ─────────────────
         # For credit-card source transactions the rupee value of the spend
         # PLUS the bank fee — (amount + fee_amount) × card_dollar_rate — is
-        # booked as company profit. The fee is still displayed as the bank
-        # fee on the transaction, but for card payments it belongs to the
-        # company (it is NOT pushed into Expenses — see the viewset's
-        # `_sync_fee_expense`), so it counts toward profit at the same
-        # dollar rate as the spend itself. For any other source we clear
-        # the card_* fields so a stray value can't leak into profit
-        # reporting.
+        # the amount that lands in our Pakistani banks. The fee is still
+        # displayed as the bank fee on the transaction, but it is NOT pushed
+        # into Expenses (see the viewset's `_sync_fee_expense`); it converts
+        # at the same dollar rate as the spend itself.
+        #
+        # This value is RECEIVED MONEY, not profit — it feeds the PKR
+        # reconciliation pool, never the company-profit total. For any other
+        # source we clear the card_* fields so a stray value can't leak into
+        # the reconciliation figures.
         card_rate = data.get("card_dollar_rate", None)
         if src == InternalTxSource.CREDIT_CARD:
             if card_rate is not None and card_rate != "" and Decimal(str(card_rate)) < 0:

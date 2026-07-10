@@ -304,10 +304,10 @@ class InternalTransaction(models.Model):
         help_text="Bank / wire / processing fee charged on this "
                   "transfer, in `currency`. For bank transfers it is "
                   "auto-pushed into Expenses in the BANKING category. "
-                  "For CREDIT-CARD transactions the fee belongs to the "
-                  "company: it is shown as the bank fee but booked as "
-                  "PROFIT (folded into card_profit_pkr), never as an "
-                  "expense.",
+                  "For CREDIT-CARD transactions the fee is NOT an expense: "
+                  "it is converted along with the spend and folded into "
+                  "card_profit_pkr, which represents PKR RECEIVED into our "
+                  "Pakistani banks (not company profit).",
     )
     fee_currency = models.ForeignKey(
         "myapp.Currency", on_delete=models.PROTECT, to_field="code",
@@ -352,14 +352,17 @@ class InternalTransaction(models.Model):
         null=True, blank=True, related_name="internal_transaction_pk_fees",
     )
 
-    # ── Card-transaction dollar rate + PKR profit ──────────────────────
+    # ── Card-transaction dollar rate + PKR RECEIVED ────────────────────
     # For CREDIT CARD source transactions the company spends foreign
-    # currency on the card and books the rupee value of that spend as
-    # company profit. We store the rate the company used (1 unit of
-    # `currency` = N PKR) and the resolved rupee profit so it counts in the
-    # overview and closing reports. Independent of the USA→PK pk_* fields
-    # above (those model money that lands in a PK bank; this models profit
-    # realised on card spend).
+    # currency on the card, and the rupee value of that spend lands in our
+    # Pakistani banks. We store the rate used (1 unit of `currency` = N PKR)
+    # and the resolved rupee amount.
+    #
+    # IMPORTANT: this is RECEIVED MONEY, not company profit. It joins the
+    # same rupee pool as USA→PK bank transfers (pk_amount_pkr) and funds
+    # customer payouts. It must never be added to any profit total. The
+    # column keeps its historical `card_profit_pkr` name to avoid a data
+    # migration; the API exposes it as `card_received_pkr`.
     card_dollar_rate = models.DecimalField(
         max_digits=14, decimal_places=6, null=True, blank=True,
         help_text="PKR value per 1 unit of `currency` for a card "
@@ -368,11 +371,12 @@ class InternalTransaction(models.Model):
     )
     card_profit_pkr = models.DecimalField(
         max_digits=20, decimal_places=2, null=True, blank=True,
-        help_text="Company profit in PKR from this card transaction: "
-                  "(amount + fee_amount) × card_dollar_rate. The bank "
-                  "fee on card spend belongs to the company, so it is "
-                  "included here. Counted as company profit in the "
-                  "overview and closing reports.",
+        help_text="PKR RECEIVED into our Pakistani banks from this card "
+                  "transaction: (amount + fee_amount) × card_dollar_rate. "
+                  "Despite the legacy column name this is NOT company "
+                  "profit — it is part of the PKR reconciliation pool, "
+                  "alongside USA→PK bank transfers. Exposed by the API as "
+                  "`card_received_pkr`.",
     )
 
     # Method

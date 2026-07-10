@@ -99,6 +99,24 @@ class PaymentMethod(models.Model):
                   "'Reference invoice # in memo'.",
     )
 
+    # ── Bank-statement attribution ────────────────────────────────────
+    # Which of OUR USA bank accounts money received via this method lands
+    # in. This mirrors how US banking actually works: Zelle is enrolled to
+    # exactly one bank account, Cash App's balance IS an account, and
+    # ACH/Wire instructions point at a specific account & routing number.
+    #
+    # The Bank Statement page uses this to attribute every customer
+    # payment to a bank, so "show me everything that hit Chase" includes
+    # the Zelle receipts enrolled there. Nullable: methods without a
+    # mapping show under "Unassigned" on the statement until the admin
+    # sets one in Settings → Payment methods.
+    deposit_account = models.ForeignKey(
+        "myapp.USABankAccount", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="payment_methods",
+        help_text="The company USA bank account where money received via "
+                  "this method is deposited (e.g. Zelle → Chase Business).",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 

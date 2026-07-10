@@ -275,12 +275,11 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
 
         Idempotent — safe to call after every save. Decisions:
           * CREDIT-CARD source → NEVER an expense. The bank fee on a card
-            transaction belongs to the company: it is still shown as the
-            bank fee on the transaction, but it's booked as PROFIT (it's
-            folded into `card_profit_pkr` = (amount + fee) × dollar rate
-            by the serializer). Any previously linked fee expense is
-            removed so the overview / closing reports don't double-count
-            it as a cost.
+            transaction is converted along with the spend: it's folded into
+            `card_profit_pkr` = (amount + fee) × dollar rate by the
+            serializer, which is PKR RECEIVED into our Pakistani banks (not
+            profit). Any previously linked fee expense is removed so the
+            overview / closing reports don't double-count it as a cost.
           * fee > 0  + linked expense missing → create
           * fee > 0  + linked expense exists  → update fields in place
           * fee == 0 + linked expense exists  → delete linked expense
@@ -293,9 +292,9 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             tx.fee_currency_id or tx.currency_id
         )
 
-        # Card transactions: the fee is company profit, not a cost. Drop
-        # any linked expense (e.g. from before this rule, or after the
-        # source_type was edited to credit_card) and bail out.
+        # Card transactions: the fee converts into received PKR, not a
+        # cost. Drop any linked expense (e.g. from before this rule, or
+        # after the source_type was edited to credit_card) and bail out.
         if tx.source_type == InternalTxSource.CREDIT_CARD:
             if tx.fee_expense_id:
                 old = tx.fee_expense
@@ -554,27 +553,41 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
               .order_by("destination_type")
         )
 
-        # Total PKR that actually landed in our Pakistani banks via USA→PK
-        # internal transfers (sum of the computed `pk_amount_pkr`). This is
-        # the rupee pool the customer payouts are funded from.
-        pk_received_pkr = (
+        # PKR that landed in our Pakistani banks via USA→PK BANK transfers
+        # (sum of the computed `pk_amount_pkr`).
+        bank_received_pkr = (
             qs.filter(destination_type="pk_bank")
               .aggregate(v=Sum("pk_amount_pkr"))["v"]
             or 0
         )
 
-        # Total company profit booked from card transactions in the window
-        # (sum of the computed card_profit_pkr on credit-card-source rows).
-        card_profit_pkr = (
+        # PKR that landed in our Pakistani banks via CARD transactions.
+        #
+        # This is (amount + fee_amount) × card_dollar_rate — stored in the
+        # legacy `card_profit_pkr` column. Despite the column name it is NOT
+        # company profit: it is rupees received into the PK banks, exactly
+        # like a USA→PK bank transfer. It funds customer payouts and must
+        # therefore sit in the reconciliation pool, never in the profit
+        # figure. (The column is left named `card_profit_pkr` to avoid a
+        # data migration; the API exposes it as `card_received_pkr`.)
+        card_received_pkr = (
             qs.filter(source_type="credit_card")
               .aggregate(v=Sum("card_profit_pkr"))["v"]
             or 0
         )
 
+        # The single rupee pool = bank transfers + card transactions.
+        pk_received_pkr = bank_received_pkr + card_received_pkr
+
         return Response({
             "total_count": qs.count(),
             "pk_received_pkr": str(pk_received_pkr),
-            "card_profit_pkr": str(card_profit_pkr),
+            "bank_received_pkr": str(bank_received_pkr),
+            "card_received_pkr": str(card_received_pkr),
+            # Back-compat alias. Always equals card_received_pkr; it is NOT
+            # profit. Kept so older clients don't KeyError. Do not add to
+            # any profit total.
+            "card_profit_pkr": str(card_received_pkr),
             "by_currency": [
                 {
                     "currency": r["currency_id"],

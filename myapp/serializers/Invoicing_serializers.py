@@ -140,10 +140,26 @@ class PaymentMethodConfigSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    # Which company USA bank money received via this method lands in —
+    # drives the Bank Statement page's attribution of customer payments.
+    deposit_account_label = serializers.CharField(
+        source="deposit_account.label", read_only=True, default=None,
+    )
+
+    def to_internal_value(self, data):
+        # The settings form submits multipart, where a cleared FK arrives
+        # as the empty string. Coerce it to None so "no mapping" is a
+        # valid choice instead of a PK-lookup validation error.
+        if hasattr(data, "get") and data.get("deposit_account") == "":
+            data = data.copy()
+            data["deposit_account"] = None
+        return super().to_internal_value(data)
+
     class Meta:
         model = PaymentMethod
         fields = [
             "code", "label", "is_active", "is_default", "sort_order",
+            "deposit_account", "deposit_account_label",
             "email", "phone", "cashapp_tag",
             "holder_name",
             "account_number", "routing_number",
@@ -154,7 +170,8 @@ class PaymentMethodConfigSerializer(serializers.ModelSerializer):
             "instructions",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["created_at", "updated_at", "qr_code_url"]
+        read_only_fields = ["created_at", "updated_at", "qr_code_url",
+                            "deposit_account_label"]
 
 
 class CustomerAllowedPaymentMethodSerializer(serializers.ModelSerializer):
