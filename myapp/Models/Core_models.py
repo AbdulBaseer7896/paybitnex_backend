@@ -48,12 +48,63 @@ class PaymentMethod(models.Model):
     # ---- basic identity ----
     code = models.CharField(max_length=32, primary_key=True)
     label = models.CharField(max_length=80)
+
+    # ---- method family / type ----
+    # `code` stays the stable primary key referenced by payments, invoices
+    # and the customer allowed-methods table. But the admin can now create
+    # MULTIPLE methods of the same kind — e.g. two separate Zelle accounts
+    # (code "zelle", "zelle_2") each enrolled with a different USA bank.
+    # `method_type` records which family a row belongs to so the UI can pick
+    # the right icon/branding and group them, independent of the arbitrary
+    # code. It is derived automatically from the code on save when left blank
+    # (so existing rows and simple single-method setups keep working with no
+    # change), and can be set explicitly when adding an extra account whose
+    # code no longer literally spells out the family.
+    TYPE_ZELLE    = "zelle"
+    TYPE_CASHAPP  = "cashapp"
+    TYPE_ACH_WIRE = "ach_wire"
+    TYPE_PAYONEER = "payoneer"
+    TYPE_OTHER    = "other"
+    METHOD_TYPE_CHOICES = [
+        (TYPE_ZELLE,    "Zelle"),
+        (TYPE_CASHAPP,  "Cash App"),
+        (TYPE_ACH_WIRE, "ACH / Wire"),
+        (TYPE_PAYONEER, "Payoneer"),
+        (TYPE_OTHER,    "Other"),
+    ]
+    method_type = models.CharField(
+        max_length=32, choices=METHOD_TYPE_CHOICES, blank=True, default="",
+        db_index=True,
+        help_text="Payment-method family (Zelle, Cash App, …). Drives the "
+                  "icon and grouping so multiple accounts of the same kind "
+                  "can coexist. Auto-derived from the code when left blank.",
+    )
+
     is_active = models.BooleanField(default=True)
     is_default = models.BooleanField(
         default=False,
         help_text="Show this method to all customers by default (pre-selected).",
     )
     sort_order = models.PositiveSmallIntegerField(default=0)
+
+    @staticmethod
+    def derive_method_type(code):
+        """Best-effort mapping from an arbitrary code to a known family.
+
+        Uses substring matching so 'zelle_2', 'zelle_chase', 'cash_app_hq'
+        all resolve correctly. Mirrors the frontend icon resolver and the
+        Bank Statement page's `_norm_method` so the three stay consistent.
+        """
+        c = (code or "").lower().replace("-", "_").replace(" ", "_")
+        if "zelle" in c:
+            return PaymentMethod.TYPE_ZELLE
+        if "cash" in c:            # cashapp / cash_app
+            return PaymentMethod.TYPE_CASHAPP
+        if "payoneer" in c:
+            return PaymentMethod.TYPE_PAYONEER
+        if "ach" in c or "wire" in c:
+            return PaymentMethod.TYPE_ACH_WIRE
+        return PaymentMethod.TYPE_OTHER
 
     # ---- receiving details (per-method; all optional so the admin can
     #      use whichever fields the method needs) ----
@@ -123,6 +174,27 @@ class PaymentMethod(models.Model):
     class Meta:
         db_table = "payment_methods"
         ordering = ["sort_order", "label"]
+        constraints = [
+            # One USA bank account maps to AT MOST one payment method.
+            # The partial condition lets any number of methods stay
+            # unmapped (deposit_account IS NULL) — only *assigned* banks
+            # are forced to be unique. Django 5 emits this as a partial
+            # unique index which SQLite supports natively.
+            models.UniqueConstraint(
+                fields=["deposit_account"],
+                condition=models.Q(deposit_account__isnull=False),
+                name="uniq_paymentmethod_deposit_account",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Auto-fill method_type from the code when the admin hasn't chosen
+        # one explicitly. Keeps existing single-method setups working with
+        # zero data changes, and gives new same-family accounts a sensible
+        # default the admin can still override.
+        if not self.method_type:
+            self.method_type = self.derive_method_type(self.code)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.label

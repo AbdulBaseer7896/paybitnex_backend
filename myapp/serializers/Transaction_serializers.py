@@ -21,7 +21,8 @@ from myapp.Models.Core_models import PaymentMethod
 class PaymentMethodSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
-        fields = ["code", "label", "is_active", "is_default", "sort_order"]
+        fields = ["code", "label", "method_type",
+                  "is_active", "is_default", "sort_order"]
 
 
 class IncomingPaymentCreateSerializer(serializers.ModelSerializer):

@@ -281,6 +281,63 @@ class PaymentMethodConfigViewSet(viewsets.ModelViewSet):
             )
             instance.delete()
 
+    @action(detail=False, methods=["get"], url_path="bank-links",
+            permission_classes=[IsAuthenticated, IsAdminOrAccountant])
+    def bank_links(self, request):
+        """Map of USA bank accounts ↔ the payment method each is linked to.
+
+        Powers the admin "Payment methods with banks" popup. Returns:
+          - banks:   every active USA bank account, each with the ONE
+                     payment method that deposits into it (or null).
+          - unlinked: payment methods that aren't mapped to any bank yet.
+
+        Enforces the invariant visually: because a bank can be linked to
+        only one method, each bank row carries at most one method.
+        """
+        from myapp.Models.InternalTx_models import USABankAccount
+
+        methods = list(
+            PaymentMethod.objects.select_related("deposit_account")
+            .order_by("sort_order", "label")
+        )
+        # bank id -> method (at most one, guaranteed by the constraint)
+        by_bank = {}
+        unlinked = []
+        for m in methods:
+            if m.deposit_account_id:
+                by_bank[str(m.deposit_account_id)] = m
+            else:
+                unlinked.append(m)
+
+        def _method_brief(m):
+            if m is None:
+                return None
+            return {
+                "code": m.code,
+                "label": m.label,
+                "method_type": m.method_type or PaymentMethod.derive_method_type(m.code),
+                "is_active": m.is_active,
+                "holder_name": m.holder_name,
+                "detail": (m.email or m.cashapp_tag or m.account_number
+                           or m.phone or ""),
+            }
+
+        banks_out = []
+        for b in USABankAccount.objects.filter(is_active=True).order_by("bank", "label"):
+            banks_out.append({
+                "id": str(b.id),
+                "label": b.label,
+                "bank": b.bank,
+                "bank_display": b.get_bank_display(),
+                "account_last4": (b.account_number_last4 or "")[-4:],
+                "linked_method": _method_brief(by_bank.get(str(b.id))),
+            })
+
+        return Response({
+            "banks": banks_out,
+            "unlinked_methods": [_method_brief(m) for m in unlinked],
+        })
+
 
 class CustomerAllowedPaymentMethodViewSet(viewsets.ModelViewSet):
     """

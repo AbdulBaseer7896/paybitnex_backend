@@ -155,10 +155,34 @@ class PaymentMethodConfigSerializer(serializers.ModelSerializer):
             data["deposit_account"] = None
         return super().to_internal_value(data)
 
+    def validate_deposit_account(self, value):
+        """Enforce: one USA bank account maps to at most one payment method.
+
+        The DB has a partial-unique backstop, but validating here gives the
+        admin a readable message instead of an IntegrityError, and names the
+        method that already owns the bank.
+        """
+        if value is None:
+            return value
+        qs = PaymentMethod.objects.filter(deposit_account=value)
+        # On edit, exclude the row being edited (identified by its PK `code`).
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        existing = qs.first()
+        if existing is not None:
+            raise serializers.ValidationError(
+                f"This USA bank account is already linked to "
+                f"\"{existing.label}\". Each bank account can be connected "
+                f"to only one payment method — pick a different bank or "
+                f"unlink it from that method first."
+            )
+        return value
+
     class Meta:
         model = PaymentMethod
         fields = [
-            "code", "label", "is_active", "is_default", "sort_order",
+            "code", "label", "method_type",
+            "is_active", "is_default", "sort_order",
             "deposit_account", "deposit_account_label",
             "email", "phone", "cashapp_tag",
             "holder_name",
@@ -172,6 +196,11 @@ class PaymentMethodConfigSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["created_at", "updated_at", "qr_code_url",
                             "deposit_account_label"]
+        extra_kwargs = {
+            # Optional on input — the model's save() derives it from the code
+            # when omitted, so simple single-method setups need not send it.
+            "method_type": {"required": False},
+        }
 
 
 class CustomerAllowedPaymentMethodSerializer(serializers.ModelSerializer):
