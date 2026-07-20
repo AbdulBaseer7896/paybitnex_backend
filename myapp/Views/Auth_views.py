@@ -422,7 +422,7 @@ class SignupRequestOTPView(APIView):
         otp = EmailOTP.issue(email=email, purpose=OTPPurpose.SIGNUP)
         send_email_async(
             to=[email],
-            subject="Your PayBitnex signup code",
+            subject="Your PaidiX signup code",
             template="auth/otp_signup",
             context={"code": otp.code},
         )
@@ -613,7 +613,7 @@ class ForgotPasswordRequestOTPView(APIView):
         otp = EmailOTP.issue(email=email, purpose=OTPPurpose.PASSWORD_RESET)
         send_email_async(
             to=[email],
-            subject="Your PayBitnex password reset code",
+            subject="Your PaidiX password reset code",
             template="auth/otp_password_reset",
             context={"code": otp.code, "name": user.full_name or ""},
         )

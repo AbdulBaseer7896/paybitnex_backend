@@ -534,7 +534,7 @@ def closing_report_csv(request):
     writer = csv.writer(buf)
 
     # Header block
-    writer.writerow(["PayBitnex Closing Report"])
+    writer.writerow(["PaidiX Closing Report"])
     writer.writerow([
         "Period:", filters["period"],
         "From:", filters["date_from"].isoformat(),

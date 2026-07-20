@@ -127,7 +127,7 @@ DEFAULT_SETTINGS = [
      "Spread applied on top of live rates (e.g. 1.5 = -1.5%)."),
     ("auto_approve_kyc", "false",
      "Skip manual KYC review (NOT recommended)."),
-    ("company_name", "PayBitnex",
+    ("company_name", "PaidiX",
      "Company display name."),
     ("support_email", "support@paybitnex.com",
      "Support contact email."),

@@ -1,5 +1,5 @@
 """
-PayBitnex branded PDF report builder.
+PaidiX branded PDF report builder.
 
 Public API:
     PDFReportBuilder(title, subtitle="", metadata={}).build(sections) -> bytes
@@ -19,7 +19,7 @@ The builder stamps:
   · A footer on every page with "Generated on <timestamp>" + "Page N of M"
   · A cover block at the top of page 1 (title, subtitle, metadata grid)
 
-Everything uses the palette/typography tokens from the PayBitnex web app so
+Everything uses the palette/typography tokens from the PaidiX web app so
 printed output feels visually connected to the screen UI.
 """
 from decimal import Decimal
@@ -39,15 +39,15 @@ from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 
 
 # ── Brand palette ────────────────────────────────────────────────────
-BRAND_DARK  = colors.HexColor("#0F3D30")   # deep brand green
-BRAND_MID   = colors.HexColor("#12694E")
-BRAND_LITE  = colors.HexColor("#E7F1EC")
+BRAND_DARK  = colors.HexColor("#022F32")   # deep brand teal (#022F32)
+BRAND_MID   = colors.HexColor("#0E6E74")   # lifted teal
+BRAND_LITE  = colors.HexColor("#E3F0EF")
 INK_900     = colors.HexColor("#101115")
 INK_700     = colors.HexColor("#3A3D44")
 INK_500     = colors.HexColor("#6B6F78")
 INK_300     = colors.HexColor("#C7CAD1")
 INK_100     = colors.HexColor("#EEEFF2")
-CREAM       = colors.HexColor("#FAF8F3")
+CREAM       = colors.HexColor("#F4F9F8")
 AMBER_700   = colors.HexColor("#B45309")
 ROSE_700    = colors.HexColor("#B91C1C")
 
@@ -102,7 +102,7 @@ class PDFReportBuilder:
     """
 
     def __init__(self, *, title, subtitle="", metadata=None,
-                 company_name="PayBitnex", company_tagline="Global Payments",
+                 company_name="PaidiX", company_tagline="Move Money. Build Trust.",
                  header_label="CLOSING REPORT"):
         self.title = title
         self.subtitle = subtitle

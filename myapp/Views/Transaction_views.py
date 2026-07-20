@@ -1,5 +1,5 @@
 """
-Transaction workflow views. This is the heart of PayBitnex.
+Transaction workflow views. This is the heart of PaidiX.
 
 Customer:
     POST /transactions/payments/        → submit new payment
@@ -62,7 +62,7 @@ STATUS_NEXT_STEP = {
     "under_review": "Our team is reviewing the payment details. No action needed from you.",
     "verified":     "Your payment has been verified. We're applying the final rate and fee.",
     "pkr_sent":     "Funds have been transferred to your PKR account. Please allow a short time for them to appear.",
-    "completed":    "This payment is now complete. Thanks for using PayBitnex.",
+    "completed":    "This payment is now complete. Thanks for using PaidiX.",
     "on_hold":      "We need to recheck some details — we'll follow up if we need anything from you.",
     "rejected":     "Unfortunately we were unable to process this payment. Please contact support for details.",
 }

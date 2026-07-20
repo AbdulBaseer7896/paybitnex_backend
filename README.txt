@@ -1,4 +1,4 @@
-PayBitnex Hotfix v2 — Onboarding 404 + Activity 500
+PaidiX Hotfix v2 — Onboarding 404 + Activity 500
 ====================================================
 
 IMPORTANT: If you applied the previous hotfix and now get a migration

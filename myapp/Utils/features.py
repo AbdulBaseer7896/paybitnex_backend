@@ -49,7 +49,7 @@ FEATURES: Dict[str, dict] = {
     # },
     # "api_access": {
     #     "label": "API Access",
-    #     "description": "Generate API keys and integrate PayBitnex programmatically.",
+    #     "description": "Generate API keys and integrate PaidiX programmatically.",
     #     "group": "Developer",
     #     "default_enabled": False,
     # },

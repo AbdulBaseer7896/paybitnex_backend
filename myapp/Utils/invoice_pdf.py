@@ -64,15 +64,15 @@ THEMES = {
         # Payment card (Zelle / Cash App panels)
         "CARD_BG":       colors.HexColor("#ffffff"),
         "CARD_BORDER":   colors.HexColor("#e5e7eb"),
-        "CARD_HEAD_BG":  colors.HexColor("#ecf3ef"),
-        "CARD_HEAD_FG":  colors.HexColor("#0e5a3a"),
-        "CARD_VALUE_FG": colors.HexColor("#0e5a3a"),
+        "CARD_HEAD_BG":  colors.HexColor("#E3F0EF"),
+        "CARD_HEAD_FG":  colors.HexColor("#0E6E74"),
+        "CARD_VALUE_FG": colors.HexColor("#0E6E74"),
         # Bill-to label
         "LABEL_FG":      colors.HexColor("#6b7280"),
         # Brand accents
-        "BRAND_SOFT":    colors.HexColor("#ecf3ef"),
-        "BRAND_RIM":     colors.HexColor("#cde0d5"),
-        "BRAND_HEAD":    colors.HexColor("#0e5a3a"),
+        "BRAND_SOFT":    colors.HexColor("#E3F0EF"),
+        "BRAND_RIM":     colors.HexColor("#C9DEDE"),
+        "BRAND_HEAD":    colors.HexColor("#0E6E74"),
         # Description/summary box background
         "SUMMARY_BG":    colors.HexColor("#f8f8f5"),
     },
@@ -93,12 +93,12 @@ THEMES = {
         "CARD_BG":       colors.HexColor("#111827"),
         "CARD_BORDER":   colors.HexColor("#1f2937"),
         "CARD_HEAD_BG":  colors.HexColor("#111827"),
-        "CARD_HEAD_FG":  colors.HexColor("#34d399"),    # brand green, readable on dark
-        "CARD_VALUE_FG": colors.HexColor("#34d399"),
+        "CARD_HEAD_FG":  colors.HexColor("#5EB9B7"),    # brand green, readable on dark
+        "CARD_VALUE_FG": colors.HexColor("#5EB9B7"),
         "LABEL_FG":      colors.HexColor("#9ca3af"),
         "BRAND_SOFT":    colors.HexColor("#0f1f17"),
         "BRAND_RIM":     colors.HexColor("#1f3a2a"),
-        "BRAND_HEAD":    colors.HexColor("#34d399"),
+        "BRAND_HEAD":    colors.HexColor("#5EB9B7"),
         "SUMMARY_BG":    colors.HexColor("#111827"),
     },
 }
@@ -572,7 +572,7 @@ def _build_story(invoice, styles):
 
     # ── Payment methods grid ───────────────────────────────────────
     # For single-method invoices we bundle the card + notes +
-    # "Powered by PayBitnex" into ONE KeepTogether block so reportlab
+    # "Powered by PaidiX" into ONE KeepTogether block so reportlab
     # treats them as atomic. Without this, the footer line can
     # orphan to the next page when the card pushes content down —
     # a common complaint on QR-heavy invoices where the payment
@@ -594,7 +594,7 @@ def _build_story(invoice, styles):
 
     footer_flowables = [
         Spacer(1, 10),
-        Paragraph("Powered by PayBitnex", styles["Footer"]),
+        Paragraph("Powered by PaidiX", styles["Footer"]),
     ]
 
     if methods:

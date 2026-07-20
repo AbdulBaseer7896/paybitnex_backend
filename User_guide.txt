@@ -1,4 +1,4 @@
-PayBitnex — Quick User Guide
+PaidiX — Quick User Guide
 =============================
 
 This backend powers a banking-style CRM for cross-border remittance.
@@ -56,7 +56,7 @@ PARTNER PROFIT
     B.percentage = 13.333
     C.percentage = 40.000
     D.percentage = 13.333   (sum = 99.999 ≈ 100%)
-  Adjust to taste. Remaining % (if any) stays with PayBitnex.
+  Adjust to taste. Remaining % (if any) stays with PaidiX.
 
 SENSITIVE OPERATIONS
 --------------------

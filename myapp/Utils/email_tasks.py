@@ -17,7 +17,7 @@ directly via ``aiosmtplib`` using credentials read from the .env file:
     EMAIL_HOST_PASSWORD=<password>
     EMAIL_USE_SSL=True
     DEFAULT_FROM_EMAIL=info@bitnexpayout.com
-    EMAIL_FROM_NAME=PayBitnex
+    EMAIL_FROM_NAME=PaidiX
 
 Usage (unchanged from before — every existing caller works):
 
@@ -58,8 +58,8 @@ log = logging.getLogger(__name__)
 
 
 def _format_from() -> str:
-    """Render 'PayBitnex <abc@bitnexpayout.com>' style From header."""
-    name = getattr(settings, "EMAIL_FROM_NAME", "") or "PayBitnex"
+    """Render 'PaidiX <abc@bitnexpayout.com>' style From header."""
+    name = getattr(settings, "EMAIL_FROM_NAME", "") or "PaidiX"
     addr = settings.DEFAULT_FROM_EMAIL
     return f"{name} <{addr}>" if name and addr else addr
 
@@ -313,7 +313,7 @@ def send_email_async(
     ctx = {
         "subject": subject,
         "frontend_url": getattr(settings, "FRONTEND_URL", ""),
-        "company_name": getattr(settings, "EMAIL_FROM_NAME", "PayBitnex"),
+        "company_name": getattr(settings, "EMAIL_FROM_NAME", "PaidiX"),
         **(context or {}),
     }
 

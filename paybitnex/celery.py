@@ -1,4 +1,4 @@
-"""Celery configuration for PayBitnex."""
+"""Celery configuration for PaidiX."""
 import os
 from celery import Celery
 

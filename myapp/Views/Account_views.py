@@ -447,7 +447,7 @@ class KYCReviewView(AsyncAPIView):
                 customer_name = profile.user.full_name or profile.full_name or ""
                 send_email_async(
                     to=[customer_email],
-                    subject="Your PayBitnex account has been verified",
+                    subject="Your PaidiX account has been verified",
                     template="kyc/approved",
                     context={"name": customer_name},
                 )
@@ -576,7 +576,7 @@ class KYCRaiseObjectionsView(AsyncAPIView):
                 ]
                 send_email_async(
                     to=[user.email],
-                    subject="Action required: PayBitnex profile objections",
+                    subject="Action required: PaidiX profile objections",
                     template="kyc/objection_raised",
                     context={
                         "name": user.full_name or profile.full_name or "",

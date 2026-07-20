@@ -1,5 +1,5 @@
 """
-Django settings for PayBitnex.
+Django settings for PaidiX.
 Async-first: DRF + adrf, JWT, Cloudinary, Celery, Redis.
 """
 from pathlib import Path
@@ -155,7 +155,7 @@ SIMPLE_JWT = {
 }
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "PayBitnex API",
+    "TITLE": "PaidiX API",
     "DESCRIPTION": "Banking-style CRM for cross-border payments.",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
@@ -345,8 +345,8 @@ ANYMAIL = {
     "RESEND_API_KEY": config("RESEND_API_KEY", default=""),
 }
 
-# Human-readable sender display: "PayBitnex <no-reply@paybitnex.com>"
-EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PayBitnex")
+# Human-readable sender display: "PaidiX <no-reply@paybitnex.com>"
+EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PaidiX")
 
 # Frontend origin used inside emails for links like reset-password pages.
 FRONTEND_URL       = config("FRONTEND_URL", default="https://paybitnex.com")
