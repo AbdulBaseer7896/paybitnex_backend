@@ -6,6 +6,9 @@ from myapp.Views.InternalTx_views import (
     VendorViewSet, USABankAccountViewSet, CreditCardViewSet,
     InternalPakistaniAccountViewSet, InternalTransactionViewSet,
 )
+from myapp.Views.Vendor_admin_views import (
+    grant_portal, revoke_portal, portal_candidates,
+)
 
 router = DefaultRouter()
 router.register(r"vendors", VendorViewSet, basename="internal-vendors")
@@ -19,5 +22,14 @@ router.register(r"transactions", InternalTransactionViewSet,
                 basename="internal-transactions")
 
 urlpatterns = [
+    # Vendor-portal administration. Declared BEFORE the router include so
+    # "vendors/portal-candidates/" is not swallowed by the router's
+    # "vendors/<pk>/" detail route.
+    path("vendors/portal-candidates/", portal_candidates,
+         name="vendor-portal-candidates"),
+    path("vendors/<uuid:pk>/grant-portal/", grant_portal,
+         name="vendor-grant-portal"),
+    path("vendors/<uuid:pk>/revoke-portal/", revoke_portal,
+         name="vendor-revoke-portal"),
     path("", include(router.urls)),
 ]

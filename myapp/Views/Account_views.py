@@ -16,6 +16,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from django.core.exceptions import ValidationError
 from myapp.Models.Auth_models import User, UserRole
 from myapp.Models.Profile_models import CustomerProfile
 from myapp.Models.Audit_models import AuditLog
@@ -50,7 +51,13 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         or toggle active state. This is enforced in `get_permissions`.
     """
     permission_classes = [IsAuthenticated, IsAdmin]
-    queryset = User.objects.all().order_by("-created_at")
+    # select_related pulls the linked Vendor in the SAME query, so
+    # UserSerializer.is_vendor doesn't fire one extra SELECT per user row.
+    queryset = (
+        User.objects.all()
+        .select_related("vendor_profile")
+        .order_by("-created_at")
+    )
     serializer_class = UserSerializer
     filterset_fields = ["role", "is_active", "is_profile_complete"]
     search_fields = ["email", "full_name", "phone"]
@@ -73,6 +80,26 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         "john gmail" narrows to rows matching both.
         """
         qs = super().get_queryset()
+
+        # `user_type` filter — vendors are a distinct KIND of account from
+        # trading customers even though both carry role='customer', so the
+        # admin Users page can narrow to one or the other.
+        #   customer -> role=customer WITHOUT live vendor access
+        #   vendor   -> role=customer WITH live vendor access
+        user_type = (self.request.query_params.get("user_type") or "").strip().lower()
+        if user_type == "vendor":
+            qs = qs.filter(
+                vendor_profile__isnull=False,
+                vendor_profile__portal_enabled=True,
+                vendor_profile__is_active=True,
+            )
+        elif user_type == "customer":
+            qs = qs.filter(role=UserRole.CUSTOMER).exclude(
+                vendor_profile__isnull=False,
+                vendor_profile__portal_enabled=True,
+                vendor_profile__is_active=True,
+            )
+
         q = (self.request.query_params.get("q") or "").strip()
         if q:
             for token in q.split():
@@ -214,14 +241,30 @@ class UserAdminViewSet(viewsets.ModelViewSet):
 class CustomerProfileView(AsyncAPIView):
     permission_classes = [IsAuthenticated]
 
-    async def get(self, request):
+    async def get(self, request, user_id=None):
+        """Own profile, or another user's when called by staff.
+
+        `user_id` is only honoured for admin/accountant — a customer
+        passing someone else's id still gets their own row, never a
+        different customer's KYC data.
+
+        GET only: POST/PATCH below remain self-service, so this read path
+        can't be used to modify another user's profile.
+        """
+        target = request.user
+        if user_id and request.user.role in (UserRole.ADMIN, UserRole.ACCOUNTANT):
+            try:
+                target = await User.objects.aget(pk=user_id)
+            except (User.DoesNotExist, ValueError, ValidationError):
+                return Response({"detail": "User not found."},
+                                status=status.HTTP_404_NOT_FOUND)
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
             ).defer(
                 "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
             ).aget(
-                user=request.user
+                user=target
             )
         except CustomerProfile.DoesNotExist:
             return Response({"detail": "Profile not set up."},
@@ -230,7 +273,16 @@ class CustomerProfileView(AsyncAPIView):
             CustomerProfileSerializer(profile, context={"request": request}).data
         )
 
-    async def post(self, request):
+    async def post(self, request, user_id=None):
+        # The staff read-route (users/<uuid>/profile/) shares this view.
+        # Writes must stay strictly self-service, so reject any attempt to
+        # create a profile *for* another user rather than silently
+        # writing to request.user's row.
+        if user_id:
+            return Response(
+                {"detail": "Profiles can only be created by their owner."},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            )
         if await CustomerProfile.objects.filter(user=request.user).aexists():
             return Response({"detail": "Profile already exists. Use PATCH."},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -258,7 +310,13 @@ class CustomerProfileView(AsyncAPIView):
             status=status.HTTP_201_CREATED,
         )
 
-    async def patch(self, request):
+    async def patch(self, request, user_id=None):
+        # Same rule as post(): writes are self-service only. See above.
+        if user_id:
+            return Response(
+                {"detail": "Profiles can only be edited by their owner."},
+                status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            )
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
@@ -365,7 +423,7 @@ class CustomerScoreView(AsyncAPIView):
         if user_id and request.user.role in (UserRole.ADMIN, UserRole.ACCOUNTANT):
             try:
                 target = await User.objects.aget(pk=user_id)
-            except User.DoesNotExist:
+            except (User.DoesNotExist, ValueError, ValidationError):
                 return Response({"detail": "Not found."},
                                 status=status.HTTP_404_NOT_FOUND)
         else:

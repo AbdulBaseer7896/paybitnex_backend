@@ -27,6 +27,11 @@ class UserSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     # Whether the customer has set a "My Payments" PIN (never the PIN itself).
     payments_pin_set = serializers.SerializerMethodField()
+    # Vendor-portal flags. A vendor is a distinct KIND of account from a
+    # trading customer, so the admin UI needs to tell them apart (filter
+    # the user list, hide customer-only feature toggles, etc.).
+    is_vendor = serializers.SerializerMethodField()
+    vendor_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -35,15 +40,39 @@ class UserSerializer(serializers.ModelSerializer):
             "is_active", "is_profile_complete", "onboarding_step",
             "profile_picture_url",
             "payments_pin_set",
+            "is_vendor", "vendor_name",
             "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "created_at", "updated_at", "is_profile_complete",
             "profile_picture_url", "payments_pin_set",
+            "is_vendor", "vendor_name",
         ]
 
     def get_payments_pin_set(self, obj):
         return bool(getattr(obj, "payments_pin_hash", ""))
+
+    def _vendor(self, obj):
+        """Resolve the linked Vendor, tolerating a missing migration.
+
+        Uses the `vendor_profile` reverse accessor, which the viewset
+        select_related()s — so listing users stays a single query rather
+        than one extra per row.
+        """
+        try:
+            v = getattr(obj, "vendor_profile", None)
+            if v is not None and v.portal_enabled and v.is_active:
+                return v
+        except Exception:
+            pass
+        return None
+
+    def get_is_vendor(self, obj):
+        return self._vendor(obj) is not None
+
+    def get_vendor_name(self, obj):
+        v = self._vendor(obj)
+        return v.name if v else ""
 
     def get_profile_picture_url(self, obj):
         # Explicit profile picture takes priority.
@@ -225,5 +254,28 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         except CustomerProfile.DoesNotExist:
             user_payload["kyc_status"] = None
             user_payload["kyc_objection_count"] = 0
+
+        # Vendor-portal context, so the router can send a vendor straight
+        # to their portal on the first paint after login rather than
+        # flashing the customer dashboard first.
+        #
+        # Same .only()/broad-except discipline as the KYC block above: if
+        # migration 0053 has not been applied, touching the new portal_*
+        # columns would raise UndefinedColumn and break login for EVERY
+        # user. Degrading to "not a vendor" is the safe failure.
+        user_payload["is_vendor"] = False
+        user_payload["vendor"] = None
+        try:
+            from myapp.Models.InternalTx_models import Vendor
+            vendor = (
+                Vendor.objects
+                .only("id", "name", "portal_enabled", "is_active", "portal_user")
+                .get(portal_user=self.user, portal_enabled=True, is_active=True)
+            )
+            user_payload["is_vendor"] = True
+            user_payload["vendor"] = {"id": str(vendor.id), "name": vendor.name}
+        except Exception:
+            pass
+
         data["user"] = user_payload
         return data

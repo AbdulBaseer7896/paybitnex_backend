@@ -49,6 +49,37 @@ class Vendor(models.Model):
     notes = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
 
+    # ── Vendor portal access ───────────────────────────────────────────
+    # A Vendor row is admin-managed reference data and normally has NO
+    # login. When the admin "makes a customer a vendor", we link an
+    # existing User (role=customer) here and flip `portal_enabled`.
+    #
+    # `portal_user` is the ONLY thing that grants portal access. A vendor
+    # with no linked user is invisible to the portal entirely — exactly
+    # how vendors behaved before this feature, so existing rows are
+    # unaffected.
+    #
+    # OneToOne: one login sees exactly one vendor's data. This keeps the
+    # scoping rule trivially auditable — there is no path by which a
+    # vendor user can resolve to more than one Vendor, and therefore no
+    # path to another vendor's transactions.
+    portal_user = models.OneToOneField(
+        "myapp.User", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="vendor_profile",
+        help_text="Customer account granted vendor-portal access to this "
+                  "vendor's card transactions. Null = no portal access.",
+    )
+    portal_enabled = models.BooleanField(
+        default=False, db_index=True,
+        help_text="Master switch for this vendor's portal access. Set False "
+                  "to revoke immediately without unlinking the account.",
+    )
+    portal_granted_at = models.DateTimeField(null=True, blank=True)
+    portal_granted_by = models.ForeignKey(
+        "myapp.User", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="granted_vendor_portals",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -58,6 +89,20 @@ class Vendor(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def has_portal_access(self):
+        """True only when a live user is linked AND the switch is on.
+
+        Both conditions are required. `portal_enabled` alone must never
+        grant access, and neither must a stale link to a deactivated
+        account — hence the `is_active` check.
+        """
+        return bool(
+            self.portal_enabled
+            and self.portal_user_id
+            and getattr(self.portal_user, "is_active", False)
+        )
 
 
 class USABankAccount(models.Model):

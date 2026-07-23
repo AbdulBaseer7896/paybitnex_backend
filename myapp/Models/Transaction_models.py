@@ -117,6 +117,20 @@ class IncomingPayment(models.Model):
             "Company rate-spread profit = (real - tangent) * total_amount."
         ),
     )
+    # True while `exchange_rate` holds an auto-assigned PLACEHOLDER rate
+    # (stamped at creation time by Utils/default_rate.py) rather than the
+    # real rate an accountant negotiated. Flipped to False the moment a
+    # human applies a rate via the accountant-apply endpoint.
+    #
+    # Reports use this to mark rows as estimated, so a week is never closed
+    # on placeholder numbers by mistake. Fee-dependent columns (net_pkr,
+    # fee_amount_foreign, net_amount_foreign) are left NULL while this is
+    # True — a provisional rate never feeds profit or partner-ledger math.
+    is_rate_provisional = models.BooleanField(
+        default=False, db_index=True,
+        help_text="True when exchange_rate is an auto-assigned placeholder "
+                  "awaiting the accountant's real rate.",
+    )
     # Fee allocation override for under-fee transactions (Update #3 fix)
     fee_allocation = models.JSONField(
         null=True, blank=True,

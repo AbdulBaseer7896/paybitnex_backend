@@ -15,15 +15,33 @@ from myapp.Models.InternalTx_models import (
 # ---------------------------------------------------------------------
 
 class VendorSerializer(serializers.ModelSerializer):
+    # Portal status is READ-ONLY here. Granting and revoking go through
+    # the dedicated endpoints in Vendor_admin_views so every change is
+    # guarded and written to the audit log — a plain PATCH must never be
+    # able to hand someone access to a set of financial records.
+    portal_user_email = serializers.CharField(
+        source="portal_user.email", read_only=True, default="",
+    )
+    portal_user_name = serializers.CharField(
+        source="portal_user.full_name", read_only=True, default="",
+    )
+    has_portal_access = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = Vendor
         fields = [
             "id", "name",
             "contact_name", "contact_email", "contact_phone",
             "notes", "is_active",
+            "portal_user", "portal_user_email", "portal_user_name",
+            "portal_enabled", "portal_granted_at", "has_portal_access",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = [
+            "id", "created_at", "updated_at",
+            "portal_user", "portal_user_email", "portal_user_name",
+            "portal_enabled", "portal_granted_at", "has_portal_access",
+        ]
 
 
 class USABankAccountSerializer(serializers.ModelSerializer):

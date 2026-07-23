@@ -109,6 +109,28 @@ async def _build_me_response(user):
         data["kyc_status"] = None
         data["kyc_objections"] = []
         data["kyc_objection_count"] = 0
+
+    # ── Vendor-portal context ────────────────────────────────────────
+    # Tells the frontend whether to surface the vendor portal. Wrapped
+    # broadly and using .only() for the same reason as the KYC block
+    # above: if migration 0053 has not been applied yet, selecting the
+    # new portal_* columns would raise UndefinedColumn and take down
+    # /auth/me/ — i.e. break login for EVERY user, not just vendors.
+    # Degrading to "not a vendor" is the safe failure here.
+    data["is_vendor"] = False
+    data["vendor"] = None
+    try:
+        from myapp.Models.InternalTx_models import Vendor
+        vendor = await (
+            Vendor.objects
+            .only("id", "name", "portal_enabled", "is_active", "portal_user")
+            .aget(portal_user=user, portal_enabled=True, is_active=True)
+        )
+        data["is_vendor"] = True
+        data["vendor"] = {"id": str(vendor.id), "name": vendor.name}
+    except Exception:
+        # Vendor.DoesNotExist (the common case) or a missing column.
+        pass
     return data
 
 

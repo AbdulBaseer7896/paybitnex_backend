@@ -11,6 +11,9 @@ from myapp.Views.Report_views import (
 from myapp.Views.Closing_report_views import (
     closing_report, closing_report_csv, closing_report_pdf,
 )
+from myapp.Views.Weekly_report_views import (
+    weekly_monday_report, weekly_monday_detail,
+)
 
 router = DefaultRouter()
 router.register(r"daily", DailyReportViewSet, basename="reports-daily")
@@ -32,4 +35,9 @@ urlpatterns = [
     path("closing/", closing_report, name="reports-closing"),
     path("closing.csv", closing_report_csv, name="reports-closing-csv"),
     path("closing.pdf", closing_report_pdf, name="reports-closing-pdf"),
+    # Monday-to-Monday weekly report — every status except rejected,
+    # using the provisional dollar rate so it is never blank.
+    path("weekly-monday/", weekly_monday_report, name="reports-weekly-monday"),
+    path("weekly-monday/detail/", weekly_monday_detail,
+         name="reports-weekly-monday-detail"),
 ]

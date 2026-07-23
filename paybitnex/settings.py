@@ -245,7 +245,54 @@ AWS_S3_OBJECT_PARAMETERS = {
 # actually configured. Set USE_S3=True (and the AWS_* vars) to opt in.
 USE_S3 = config("USE_S3", default=bool(AWS_STORAGE_BUCKET_NAME), cast=bool)
 
-if USE_S3 and AWS_STORAGE_BUCKET_NAME:
+# ── Region sanity check ─────────────────────────────────────────────
+# A typo'd region (e.g. "us-east-13" instead of "us-east-1") builds a
+# hostname that simply does not exist. boto3 accepts it happily, then
+# every upload dies deep inside botocore with:
+#
+#   EndpointConnectionError: Could not connect to the endpoint URL:
+#   "https://<bucket>.s3.us-east-13.amazonaws.com/..."
+#   socket.gaierror: [Errno 11001] getaddrinfo failed
+#
+# which surfaces as an opaque HTTP 500 on any endpoint that accepts a
+# file. The traceback points at botocore, so it reads like a network
+# outage rather than a one-character config typo.
+#
+# Catching it here turns a runtime 500 into a loud startup warning.
+_AWS_REGIONS = {
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "af-south-1", "ap-east-1", "ap-south-1", "ap-south-2",
+    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+    "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
+    "ca-central-1", "ca-west-1",
+    "eu-central-1", "eu-central-2", "eu-north-1",
+    "eu-south-1", "eu-south-2",
+    "eu-west-1", "eu-west-2", "eu-west-3",
+    "il-central-1", "me-central-1", "me-south-1", "sa-east-1",
+}
+
+# Only enforced for real AWS. A custom AWS_S3_ENDPOINT_URL means an
+# S3-COMPATIBLE provider (MinIO, Wasabi, DigitalOcean Spaces, R2…)
+# whose region names are their own — don't second-guess those.
+_S3_CUSTOM_ENDPOINT = config("AWS_S3_ENDPOINT_URL", default="")
+_REGION_LOOKS_VALID = (
+    bool(_S3_CUSTOM_ENDPOINT)
+    or AWS_S3_REGION_NAME in _AWS_REGIONS
+)
+
+if USE_S3 and AWS_STORAGE_BUCKET_NAME and not _REGION_LOOKS_VALID:
+    import warnings
+    warnings.warn(
+        f"AWS_S3_REGION_NAME={AWS_S3_REGION_NAME!r} is not a recognised AWS "
+        f"region. Uploads to S3 would fail with EndpointConnectionError "
+        f"(DNS cannot resolve s3.{AWS_S3_REGION_NAME}.amazonaws.com). "
+        f"Falling back to local file storage. Fix the region in your .env "
+        f"(did you mean 'us-east-1'?), or set AWS_S3_ENDPOINT_URL if you "
+        f"are using an S3-compatible provider.",
+        RuntimeWarning,
+    )
+
+if USE_S3 and AWS_STORAGE_BUCKET_NAME and _REGION_LOOKS_VALID:
     _default_storage = {"BACKEND": "myapp.Utils.s3_storage.SilentS3Storage"}
 else:
     _default_storage = {"BACKEND": "django.core.files.storage.FileSystemStorage"}

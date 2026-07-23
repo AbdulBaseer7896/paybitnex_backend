@@ -38,6 +38,7 @@ from myapp.serializers.Transaction_serializers import (
 )
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.references import next_reference
+from myapp.Utils.default_rate import apply_default_rate
 from myapp.Utils.partner_ledger import distribute_fee_for_payment
 
 
@@ -463,6 +464,14 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 status=TransactionStatus.SUBMITTED,
                 **validated,
             )
+            # Stamp a provisional dollar rate so weekly reports have a PKR
+            # figure to show immediately, before the accountant processes it.
+            # Never overrides a real rate; see Utils/default_rate.py.
+            if apply_default_rate(payment):
+                payment.save(update_fields=[
+                    "exchange_rate", "gross_pkr", "is_rate_provisional",
+                    "updated_at",
+                ])
             _record_status_change(
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
                 user=request.user, note="Submitted by customer",
@@ -523,6 +532,12 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 handled_by=request.user,
                 **validated,
             )
+            # Same provisional-rate stamp as the customer flow.
+            if apply_default_rate(payment):
+                payment.save(update_fields=[
+                    "exchange_rate", "gross_pkr", "is_rate_provisional",
+                    "updated_at",
+                ])
             _record_status_change(
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
                 user=request.user,
@@ -646,6 +661,10 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 "real_exchange_rate"
             ) or s.validated_data["exchange_rate"]
             payment.fee_percentage = s.validated_data["fee_percentage"]
+            # A human has now supplied the real rate — the auto-assigned
+            # placeholder (if any) is superseded, so the row stops being
+            # reported as an estimate.
+            payment.is_rate_provisional = False
             # Store fee allocation override (for under-fee transactions)
             payment.fee_allocation = s.validated_data.get("fee_allocation")
             if "accountant_notes" in s.validated_data:

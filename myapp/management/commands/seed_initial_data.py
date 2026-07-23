@@ -131,6 +131,11 @@ DEFAULT_SETTINGS = [
      "Company display name."),
     ("support_email", "support@paybitnex.com",
      "Support contact email."),
+    ("default_dollar_rate", "",
+     "Provisional PKR-per-USD rate stamped onto every new transaction so "
+     "weekly reports are never blank before processing. Leave EMPTY to use "
+     "the live ExchangeRate table instead. Accountants overwrite this with "
+     "the real rate during processing; it never affects fees or profit."),
 ]
 
 
