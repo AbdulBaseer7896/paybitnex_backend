@@ -89,9 +89,21 @@ class _OwnerScopedAuditedMixin:
 
     # ---- CREATE ----
     def create(self, request, *args, **kwargs):
+        u = request.user
+        account_number = request.data.get("account_number")
+        existing_instance = None
+
+        if u.role == UserRole.CUSTOMER and account_number:
+            existing_instance = self.get_queryset().filter(customer=u, account_number=account_number).first()
+
+        if existing_instance:
+            serializer = self.get_serializer(existing_instance, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            instance = serializer.save()
+            return Response(self.get_serializer(instance).data, status=status.HTTP_200_OK)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        u = request.user
         if u.role == UserRole.CUSTOMER:
             instance = serializer.save(customer=u)
         else:

@@ -317,29 +317,40 @@ class CustomerProfileView(AsyncAPIView):
     async def post(self, request, user_id=None):
         # The staff read-route (users/<uuid>/profile/) shares this view.
         # Writes must stay strictly self-service, so reject any attempt to
-        # create a profile *for* another user rather than silently
-        # writing to request.user's row.
+        # create a profile *for* another user.
         if user_id:
             return Response(
                 {"detail": "Profiles can only be created by their owner."},
                 status=status.HTTP_405_METHOD_NOT_ALLOWED,
             )
-        if await CustomerProfile.objects.filter(user=request.user).aexists():
-            return Response({"detail": "Profile already exists. Use PATCH."},
-                            status=status.HTTP_400_BAD_REQUEST)
 
-        s = CustomerProfileSerializer(
-            data=request.data, context={"request": request},
-        )
-        await async_is_valid(s, raise_exception=True)
-        profile = await async_save(s, user=request.user)
+        try:
+            profile = await CustomerProfile.objects.select_related(
+                "user", "kyc_reviewed_by"
+            ).aget(user=request.user)
+
+            if profile.is_locked:
+                return Response(
+                    {"detail": "Profile is locked after KYC approval and cannot be edited."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            s = CustomerProfileSerializer(
+                profile, data=request.data, partial=True,
+                context={"request": request},
+            )
+            await async_is_valid(s, raise_exception=True)
+            profile = await async_save(s)
+        except CustomerProfile.DoesNotExist:
+            s = CustomerProfileSerializer(
+                data=request.data, context={"request": request},
+            )
+            await async_is_valid(s, raise_exception=True)
+            profile = await async_save(s, user=request.user)
 
         request.user.is_profile_complete = True
         request.user.full_name = profile.full_name
         request.user.phone = profile.phone
-        # Mark all 4 onboarding steps as completed. If the user logs in
-        # again after this, the resume endpoint sees step=4 (== STEPS.length)
-        # which the frontend interprets as "no resume needed, send to /app".
         request.user.onboarding_step = 4
         await request.user.asave(
             update_fields=["is_profile_complete", "full_name", "phone",
@@ -348,7 +359,7 @@ class CustomerProfileView(AsyncAPIView):
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_200_OK,
         )
 
     async def patch(self, request, user_id=None):
