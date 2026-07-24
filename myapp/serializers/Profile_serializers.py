@@ -97,6 +97,36 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        from myapp.Utils.image_processor import process_uploaded_image
+        import os
+        from django.conf import settings
+
+        watermark_path = getattr(settings, "WATERMARK_LOGO_PATH", None)
+        if not watermark_path:
+            logo_candidates = [
+                os.path.join(settings.BASE_DIR, "static", "images", "ITEXPERTS_LOGO.png"),
+                os.path.join(settings.BASE_DIR, "staticfiles", "images", "ITEXPERTS_LOGO.png"),
+                os.path.join(settings.BASE_DIR, "BITNEX_LOGO.png"),
+            ]
+            for candidate in logo_candidates:
+                if os.path.exists(candidate):
+                    watermark_path = candidate
+                    break
+
+        for field in ("cnic_front", "cnic_back", "selfie"):
+            if field in ret and ret[field]:
+                try:
+                    ret[field] = process_uploaded_image(
+                        ret[field],
+                        watermark_path=watermark_path,
+                        process_cv=True,
+                    )
+                except Exception as e:
+                    print(f"Error processing {field} image: {e}")
+        return ret
+
     def validate(self, attrs):
         # Once KYC is approved, profile is locked — no edits allowed.
         if self.instance and self.instance.is_locked:

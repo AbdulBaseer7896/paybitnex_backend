@@ -39,6 +39,7 @@ every grant, replacement and revocation.
 """
 from django.db import transaction as dbtx
 from django.utils import timezone
+from django.utils.crypto import get_random_string
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -135,7 +136,7 @@ def grant_portal(request, pk=None):
                            f"Link that account instead of creating one."},
                 status=400,
             )
-        temp_password = User.objects.make_random_password(length=12)
+        temp_password = get_random_string(12)
         target = User.objects.create_user(
             email=new_email,
             password=temp_password,

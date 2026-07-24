@@ -2,6 +2,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.password_validation import validate_password
+from django.utils.crypto import get_random_string
 
 from myapp.Models.Auth_models import User, UserRole
 
@@ -119,7 +120,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         password = (
             validated_data.pop("password", None)
-            or User.objects.make_random_password()
+            or get_random_string(12)
         )
         user = User(**validated_data)
         user.set_password(password)
