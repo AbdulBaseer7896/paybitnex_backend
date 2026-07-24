@@ -7,7 +7,7 @@ django-filter==24.3
 psycopg[binary,pool]==3.2.3
 python-decouple==3.8
 dj-database-url==2.3.0
-Pillow==11.0.0
+Pillow==11.1.0
 # S3 storage (private bucket + pre-signed URLs). django-storages
 # ships an S3 backend built on boto3 that Django picks up as the
 # default FileField storage via the STORAGES setting.
