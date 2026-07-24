@@ -62,24 +62,28 @@ class RefreshView(TokenRefreshView):
 
 
 class LogoutView(AsyncAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     async def post(self, request):
         refresh = request.data.get("refresh")
-        if not refresh:
-            return Response({"detail": "refresh token required"},
-                            status=status.HTTP_400_BAD_REQUEST)
-        try:
-            token = RefreshToken(refresh)
-            token.blacklist()
-        except Exception as e:
-            return Response({"detail": str(e)},
-                            status=status.HTTP_400_BAD_REQUEST)
-        await AuditLog.arecord(
-            user=request.user, action=AuditLog.ACTION_LOGOUT,
-            description="User logged out",
-        )
-        return Response(status=status.HTTP_205_RESET_CONTENT)
+        if refresh:
+            try:
+                token = RefreshToken(refresh)
+                if hasattr(token, "blacklist"):
+                    token.blacklist()
+            except Exception:
+                pass
+
+        if request.user and request.user.is_authenticated:
+            try:
+                await AuditLog.arecord(
+                    user=request.user, action=AuditLog.ACTION_LOGOUT,
+                    description="User logged out",
+                )
+            except Exception:
+                pass
+
+        return Response({"detail": "Successfully logged out."}, status=status.HTTP_200_OK)
 
 
 async def _build_me_response(user):

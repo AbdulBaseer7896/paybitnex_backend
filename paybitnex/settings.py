@@ -243,7 +243,7 @@ AWS_S3_OBJECT_PARAMETERS = {
 #
 # So: fall back to Django's local FileSystemStorage whenever S3 isn't
 # actually configured. Set USE_S3=True (and the AWS_* vars) to opt in.
-USE_S3 = config("USE_S3", default=bool(AWS_STORAGE_BUCKET_NAME), cast=bool)
+USE_S3 = config("USE_S3", default=bool(AWS_STORAGE_BUCKET_NAME and AWS_ACCESS_KEY_ID), cast=bool)
 
 # ── Region sanity check ─────────────────────────────────────────────
 # A typo'd region (e.g. "us-east-13" instead of "us-east-1") builds a
@@ -280,7 +280,7 @@ _REGION_LOOKS_VALID = (
     or AWS_S3_REGION_NAME in _AWS_REGIONS
 )
 
-if USE_S3 and AWS_STORAGE_BUCKET_NAME and not _REGION_LOOKS_VALID:
+if USE_S3 and AWS_STORAGE_BUCKET_NAME and AWS_ACCESS_KEY_ID and not _REGION_LOOKS_VALID:
     import warnings
     warnings.warn(
         f"AWS_S3_REGION_NAME={AWS_S3_REGION_NAME!r} is not a recognised AWS "
@@ -292,7 +292,7 @@ if USE_S3 and AWS_STORAGE_BUCKET_NAME and not _REGION_LOOKS_VALID:
         RuntimeWarning,
     )
 
-if USE_S3 and AWS_STORAGE_BUCKET_NAME and _REGION_LOOKS_VALID:
+if USE_S3 and AWS_STORAGE_BUCKET_NAME and AWS_ACCESS_KEY_ID and _REGION_LOOKS_VALID:
     _default_storage = {"BACKEND": "myapp.Utils.s3_storage.SilentS3Storage"}
 else:
     _default_storage = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
@@ -303,6 +303,16 @@ STORAGES = {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
+
+# Static & Media Files Settings
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [
+    BASE_DIR / "static",
+]
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 # Cloudinary — kept defined for backwards-compat only. Not selected
 # as default storage anymore. Safe to strip once no code references

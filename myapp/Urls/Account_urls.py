@@ -3,7 +3,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from myapp.Views.Account_views import (
-    UserAdminViewSet, CustomerProfileView,
+    UserAdminViewSet, CustomerProfileView, ProcessImageView,
     KYCReviewView, PendingKYCListView, KYCRaiseObjectionsView,
     CustomerScoreView, CustomerOnboardingListView,
     onboarding_counts, cnic_available,
@@ -16,6 +16,7 @@ router.register(r"users", UserAdminViewSet, basename="users")
 urlpatterns = [
     path("", include(router.urls)),
     path("profile/", CustomerProfileView.as_view(), name="profile"),
+    path("process-img/", ProcessImageView.as_view(), name="process-img"),
     path("score/", CustomerScoreView.as_view(), name="my-score"),
     # NOTE: <int:...> could NEVER match — User.pk is a UUID, so this route
     # was dead and every staff score lookup 404'd. Corrected to <uuid:...>.

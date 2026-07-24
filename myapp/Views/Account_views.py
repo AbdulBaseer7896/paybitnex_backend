@@ -235,6 +235,47 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         return Response(UserSerializer(user).data)
 
 
+import base64
+from rest_framework.views import APIView
+
+
+class ProcessImageView(APIView):
+    """
+    POST /api/v1/accounts/process-img/
+    Protected endpoint to process CNIC Front, CNIC Back, and Selfie/Profile images
+    using the complete CV pipeline (edge detection, perspective crop, glare removal,
+    CLAHE enhancement, OCR rotation) WITHOUT adding watermarks.
+    Returns base64 encoded data URLs for instant frontend preview.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from myapp.Utils.image_processor import process_uploaded_image
+
+        files_to_process = {
+            "cnic_front": request.FILES.get("cnic_front"),
+            "cnic_back": request.FILES.get("cnic_back"),
+            "selfie": request.FILES.get("selfie") or request.FILES.get("profile_pic"),
+        }
+
+        if not any(files_to_process.values()):
+            return Response(
+                {"detail": "At least one image ('cnic_front', 'cnic_back', or 'selfie') is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        result = {}
+        for key, uploaded_file in files_to_process.items():
+            if uploaded_file:
+                processed = process_uploaded_image(uploaded_file, watermark_path=None, process_cv=True)
+                img_bytes = processed.read()
+                b64_str = base64.b64encode(img_bytes).decode("utf-8")
+                result[key] = f"data:image/webp;base64,{b64_str}"
+                result[f"{key}_name"] = processed.name
+
+        return Response(result, status=status.HTTP_200_OK)
+
+
 # =====================================================================
 #  CUSTOMER PROFILE
 # =====================================================================
