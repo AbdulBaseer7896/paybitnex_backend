@@ -74,7 +74,7 @@ def compose_single_invoice(payment):
         "headers": ["Field", "Value"],
         "rows": [
             ["Reference",           payment.reference or "—"],
-            ["External ID",         payment.external_transaction_id or "—"],
+            ["Confirmation Code",   payment.external_transaction_id or "—"],
             ["Submitted on",        payment.created_at.strftime("%b %d, %Y at %H:%M")
                                     if payment.created_at else "—"],
             ["Status",              (payment.status or "—").replace("_", " ").title()],

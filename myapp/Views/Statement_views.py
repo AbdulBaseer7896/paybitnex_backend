@@ -169,7 +169,15 @@ def _card_bank_map():
     banks = list(USABankAccount.objects.filter(is_active=True))
     norm_banks = [(_norm_label(b.label), b) for b in banks]
     out = {}
-    for c in CreditCard.objects.all():
+    for c in CreditCard.objects.select_related("linked_usa_bank").all():
+        if c.linked_usa_bank_id:
+            match = c.linked_usa_bank
+            out[str(c.id)] = {
+                "id": str(match.id),
+                "label": match.label,
+                "bank": match.bank,
+            }
+            continue
         cl = _norm_label(c.label)
         if not cl:
             continue
@@ -275,7 +283,7 @@ def _customer_entries(f, method_map):
             "method_label": m.get("label") or (r["payment_method_id"] or "—"),
             "status": r["status"],
             "reference": r["reference"],
-            "description": (f"Ext ID {r['external_transaction_id']}"
+            "description": (f"Confirmation Code {r['external_transaction_id']}"
                             if r["external_transaction_id"] else ""),
             "fee": _s(r["fee_amount_foreign"]),
             "pkr_value": _s(r["net_pkr"]),

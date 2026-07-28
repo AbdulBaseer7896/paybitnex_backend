@@ -29,7 +29,7 @@ from myapp.Models.Invoicing_models import (
 )
 from myapp.Models.Feature_models import CustomerFeatureAccess
 from myapp.Models.InternalTx_models import (
-    Vendor, USABankAccount, CreditCard, InternalPakistaniAccount,
+    Vendor, USABankAccount, CreditCard, VendorPKRPayment, InternalPakistaniAccount,
     InternalTransaction,
     InternalTxSource, InternalTxDestination, InternalTxMethod,
 )
@@ -56,7 +56,7 @@ __all__ = [
     "Invoice", "InvoiceLineItem", "InvoiceStatus", "InvoicePaymentMethod",
     "CustomerFeatureAccess",
     # Internal transactions module
-    "Vendor", "USABankAccount", "CreditCard", "InternalPakistaniAccount",
+    "Vendor", "USABankAccount", "CreditCard", "VendorPKRPayment", "InternalPakistaniAccount",
     "InternalTransaction",
     "InternalTxSource", "InternalTxDestination", "InternalTxMethod",
     # Dispatch module

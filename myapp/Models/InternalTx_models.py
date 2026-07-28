@@ -26,6 +26,7 @@ Design notes:
     `CustomerBankAccount` / `CustomerMerchantAccount`.
 """
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models
 
@@ -48,6 +49,10 @@ class Vendor(models.Model):
     contact_phone = models.CharField(max_length=32, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
+    handles_pkr_conversion = models.BooleanField(
+        default=False, db_index=True,
+        help_text="This person/vendor can receive USD and settle the company in PKR.",
+    )
 
     # ── Vendor portal access ───────────────────────────────────────────
     # A Vendor row is admin-managed reference data and normally has NO
@@ -195,6 +200,11 @@ class CreditCard(models.Model):
                   "Spaces are allowed.",
     )
     holder_name = models.CharField(max_length=150, blank=True, default="")
+    linked_usa_bank = models.ForeignKey(
+        USABankAccount, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="linked_credit_cards",
+        help_text="Bank account that issues/settles this card (for example Chase).",
+    )
     notes = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True)
 
@@ -213,6 +223,62 @@ class CreditCard(models.Model):
                   if len(digits) >= 4
                   else (f" ({digits})" if digits else ""))
         return f"{self.label}{suffix}"
+
+
+class VendorPKRPayment(models.Model):
+    """PKR received from a person/vendor against USD sent to them."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.ForeignKey(
+        Vendor, on_delete=models.PROTECT, related_name="pkr_payments",
+    )
+    pkr_received = models.DecimalField(max_digits=20, decimal_places=2)
+    usd_sent = models.DecimalField(max_digits=18, decimal_places=2)
+    exchange_rate = models.DecimalField(
+        max_digits=14, decimal_places=6, null=True, blank=True,
+        help_text="PKR per USD. If omitted, the current USD exchange rate is applied.",
+    )
+    pkr_equivalent = models.DecimalField(
+        max_digits=20, decimal_places=2, editable=False,
+        help_text="USD sent multiplied by the applied exchange rate.",
+    )
+    balance_pkr = models.DecimalField(
+        max_digits=20, decimal_places=2, editable=False,
+        help_text="PKR received minus the PKR equivalent of USD sent.",
+    )
+    confirmation_code = models.CharField(max_length=120, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    occurred_on = models.DateField(db_index=True)
+    created_by = models.ForeignKey(
+        "myapp.User", on_delete=models.PROTECT,
+        related_name="created_vendor_pkr_payments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "vendor_pkr_payments"
+        ordering = ["-occurred_on", "-created_at"]
+        indexes = [
+            models.Index(fields=["vendor", "occurred_on"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.exchange_rate:
+            from myapp.Models.Rate_models import ExchangeRate
+            rate = ExchangeRate.objects.filter(currency_id="USD").first()
+            if rate is None:
+                raise ValueError("A USD to PKR exchange rate must be configured.")
+            self.exchange_rate = rate.rate_to_pkr
+        self.pkr_equivalent = (
+            Decimal(self.usd_sent or 0) * Decimal(self.exchange_rate)
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        self.balance_pkr = (
+            Decimal(self.pkr_received or 0) - self.pkr_equivalent
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.vendor}: PKR {self.pkr_received} / USD {self.usd_sent}"
 
 
 class InternalPakistaniAccount(models.Model):

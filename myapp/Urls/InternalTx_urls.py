@@ -5,6 +5,7 @@ from rest_framework.routers import DefaultRouter
 from myapp.Views.InternalTx_views import (
     VendorViewSet, USABankAccountViewSet, CreditCardViewSet,
     InternalPakistaniAccountViewSet, InternalTransactionViewSet,
+    VendorPKRPaymentViewSet,
 )
 from myapp.Views.Vendor_admin_views import (
     grant_portal, revoke_portal, portal_candidates,
@@ -18,6 +19,8 @@ router.register(r"credit-cards", CreditCardViewSet,
                 basename="internal-credit-cards")
 router.register(r"pk-accounts", InternalPakistaniAccountViewSet,
                 basename="internal-pk-accounts")
+router.register(r"vendor-pkr-payments", VendorPKRPaymentViewSet,
+                basename="vendor-pkr-payments")
 router.register(r"transactions", InternalTransactionViewSet,
                 basename="internal-transactions")
 

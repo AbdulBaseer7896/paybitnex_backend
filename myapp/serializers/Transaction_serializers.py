@@ -124,7 +124,7 @@ class IncomingPaymentCreateSerializer(serializers.ModelSerializer):
         # Only block if there is a non-rejected payment with this ID
         if existing.exclude(status=TransactionStatus.REJECTED).exists():
             raise serializers.ValidationError(
-                "Incoming payment with this external transaction id already exists."
+                "Incoming payment with this Confirmation Code already exists."
             )
         return value
 
