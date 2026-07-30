@@ -165,31 +165,60 @@ def _expenses_qs(filters):
 def _compute_report(filters):
     """Main aggregation. Returns the full report payload (dict)."""
     trunc = PERIOD_TRUNCS[filters["period"]]
+    from myapp.Utils.bitnex_week import get_week_config
+    cfg = get_week_config()
+    start_day = cfg["start_day"]
 
     # ── Per-bucket aggregates: received, fees, profit (from completed) ─
     payments = _payments_qs(filters)
-    bucket_rows = (
-        payments
-        .annotate(period_start=trunc("created_at"))
-        .values("period_start")
-        .annotate(
-            tx_count=Count("id"),
-            total_received_foreign=Sum("amount"),
-            total_received_pkr=Sum("gross_pkr"),
-            total_fees_pkr=Sum(
-                F("gross_pkr") - F("net_pkr"),
-                output_field=DecimalField(max_digits=18, decimal_places=2),
-            ),
-            total_net_pkr=Sum("net_pkr"),
+    
+    if filters["period"] == "week" and start_day > 0:
+        from django.db.models import ExpressionWrapper, DateTimeField
+        shifted_time = ExpressionWrapper(
+            F("created_at") - timedelta(days=start_day),
+            output_field=DateTimeField()
         )
-        .order_by("period_start")
-    )
+        bucket_rows = (
+            payments
+            .annotate(period_start=trunc(shifted_time))
+            .values("period_start")
+            .annotate(
+                tx_count=Count("id"),
+                total_received_foreign=Sum("amount"),
+                total_received_pkr=Sum("gross_pkr"),
+                total_fees_pkr=Sum(
+                    F("gross_pkr") - F("net_pkr"),
+                    output_field=DecimalField(max_digits=18, decimal_places=2),
+                ),
+                total_net_pkr=Sum("net_pkr"),
+            )
+            .order_by("period_start")
+        )
+    else:
+        bucket_rows = (
+            payments
+            .annotate(period_start=trunc("created_at"))
+            .values("period_start")
+            .annotate(
+                tx_count=Count("id"),
+                total_received_foreign=Sum("amount"),
+                total_received_pkr=Sum("gross_pkr"),
+                total_fees_pkr=Sum(
+                    F("gross_pkr") - F("net_pkr"),
+                    output_field=DecimalField(max_digits=18, decimal_places=2),
+                ),
+                total_net_pkr=Sum("net_pkr"),
+            )
+            .order_by("period_start")
+        )
 
     buckets = []
     for row in bucket_rows:
         period_start = row["period_start"]
         if hasattr(period_start, "date"):
             period_start = period_start.date()
+        if filters["period"] == "week" and start_day > 0 and period_start:
+            period_start = period_start + timedelta(days=start_day)
         buckets.append({
             "period_start": period_start.isoformat() if period_start else None,
             "period_label": _format_period_label(filters["period"], period_start)

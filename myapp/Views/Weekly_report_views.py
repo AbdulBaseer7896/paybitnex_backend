@@ -459,7 +459,7 @@ def weekly_monday_report(request):
                 "next_week_start": (wk + timedelta(days=7)).isoformat(),
                 "label": (
                     f"{wk.strftime('%a %d %b')} -> "
-                    f"{(wk + timedelta(days=7)).strftime('%a %d %b %Y')}"
+                    f"{(wk + timedelta(days=6)).strftime('%a %d %b %Y')}"
                 ),
                 "is_current": wk == week_start_for(today, start_day),
                 **_serialise_bucket(b),

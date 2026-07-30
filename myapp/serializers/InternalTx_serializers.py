@@ -85,9 +85,15 @@ class CreditCardSerializer(serializers.ModelSerializer):
 
 class VendorPKRPaymentSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source="vendor.name", read_only=True)
+    pk_bank_account_label = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(
         source="created_by.full_name", read_only=True,
     )
+
+    def get_pk_bank_account_label(self, obj):
+        if obj.pk_bank_account_id and obj.pk_bank_account:
+            return str(obj.pk_bank_account)
+        return None
 
     class Meta:
         model = VendorPKRPayment
@@ -95,11 +101,15 @@ class VendorPKRPaymentSerializer(serializers.ModelSerializer):
             "id", "vendor", "vendor_name",
             "pkr_received", "usd_sent", "exchange_rate",
             "pkr_equivalent", "balance_pkr",
+            "pk_bank_account", "pk_bank_account_label",
+            "bank_transaction_id",
+            "screenshot",
             "confirmation_code", "notes", "occurred_on",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vendor_name", "pkr_equivalent", "balance_pkr",
+            "pk_bank_account_label",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
@@ -211,6 +221,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(
         source="created_by.full_name", read_only=True,
     )
+    linked_vendor_pkr_payment = VendorPKRPaymentSerializer(read_only=True)
 
     def get_fee_dist_partner_name(self, obj):
         if obj.fee_dist_partner_id and hasattr(obj, "fee_dist_partner") and obj.fee_dist_partner:
@@ -247,6 +258,8 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "method", "method_display",
             "reference", "description", "occurred_on",
             "document",
+            # PKR converter (person/vendor who handled USD→PKR for this transfer)
+            "pkr_converter_vendor", "linked_vendor_pkr_payment",
             # Bookkeeping
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
@@ -258,6 +271,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "pk_amount_pkr", "pk_fee_expense_id",
             "card_received_pkr", "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name",
+            "linked_vendor_pkr_payment",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
         ]
