@@ -31,11 +31,12 @@ from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Expense_models import Expense, ExpenseCategory
 from myapp.Models.InternalTx_models import (
     Vendor, USABankAccount, CreditCard, InternalPakistaniAccount,
-    InternalTransaction,
+    InternalTransaction, VendorPKRPayment,
 )
 from myapp.serializers.InternalTx_serializers import (
     VendorSerializer, USABankAccountSerializer, CreditCardSerializer,
     InternalPakistaniAccountSerializer, InternalTransactionSerializer,
+    VendorPKRPaymentSerializer,
 )
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 
@@ -58,7 +59,9 @@ class _BaseRefViewSet(viewsets.ModelViewSet):
     audit_label = "ref"
 
     def get_permissions(self):
-        if self.action in ("update", "partial_update", "destroy"):
+        if self.action in (
+            "update", "partial_update", "destroy", "pkr_converters",
+        ):
             return [IsAuthenticated(), IsAdmin()]
         # create + list + retrieve all available to admin AND accountant
         return [IsAuthenticated(), IsAdminOrAccountant()]
@@ -95,9 +98,70 @@ class VendorViewSet(_BaseRefViewSet):
     serializer_class = VendorSerializer
     audit_label = "Vendor"
     search_fields = ["name", "contact_name", "contact_email"]
-    filterset_fields = ["is_active"]
+    filterset_fields = ["is_active", "handles_pkr_conversion"]
     ordering_fields = ["name", "created_at"]
     ordering = ["name"]
+
+    @action(
+        detail=False,
+        methods=["get", "patch"],
+        url_path="pkr-converters",
+        permission_classes=[IsAuthenticated, IsAdmin],
+    )
+    def pkr_converters(self, request):
+        """Read or replace the set of vendors enabled for PKR conversion."""
+        if request.method == "GET":
+            rows = self.get_queryset().filter(handles_pkr_conversion=True)
+            return Response({
+                "vendor_ids": [str(v.id) for v in rows],
+                "vendors": VendorSerializer(rows, many=True).data,
+            })
+
+        vendor_ids = request.data.get("vendor_ids")
+        if not isinstance(vendor_ids, list):
+            return Response(
+                {"vendor_ids": "Provide a list of vendor IDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        vendor_ids = list(dict.fromkeys(str(value) for value in vendor_ids))
+        try:
+            selected = list(Vendor.objects.filter(pk__in=vendor_ids))
+        except (TypeError, ValueError):
+            return Response(
+                {"vendor_ids": "One or more vendor IDs are invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(selected) != len(vendor_ids):
+            return Response(
+                {"vendor_ids": "One or more selected vendors do not exist."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        before = list(
+            Vendor.objects.filter(handles_pkr_conversion=True)
+            .values_list("name", flat=True)
+        )
+        with dbtx.atomic():
+            Vendor.objects.filter(handles_pkr_conversion=True).update(
+                handles_pkr_conversion=False,
+            )
+            Vendor.objects.filter(pk__in=vendor_ids).update(
+                handles_pkr_conversion=True,
+            )
+        after = [vendor.name for vendor in selected]
+        AuditLog.record(
+            user=request.user,
+            action=AuditLog.ACTION_UPDATE,
+            target_label="PKR converter vendors",
+            description="Updated the vendors eligible for PKR conversion.",
+            before={"vendors": before},
+            after={"vendors": after},
+        )
+        rows = self.get_queryset().filter(handles_pkr_conversion=True)
+        return Response({
+            "vendor_ids": [str(v.id) for v in rows],
+            "vendors": VendorSerializer(rows, many=True).data,
+        })
 
 
 class USABankAccountViewSet(_BaseRefViewSet):
@@ -113,11 +177,11 @@ class USABankAccountViewSet(_BaseRefViewSet):
 
 class CreditCardViewSet(_BaseRefViewSet):
     """Admin-managed credit card list."""
-    queryset = CreditCard.objects.all()
+    queryset = CreditCard.objects.select_related("linked_usa_bank").all()
     serializer_class = CreditCardSerializer
     audit_label = "Credit card"
     search_fields = ["label", "holder_name", "last4"]
-    filterset_fields = ["brand", "is_active"]
+    filterset_fields = ["brand", "is_active", "linked_usa_bank"]
     ordering_fields = ["label", "brand", "created_at"]
     ordering = ["label"]
 
@@ -131,6 +195,90 @@ class InternalPakistaniAccountViewSet(_BaseRefViewSet):
     filterset_fields = ["is_active"]
     ordering_fields = ["label", "bank_name", "created_at"]
     ordering = ["label"]
+
+
+class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
+    """Admin/accountant ledger for PKR received from USD converters."""
+    queryset = (
+        VendorPKRPayment.objects
+        .select_related("vendor", "created_by")
+        .all()
+    )
+    serializer_class = VendorPKRPaymentSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrAccountant]
+    filterset_fields = ["vendor"]
+    search_fields = [
+        "vendor__name", "confirmation_code", "notes",
+    ]
+    ordering_fields = [
+        "occurred_on", "created_at", "pkr_received", "usd_sent",
+        "pkr_equivalent", "balance_pkr",
+    ]
+    ordering = ["-occurred_on", "-created_at"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+        if params.get("date_from"):
+            qs = qs.filter(occurred_on__gte=params["date_from"])
+        if params.get("date_to"):
+            qs = qs.filter(occurred_on__lte=params["date_to"])
+        return qs
+
+    def perform_create(self, serializer):
+        payment = serializer.save(created_by=self.request.user)
+        AuditLog.record(
+            user=self.request.user, action=AuditLog.ACTION_CREATE,
+            target=payment,
+            description=f"Vendor PKR payment recorded: {payment}",
+        )
+
+    def perform_update(self, serializer):
+        payment = serializer.save()
+        AuditLog.record(
+            user=self.request.user, action=AuditLog.ACTION_UPDATE,
+            target=payment,
+            description=f"Vendor PKR payment updated: {payment}",
+        )
+
+    def perform_destroy(self, instance):
+        AuditLog.record(
+            user=self.request.user, action=AuditLog.ACTION_DELETE,
+            target=instance,
+            description=f"Vendor PKR payment deleted: {instance}",
+        )
+        instance.delete()
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        totals = qs.aggregate(
+            pkr_received=Sum("pkr_received"),
+            usd_sent=Sum("usd_sent"),
+            pkr_equivalent=Sum("pkr_equivalent"),
+            balance_pkr=Sum("balance_pkr"),
+            count=Count("id"),
+        )
+        by_vendor = list(
+            qs.values("vendor_id", "vendor__name")
+            .annotate(
+                pkr_received=Sum("pkr_received"),
+                usd_sent=Sum("usd_sent"),
+                pkr_equivalent=Sum("pkr_equivalent"),
+                balance_pkr=Sum("balance_pkr"),
+                count=Count("id"),
+            )
+            .order_by("vendor__name")
+        )
+        def serialise(row):
+            return {
+                key: (str(value) if isinstance(value, Decimal) else value or 0)
+                for key, value in row.items()
+            }
+        return Response({
+            "totals": serialise(totals),
+            "by_vendor": [serialise(row) for row in by_vendor],
+        })
 
 
 # ---------------------------------------------------------------------
@@ -162,6 +310,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                 .select_related(
                     "currency", "fee_currency", "created_by",
                     "source_usa_bank", "source_credit_card",
+                    "source_credit_card__linked_usa_bank",
                     "dest_usa_bank", "dest_vendor", "dest_pk_bank",
                     "fee_expense", "fee_dist_partner",
                 ))
@@ -576,14 +725,33 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             or 0
         )
 
-        # The single rupee pool = bank transfers + card transactions.
-        pk_received_pkr = bank_received_pkr + card_received_pkr
+        # PKR received directly from enabled people/vendors in exchange for
+        # USD sent to them. Match the same date window used by this summary.
+        converter_qs = VendorPKRPayment.objects.all()
+        if request.query_params.get("date_from"):
+            converter_qs = converter_qs.filter(
+                occurred_on__gte=request.query_params["date_from"],
+            )
+        if request.query_params.get("date_to"):
+            converter_qs = converter_qs.filter(
+                occurred_on__lte=request.query_params["date_to"],
+            )
+        converter_received_pkr = (
+            converter_qs.aggregate(v=Sum("pkr_received"))["v"] or 0
+        )
+
+        # The single rupee pool = bank transfers + card transactions +
+        # direct PKR converter receipts.
+        pk_received_pkr = (
+            bank_received_pkr + card_received_pkr + converter_received_pkr
+        )
 
         return Response({
             "total_count": qs.count(),
             "pk_received_pkr": str(pk_received_pkr),
             "bank_received_pkr": str(bank_received_pkr),
             "card_received_pkr": str(card_received_pkr),
+            "converter_received_pkr": str(converter_received_pkr),
             # Back-compat alias. Always equals card_received_pkr; it is NOT
             # profit. Kept so older clients don't KeyError. Do not add to
             # any profit total.

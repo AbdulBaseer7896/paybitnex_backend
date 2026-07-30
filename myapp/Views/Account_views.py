@@ -56,6 +56,10 @@ class UserAdminViewSet(viewsets.ModelViewSet):
     queryset = (
         User.objects.all()
         .select_related("vendor_profile")
+        .prefetch_related(
+            "bank_accounts__bank",
+            "merchant_accounts__bank",
+        )
         .order_by("-created_at")
     )
     serializer_class = UserSerializer
@@ -138,7 +142,7 @@ class UserAdminViewSet(viewsets.ModelViewSet):
         user = s.instance
         return Response(
             {
-                **UserSerializer(user).data,
+                **UserSerializer(user, context={"request": request}).data,
                 "temporary_password": getattr(user, "_plain_password", None),
             },
             status=status.HTTP_201_CREATED,
@@ -173,7 +177,9 @@ class UserAdminViewSet(viewsets.ModelViewSet):
                 "is_active": instance.is_active, "phone": instance.phone,
             },
         )
-        return Response(UserSerializer(instance).data)
+        return Response(
+            UserSerializer(instance, context={"request": request}).data
+        )
 
     def destroy(self, request, *args, **kwargs):
         u = self.get_object()
@@ -232,7 +238,9 @@ class UserAdminViewSet(viewsets.ModelViewSet):
             description=f"{'Activated' if user.is_active else 'Deactivated'} {user.email}",
             before={"is_active": before}, after={"is_active": user.is_active},
         )
-        return Response(UserSerializer(user).data)
+        return Response(
+            UserSerializer(user, context={"request": request}).data
+        )
 
 
 import base64

@@ -5,7 +5,7 @@ from rest_framework import serializers
 
 from myapp.Models.InternalTx_models import (
     Vendor, USABankAccount, CreditCard, InternalPakistaniAccount,
-    InternalTransaction,
+    InternalTransaction, VendorPKRPayment,
     InternalTxSource, InternalTxDestination,
 )
 
@@ -32,7 +32,7 @@ class VendorSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name",
             "contact_name", "contact_email", "contact_phone",
-            "notes", "is_active",
+            "notes", "is_active", "handles_pkr_conversion",
             "portal_user", "portal_user_email", "portal_user_name",
             "portal_enabled", "portal_granted_at", "has_portal_access",
             "created_at", "updated_at",
@@ -64,16 +64,76 @@ class CreditCardSerializer(serializers.ModelSerializer):
     brand_display = serializers.CharField(
         source="get_brand_display", read_only=True,
     )
+    linked_usa_bank_label = serializers.CharField(
+        source="linked_usa_bank.label", read_only=True, default="",
+    )
 
     class Meta:
         model = CreditCard
         fields = [
             "id", "label", "brand", "brand_display",
             "last4", "holder_name",
+            "linked_usa_bank", "linked_usa_bank_label",
             "notes", "is_active",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "brand_display", "created_at", "updated_at"]
+        read_only_fields = [
+            "id", "brand_display", "linked_usa_bank_label",
+            "created_at", "updated_at",
+        ]
+
+
+class VendorPKRPaymentSerializer(serializers.ModelSerializer):
+    vendor_name = serializers.CharField(source="vendor.name", read_only=True)
+    created_by_name = serializers.CharField(
+        source="created_by.full_name", read_only=True,
+    )
+
+    class Meta:
+        model = VendorPKRPayment
+        fields = [
+            "id", "vendor", "vendor_name",
+            "pkr_received", "usd_sent", "exchange_rate",
+            "pkr_equivalent", "balance_pkr",
+            "confirmation_code", "notes", "occurred_on",
+            "created_by", "created_by_name", "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "vendor_name", "pkr_equivalent", "balance_pkr",
+            "created_by", "created_by_name", "created_at", "updated_at",
+        ]
+
+    def validate_vendor(self, value):
+        if not value.handles_pkr_conversion:
+            raise serializers.ValidationError(
+                "Select a vendor enabled for PKR conversion."
+            )
+        return value
+
+    def validate(self, data):
+        for field in ("pkr_received", "usd_sent"):
+            value = data.get(field, getattr(self.instance, field, None))
+            if value is not None and Decimal(str(value)) <= 0:
+                raise serializers.ValidationError({
+                    field: "Amount must be greater than zero.",
+                })
+        rate = data.get(
+            "exchange_rate", getattr(self.instance, "exchange_rate", None)
+        )
+        if rate is not None and Decimal(str(rate)) <= 0:
+            raise serializers.ValidationError({
+                "exchange_rate": "Exchange rate must be greater than zero.",
+            })
+        if rate is None:
+            from myapp.Models.Rate_models import ExchangeRate
+            if not ExchangeRate.objects.filter(currency_id="USD").exists():
+                raise serializers.ValidationError({
+                    "exchange_rate": (
+                        "No current USD/PKR rate is configured. Enter a rate "
+                        "for this payment or configure the USD exchange rate."
+                    ),
+                })
+        return data
 
 
 class InternalPakistaniAccountSerializer(serializers.ModelSerializer):
@@ -104,6 +164,16 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
     Anything else is a 400.
     """
     source_label = serializers.CharField(read_only=True)
+    source_linked_usa_bank = serializers.UUIDField(
+        source="source_credit_card.linked_usa_bank_id",
+        read_only=True,
+        allow_null=True,
+    )
+    source_linked_usa_bank_label = serializers.CharField(
+        source="source_credit_card.linked_usa_bank.label",
+        read_only=True,
+        default="",
+    )
     destination_label = serializers.CharField(read_only=True)
     # PKR received into our PK banks from this card transaction:
     # (amount + fee_amount) × card_dollar_rate. Reads the legacy
@@ -154,7 +224,8 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             # Source
             "source_type", "source_type_display",
             "source_usa_bank", "source_credit_card",
-            "source_label",
+            "source_label", "source_linked_usa_bank",
+            "source_linked_usa_bank_label",
             # Destination
             "destination_type", "destination_type_display",
             "dest_usa_bank", "dest_vendor", "dest_pk_bank",
@@ -171,7 +242,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             # `card_profit_pkr` is a back-compat alias of card_received_pkr;
             # it is money received into PK banks, NOT company profit.
             "card_dollar_rate", "card_received_pkr", "card_profit_pkr",
-            "fee_dist_type", "fee_dist_partner_name", "fee_dist_partner", "fee_dist_partner_name",
+            "fee_dist_type", "fee_dist_partner", "fee_dist_partner_name",
             # Method + meta
             "method", "method_display",
             "reference", "description", "occurred_on",

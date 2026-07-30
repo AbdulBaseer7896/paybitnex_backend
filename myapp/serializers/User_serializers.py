@@ -33,6 +33,8 @@ class UserSerializer(serializers.ModelSerializer):
     # the user list, hide customer-only feature toggles, etc.).
     is_vendor = serializers.SerializerMethodField()
     vendor_name = serializers.SerializerMethodField()
+    bank_accounts = serializers.SerializerMethodField()
+    merchant_accounts = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -42,12 +44,14 @@ class UserSerializer(serializers.ModelSerializer):
             "profile_picture_url",
             "payments_pin_set",
             "is_vendor", "vendor_name",
+            "bank_accounts", "merchant_accounts",
             "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "created_at", "updated_at", "is_profile_complete",
             "profile_picture_url", "payments_pin_set",
             "is_vendor", "vendor_name",
+            "bank_accounts", "merchant_accounts",
         ]
 
     def get_payments_pin_set(self, obj):
@@ -74,6 +78,34 @@ class UserSerializer(serializers.ModelSerializer):
     def get_vendor_name(self, obj):
         v = self._vendor(obj)
         return v.name if v else ""
+
+    def _can_view_accounts(self, obj):
+        request = self.context.get("request")
+        if not request or not getattr(request.user, "is_authenticated", False):
+            return False
+        return request.user.pk == obj.pk or request.user.role in (
+            "admin", "accountant",
+        )
+
+    def get_bank_accounts(self, obj):
+        if not self._can_view_accounts(obj):
+            return []
+        from myapp.serializers.Banking_serializers import (
+            CustomerBankAccountSerializer,
+        )
+        return CustomerBankAccountSerializer(
+            obj.bank_accounts.all(), many=True, context=self.context,
+        ).data
+
+    def get_merchant_accounts(self, obj):
+        if not self._can_view_accounts(obj):
+            return []
+        from myapp.serializers.Banking_serializers import (
+            CustomerMerchantAccountSerializer,
+        )
+        return CustomerMerchantAccountSerializer(
+            obj.merchant_accounts.all(), many=True, context=self.context,
+        ).data
 
     def get_profile_picture_url(self, obj):
         # Explicit profile picture takes priority.

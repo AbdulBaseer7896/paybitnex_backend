@@ -85,7 +85,7 @@ def single_invoice_pdf(request, payment_id):
 
     metadata = {
         "Reference":    payment.reference,
-        "External ID":  payment.external_transaction_id or "—",
+        "Confirmation Code": payment.external_transaction_id or "—",
         "Date":         (payment.created_at.strftime("%b %d, %Y")
                          if payment.created_at else "—"),
         "Currency":     payment.currency_id,
