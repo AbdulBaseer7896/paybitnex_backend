@@ -604,7 +604,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------------
     # Auto-VendorPKRPayment sync
     # ------------------------------------------------------------------
-    def _sync_vendor_pkr_payment(self, tx, pkr_received=None, screenshot=None, pk_bank_account_id=None, bank_transaction_id=None):
+    def _sync_vendor_pkr_payment(self, tx, pkr_received=None, screenshot=None, pk_bank_account_id=None, bank_transaction_id=None, exchange_rate=None):
         """
         If the transaction has a pkr_converter_vendor set, auto-create or
         update a linked VendorPKRPayment so the "PKR Payments by Person"
@@ -642,7 +642,17 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         from decimal import Decimal as D
         usd_sent = D(str(tx.amount or 0))
         pkr_val = D(str(pkr_received or tx.pk_amount_pkr or 0))
-        rate = tx.pk_conversion_rate or None
+        # An explicit rate from the form wins: the rate agreed with a vendor
+        # regularly differs from the system rate, and VendorPKRPayment.save()
+        # falls back to the system rate only when this is left empty.
+        rate = None
+        if exchange_rate not in (None, ""):
+            try:
+                rate = D(str(exchange_rate))
+            except Exception:
+                rate = None
+        if rate is None:
+            rate = tx.pk_conversion_rate or None
 
         # Resolve Pakistani bank account where transferred
         resolved_pk_bank_id = pk_bank_account_id or (tx.dest_pk_bank_id if tx.dest_pk_bank_id else None)
@@ -696,12 +706,14 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         screenshot = self.request.data.get("pkr_converter_screenshot") or None
         pk_bank_account_id = self.request.data.get("pkr_converter_pk_bank_account") or None
         bank_transaction_id = self.request.data.get("pkr_converter_bank_transaction_id") or None
+        exchange_rate = self.request.data.get("pkr_converter_exchange_rate") or None
         self._sync_vendor_pkr_payment(
             obj,
             pkr_received=pkr_received,
             screenshot=screenshot,
             pk_bank_account_id=pk_bank_account_id,
-            bank_transaction_id=bank_transaction_id
+            bank_transaction_id=bank_transaction_id,
+            exchange_rate=exchange_rate,
         )
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
@@ -743,12 +755,14 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         screenshot = self.request.data.get("pkr_converter_screenshot") or None
         pk_bank_account_id = self.request.data.get("pkr_converter_pk_bank_account") or None
         bank_transaction_id = self.request.data.get("pkr_converter_bank_transaction_id") or None
+        exchange_rate = self.request.data.get("pkr_converter_exchange_rate") or None
         self._sync_vendor_pkr_payment(
             obj,
             pkr_received=pkr_received,
             screenshot=screenshot,
             pk_bank_account_id=pk_bank_account_id,
-            bank_transaction_id=bank_transaction_id
+            bank_transaction_id=bank_transaction_id,
+            exchange_rate=exchange_rate,
         )
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_UPDATE,
