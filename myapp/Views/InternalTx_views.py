@@ -201,14 +201,15 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
     """Admin/accountant ledger for PKR received from USD converters."""
     queryset = (
         VendorPKRPayment.objects
-        .select_related("vendor", "created_by")
+        .select_related("vendor", "pk_bank_account", "created_by")
         .all()
     )
     serializer_class = VendorPKRPaymentSerializer
     permission_classes = [IsAuthenticated, IsAdminOrAccountant]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     filterset_fields = ["vendor"]
     search_fields = [
-        "vendor__name", "confirmation_code", "notes",
+        "vendor__name", "confirmation_code", "bank_transaction_id", "notes",
     ]
     ordering_fields = [
         "occurred_on", "created_at", "pkr_received", "usd_sent",
@@ -227,6 +228,26 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         payment = serializer.save(created_by=self.request.user)
+
+        tx_ids_raw = self.request.data.get("transaction_ids")
+        if tx_ids_raw:
+            import json
+            try:
+                tx_ids = json.loads(tx_ids_raw)
+            except Exception:
+                tx_ids = [x.strip() for x in str(tx_ids_raw).split(",") if x.strip()]
+
+            if tx_ids:
+                from myapp.Models.InternalTx_models import InternalTransaction
+                txs = InternalTransaction.objects.filter(id__in=tx_ids)
+                for tx in txs:
+                    tx.pkr_converter_vendor = payment.vendor
+                    tx.linked_vendor_pkr_payment = payment
+                    # If this is a PK bank transfer, ensure the destination bank matches where PKR landed
+                    if payment.pk_bank_account_id and tx.destination_type == 'pk_bank':
+                        tx.dest_pk_bank = payment.pk_bank_account
+                    tx.save()
+
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
             target=payment,
@@ -572,6 +593,68 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         tx.save(update_fields=["pk_fee_expense", "updated_at"])
 
     # ------------------------------------------------------------------
+    # Auto-VendorPKRPayment sync
+    # ------------------------------------------------------------------
+    def _sync_vendor_pkr_payment(self, tx, pkr_received=None, screenshot=None, pk_bank_account_id=None, bank_transaction_id=None):
+        """
+        If the transaction has a pkr_converter_vendor set, auto-create or
+        update a linked VendorPKRPayment so the "PKR Payments by Person"
+        ledger stays in sync without manual double-entry.
+
+        pkr_received: decimal/string PKR amount (explicit from the form).
+                      Falls back to pk_amount_pkr if the transaction has it.
+        screenshot:   uploaded image file, or None.
+        """
+        if not tx.pkr_converter_vendor_id:
+            # Vendor removed — unlink but keep the historical VendorPKRPayment row.
+            if tx.linked_vendor_pkr_payment_id:
+                tx.linked_vendor_pkr_payment = None
+                tx.save(update_fields=["linked_vendor_pkr_payment", "updated_at"])
+            return
+
+        vendor = tx.pkr_converter_vendor
+        # Ensure the vendor is flagged for PKR conversion.
+        if not vendor.handles_pkr_conversion:
+            vendor.handles_pkr_conversion = True
+            vendor.save(update_fields=["handles_pkr_conversion", "updated_at"])
+
+        from decimal import Decimal as D
+        usd_sent = D(str(tx.amount or 0))
+        pkr_val = D(str(pkr_received or tx.pk_amount_pkr or 0))
+        rate = tx.pk_conversion_rate or None
+
+        # Resolve Pakistani bank account where transferred
+        resolved_pk_bank_id = pk_bank_account_id or (tx.dest_pk_bank_id if tx.dest_pk_bank_id else None)
+
+        common_fields = dict(
+            vendor=vendor,
+            usd_sent=usd_sent,
+            pkr_received=pkr_val if pkr_val > 0 else usd_sent,
+            exchange_rate=rate if rate else None,
+            pk_bank_account_id=resolved_pk_bank_id,
+            bank_transaction_id=bank_transaction_id or "",
+            occurred_on=tx.occurred_on,
+        )
+
+        if tx.linked_vendor_pkr_payment_id:
+            pmt = tx.linked_vendor_pkr_payment
+            for k, v in common_fields.items():
+                setattr(pmt, k, v)
+            if screenshot:
+                pmt.screenshot = screenshot
+            pmt.save()
+        else:
+            pmt = VendorPKRPayment(
+                **common_fields,
+                created_by=tx.created_by,
+            )
+            if screenshot:
+                pmt.screenshot = screenshot
+            pmt.save()
+            tx.linked_vendor_pkr_payment = pmt
+            tx.save(update_fields=["linked_vendor_pkr_payment", "updated_at"])
+
+    # ------------------------------------------------------------------
     # CRUD lifecycle hooks
     # ------------------------------------------------------------------
     def perform_create(self, serializer):
@@ -587,6 +670,18 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                 custom_splits = None
         self._sync_fee_expense(obj, custom_splits=custom_splits)
         self._sync_pk_fee_expense(obj)
+        # Auto-create VendorPKRPayment if a converter vendor is attached.
+        pkr_received = self.request.data.get("pkr_converter_pkr_received") or None
+        screenshot = self.request.data.get("pkr_converter_screenshot") or None
+        pk_bank_account_id = self.request.data.get("pkr_converter_pk_bank_account") or None
+        bank_transaction_id = self.request.data.get("pkr_converter_bank_transaction_id") or None
+        self._sync_vendor_pkr_payment(
+            obj,
+            pkr_received=pkr_received,
+            screenshot=screenshot,
+            pk_bank_account_id=pk_bank_account_id,
+            bank_transaction_id=bank_transaction_id
+        )
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
             target=obj,
@@ -622,6 +717,18 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                 custom_splits = None
         self._sync_fee_expense(obj, custom_splits=custom_splits)
         self._sync_pk_fee_expense(obj)
+        # Sync the linked VendorPKRPayment if vendor set.
+        pkr_received = self.request.data.get("pkr_converter_pkr_received") or None
+        screenshot = self.request.data.get("pkr_converter_screenshot") or None
+        pk_bank_account_id = self.request.data.get("pkr_converter_pk_bank_account") or None
+        bank_transaction_id = self.request.data.get("pkr_converter_bank_transaction_id") or None
+        self._sync_vendor_pkr_payment(
+            obj,
+            pkr_received=pkr_received,
+            screenshot=screenshot,
+            pk_bank_account_id=pk_bank_account_id,
+            bank_transaction_id=bank_transaction_id
+        )
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_UPDATE,
             target=obj,

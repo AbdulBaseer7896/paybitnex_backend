@@ -245,6 +245,21 @@ class VendorPKRPayment(models.Model):
         max_digits=20, decimal_places=2, editable=False,
         help_text="PKR received minus the PKR equivalent of USD sent.",
     )
+    # Which of our own PK bank accounts received these PKR funds.
+    pk_bank_account = models.ForeignKey(
+        "InternalPakistaniAccount", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="vendor_pkr_receipts",
+        help_text="Our internal Pakistani account where PKR was received.",
+    )
+    bank_transaction_id = models.CharField(
+        max_length=120, blank=True, default="",
+        help_text="Bank transaction reference / ID for this PKR transfer.",
+    )
+    screenshot = models.ImageField(
+        upload_to="vendor_pkr_payments/screenshots/",
+        null=True, blank=True,
+        help_text="Screenshot or proof of the PKR bank transfer.",
+    )
     confirmation_code = models.CharField(max_length=120, blank=True, default="")
     notes = models.TextField(blank=True, default="")
     occurred_on = models.DateField(db_index=True)
@@ -488,6 +503,23 @@ class InternalTransaction(models.Model):
                   "profit — it is part of the PKR reconciliation pool, "
                   "alongside USA→PK bank transfers. Exposed by the API as "
                   "`card_received_pkr`.",
+    )
+
+    # ── Person/vendor who handled the USD→PKR conversion ──────────────
+    # Optional. When set, `perform_create` in the viewset will auto-create
+    # (or update) a linked `VendorPKRPayment` row so the conversion appears
+    # in the "PKR Payments by Person" ledger without manual double-entry.
+    pkr_converter_vendor = models.ForeignKey(
+        Vendor, on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="converter_internal_transactions",
+        help_text="Person/vendor who converted USD to PKR for this transfer.",
+    )
+    linked_vendor_pkr_payment = models.ForeignKey(
+        "VendorPKRPayment", on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="source_internal_transactions",
+        help_text="Auto-created VendorPKRPayment record linked to this transaction.",
     )
 
     # Method

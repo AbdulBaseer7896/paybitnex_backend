@@ -35,7 +35,7 @@ urlpatterns = [
     path("closing/", closing_report, name="reports-closing"),
     path("closing.csv", closing_report_csv, name="reports-closing-csv"),
     path("closing.pdf", closing_report_pdf, name="reports-closing-pdf"),
-    # Monday-to-Monday weekly report — every status except rejected,
+    # Tuesday-to-Monday weekly report — every status except rejected,
     # using the provisional dollar rate so it is never blank.
     path("weekly-monday/", weekly_monday_report, name="reports-weekly-monday"),
     path("weekly-monday/detail/", weekly_monday_detail,

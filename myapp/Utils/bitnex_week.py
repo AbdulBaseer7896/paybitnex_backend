@@ -18,7 +18,7 @@ WEEKDAY_NAMES = [
     "Friday", "Saturday", "Sunday",
 ]
 
-DEFAULT_START_DAY = 0          # Monday
+DEFAULT_START_DAY = 1          # Tuesday
 DEFAULT_WEEK_NAME = "Bitnex week"
 
 
