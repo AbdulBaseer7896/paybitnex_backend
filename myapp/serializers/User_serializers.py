@@ -124,6 +124,82 @@ class UserSerializer(serializers.ModelSerializer):
         return None
 
 
+class CustomerAccountDetailSerializer(serializers.ModelSerializer):
+    """Everything the staff "Customer details" popup shows, in one payload.
+
+    Customers already give us all of this during onboarding, but it lives
+    across the user row, the KYC profile and the two account tables — so
+    staff kept re-asking customers for details we already had. Flattening
+    it here lets every screen open the same popup with a single request.
+
+    Read-only by design: edits still go through the banking / profile
+    endpoints so they stay audit-logged.
+    """
+    bank_accounts = serializers.SerializerMethodField()
+    merchant_accounts = serializers.SerializerMethodField()
+    cnic_number = serializers.SerializerMethodField()
+    kyc_status = serializers.SerializerMethodField()
+    address = serializers.SerializerMethodField()
+    city = serializers.SerializerMethodField()
+    profile_full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "email", "full_name", "phone",
+            "is_active", "is_profile_complete",
+            "cnic_number", "kyc_status", "address", "city",
+            "profile_full_name",
+            "bank_accounts", "merchant_accounts",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_bank_accounts(self, obj):
+        from myapp.serializers.Banking_serializers import (
+            CustomerBankAccountSerializer,
+        )
+        return CustomerBankAccountSerializer(
+            obj.bank_accounts.all(), many=True, context=self.context,
+        ).data
+
+    def get_merchant_accounts(self, obj):
+        from myapp.serializers.Banking_serializers import (
+            CustomerMerchantAccountSerializer,
+        )
+        return CustomerMerchantAccountSerializer(
+            obj.merchant_accounts.all(), many=True, context=self.context,
+        ).data
+
+    # `profile` is a reverse OneToOne — absent for customers who signed up
+    # but never finished KYC. Accessing it then raises RelatedObjectDoesNotExist
+    # (an AttributeError subclass), which getattr's default swallows.
+    def _profile(self, obj):
+        return getattr(obj, "profile", None)
+
+    def get_cnic_number(self, obj):
+        p = self._profile(obj)
+        return p.cnic_number if p else ""
+
+    def get_kyc_status(self, obj):
+        p = self._profile(obj)
+        return p.kyc_status if p else None
+
+    def get_address(self, obj):
+        p = self._profile(obj)
+        return p.address if p else ""
+
+    def get_city(self, obj):
+        p = self._profile(obj)
+        return p.city if p else ""
+
+    # The KYC profile carries the legally-verified name, which can differ
+    # from the display name on the user row — reviewers need to see both.
+    def get_profile_full_name(self, obj):
+        p = self._profile(obj)
+        return p.full_name if p else ""
+
+
 class AdminCreateUserSerializer(serializers.ModelSerializer):
     """Admin creates a new user (any role). Temporary password returned."""
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)

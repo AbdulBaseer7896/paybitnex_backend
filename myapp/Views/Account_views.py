@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.generics import ListAPIView
+from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -23,6 +23,7 @@ from myapp.Models.Audit_models import AuditLog
 from myapp.serializers.User_serializers import (
     UserSerializer, AdminCreateUserSerializer,
     AdminUpdateUserSerializer, AdminResetPasswordSerializer,
+    CustomerAccountDetailSerializer,
 )
 from myapp.serializers.Profile_serializers import (
     CustomerProfileSerializer, KYCReviewSerializer,
@@ -796,6 +797,32 @@ class CustomerOnboardingListView(ListAPIView):
         else:
             response.data = results
         return response
+
+
+# =====================================================================
+#  CUSTOMER ACCOUNT DETAILS — one-shot lookup for the staff popup
+# =====================================================================
+class CustomerAccountDetailView(RetrieveAPIView):
+    """Everything staff need about one customer in a single request.
+
+    Customers give us their contact info and receiving accounts during
+    onboarding, but staff kept re-asking for them because the data was
+    split across the user record, the KYC profile and the two account
+    tables. This joins all four so the "Customer details" popup on the
+    transaction, onboarding and by-customer screens can open with one call.
+
+    Read-only: edits still go through the banking / profile endpoints so
+    they stay audit-logged.
+    """
+    permission_classes = [IsAuthenticated, IsAdminOrAccountant]
+    serializer_class = CustomerAccountDetailSerializer
+    lookup_url_kwarg = "user_id"
+
+    def get_queryset(self):
+        return (
+            User.objects.select_related("profile")
+            .prefetch_related("bank_accounts__bank", "merchant_accounts__bank")
+        )
 
 
 # =====================================================================
