@@ -31,7 +31,7 @@ from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Expense_models import Expense, ExpenseCategory
 from myapp.Models.InternalTx_models import (
     Vendor, USABankAccount, CreditCard, InternalPakistaniAccount,
-    InternalTransaction, VendorPKRPayment,
+    InternalTransaction, VendorPKRPayment, InternalTxDestination,
 )
 from myapp.serializers.InternalTx_serializers import (
     VendorSerializer, USABankAccountSerializer, CreditCardSerializer,
@@ -238,8 +238,17 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
                 tx_ids = [x.strip() for x in str(tx_ids_raw).split(",") if x.strip()]
 
             if tx_ids:
-                from myapp.Models.InternalTx_models import InternalTransaction
-                txs = InternalTransaction.objects.filter(id__in=tx_ids)
+                # A USD→PKR conversion only exists when the money left the
+                # US — a USA→USA bank transfer never converts, so stamping
+                # a converter on one would invent a conversion that never
+                # happened and double-count the USD in the vendor ledger.
+                txs = InternalTransaction.objects.filter(
+                    id__in=tx_ids,
+                    destination_type__in=[
+                        InternalTxDestination.VENDOR,
+                        InternalTxDestination.PK_BANK,
+                    ],
+                )
                 for tx in txs:
                     tx.pkr_converter_vendor = payment.vendor
                     tx.linked_vendor_pkr_payment = payment
@@ -605,8 +614,20 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                       Falls back to pk_amount_pkr if the transaction has it.
         screenshot:   uploaded image file, or None.
         """
-        if not tx.pkr_converter_vendor_id:
-            # Vendor removed — unlink but keep the historical VendorPKRPayment row.
+        # A USD→PKR conversion only exists when the money left the US. A
+        # USA→USA bank transfer never converts, so it must not carry a
+        # converter or a linked payment — drop both if one was set before
+        # the destination was changed.
+        eligible = tx.destination_type in (
+            InternalTxDestination.VENDOR, InternalTxDestination.PK_BANK,
+        )
+        if not eligible and tx.pkr_converter_vendor_id:
+            tx.pkr_converter_vendor = None
+            tx.save(update_fields=["pkr_converter_vendor", "updated_at"])
+
+        if not eligible or not tx.pkr_converter_vendor_id:
+            # No converter (or not eligible for one) — unlink, but keep the
+            # historical VendorPKRPayment row.
             if tx.linked_vendor_pkr_payment_id:
                 tx.linked_vendor_pkr_payment = None
                 tx.save(update_fields=["linked_vendor_pkr_payment", "updated_at"])

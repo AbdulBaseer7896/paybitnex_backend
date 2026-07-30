@@ -6,6 +6,7 @@ from myapp.Views.Account_views import (
     UserAdminViewSet, CustomerProfileView, ProcessImageView,
     KYCReviewView, PendingKYCListView, KYCRaiseObjectionsView,
     CustomerScoreView, CustomerOnboardingListView,
+    CustomerAccountDetailView,
     onboarding_counts, cnic_available,
 )
 from myapp.Views.Feature_views import UserFeaturesView
@@ -32,6 +33,11 @@ urlpatterns = [
     path("kyc/<uuid:profile_id>/review/", KYCReviewView.as_view(), name="kyc-review"),
     path("kyc/<uuid:profile_id>/objections/",
          KYCRaiseObjectionsView.as_view(), name="kyc-objections"),
+    # Contact + bank details for one customer in a single call — backs the
+    # "Customer details" popup on the transaction / onboarding / by-customer
+    # screens.
+    path("customer-accounts/<uuid:user_id>/", CustomerAccountDetailView.as_view(),
+         name="customer-account-detail"),
     path("onboarding/", CustomerOnboardingListView.as_view(), name="onboarding-list"),
     path("onboarding/counts/", onboarding_counts, name="onboarding-counts"),
     path("cnic-available/", cnic_available, name="cnic-available"),
