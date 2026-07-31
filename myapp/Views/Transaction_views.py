@@ -14,7 +14,9 @@ Accountant / Admin:
     POST /transactions/transfers/               → record outgoing PKR transfer
         (marks incoming payment as PKR_SENT + COMPLETED + distributes fees)
 """
+import logging
 from decimal import Decimal
+from django.conf import settings
 from django.db import transaction as dbtx
 from django.db.models import Prefetch
 from django.utils import timezone
@@ -44,6 +46,9 @@ from myapp.Utils.partner_ledger import distribute_fee_for_payment
 
 
 from myapp.Utils.email_tasks import send_email_async
+from myapp.Utils.staff_alerts import notify_staff
+
+log = logging.getLogger(__name__)
 
 
 # ---------- helpers ----------
@@ -109,8 +114,68 @@ def _record_status_change(payment, from_status, to_status, user, note=""):
                     },
                 )
         except Exception:
-            # Never let email failure block the status-change response.
-            pass
+            # Never let email failure block the status-change response, but
+            # don't swallow it silently either — a bad SMTP/Resend config
+            # otherwise looks identical to "no email was supposed to go out".
+            log.exception(
+                "customer status email failed: payment=%s %s → %s",
+                payment.reference, from_status, to_status,
+            )
+
+
+def _payment_alert_context(payment):
+    """Shared body fields for the staff-facing payment alerts."""
+    return {
+        "reference":      payment.reference,
+        "customer_name":  payment.customer.full_name or payment.customer.email,
+        "customer_email": payment.customer.email,
+        "amount":         f"{payment.amount}",
+        "currency":       payment.currency_id,
+        "payment_method": str(payment.payment_method or ""),
+        "sender_name":    payment.sender_name or "",
+        "sender_company": payment.sender_company or "",
+        "occurred_on":    payment.occurred_on or "",
+    }
+
+
+def _notify_admins_new_payment(payment, submitted_by=""):
+    """Tell staff a payment is sitting in the review queue.
+
+    Submission only. Every later transition is the customer's email (see
+    `_record_status_change`), which deliberately skips from_status="" so the
+    customer isn't emailed about their own submission.
+    """
+    notify_staff(
+        subject=(
+            f"New payment {payment.reference} — "
+            f"{payment.amount} {payment.currency_id} pending review"
+        ),
+        template="payments/admin_new_payment",
+        context={**_payment_alert_context(payment), "submitted_by": submitted_by},
+        path=f"/transactions/{payment.id}",
+        # Replies land on the customer — who staff would chase for a missing
+        # proof or a wrong amount.
+        reply_to=[payment.customer.email] if payment.customer.email else None,
+    )
+
+
+def _notify_admins_payment_confirmed(payment, confirmed_by=""):
+    """Tell staff the customer confirmed receipt and the payment closed.
+
+    This is the end of the money's journey — partner fees are distributed on
+    the same transition — so it's the point at which the books can be
+    reconciled, not just another status bump.
+    """
+    notify_staff(
+        subject=(
+            f"Payment {payment.reference} completed — "
+            f"customer confirmed receipt"
+        ),
+        template="payments/admin_payment_confirmed",
+        context={**_payment_alert_context(payment), "confirmed_by": confirmed_by},
+        path=f"/transactions/{payment.id}",
+        reply_to=[payment.customer.email] if payment.customer.email else None,
+    )
 
 
 # ---------- viewsets ----------
@@ -490,6 +555,9 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
                 user=request.user, note="Submitted by customer",
             )
+            # After commit: the alert links straight to the review screen,
+            # which would 404 if the row weren't visible yet.
+            dbtx.on_commit(lambda: _notify_admins_new_payment(payment))
         return Response(
             IncomingPaymentSerializer(payment).data,
             status=status.HTTP_201_CREATED,
@@ -556,6 +624,12 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
                 user=request.user,
                 note=f"Submitted on behalf of {customer.email} by {request.user.email}",
+            )
+            staff_email = request.user.email
+            dbtx.on_commit(
+                lambda: _notify_admins_new_payment(
+                    payment, submitted_by=staff_email,
+                )
             )
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_CREATE, target=payment,
@@ -845,6 +919,11 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 user=request.user,
                 note=("Customer confirmed receipt"
                       + (f" — {note}" if note else "")),
+            )
+            # After commit: fee distribution below runs in the same block,
+            # and staff shouldn't be told the books closed until they have.
+            dbtx.on_commit(
+                lambda: _notify_admins_payment_confirmed(payment, confirmed_by=note)
             )
             # Run partner fee distribution now (was previously run at
             # PKR_SENT; new flow runs it at true completion).

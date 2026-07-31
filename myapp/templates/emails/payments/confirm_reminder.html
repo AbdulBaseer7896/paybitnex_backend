@@ -1,0 +1,54 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  We transferred the PKR for payment <b>{{ reference }}</b> a little while
+  ago, but we haven't heard back that it arrived. Once you confirm, the
+  payment closes out on your side too.
+</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:20px 0; border:1px solid #eeeff2; border-radius:8px;">
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Reference
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-family:'Courier New', monospace; font-size:14px;
+               text-align:right;">
+      {{ reference }}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:14px 18px;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Amount
+    </td>
+    <td style="padding:14px 18px; font-size:14px; text-align:right;">
+      {{ amount }} {{ currency }}
+    </td>
+  </tr>
+</table>
+
+<p style="margin:16px 0; font-size:14px;">
+  Open your payments page and click <b>"I received my PKR"</b> to confirm.
+</p>
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ frontend_url }}/app/payments"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    Confirm receipt
+  </a>
+</p>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If the funds haven't reached you, please contact support with the
+  reference number above and we'll trace the transfer.
+</p>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if client_name %} {{ client_name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  This is a reminder that invoice <b>{{ invoice_number }}</b>
+  {% if company_name %}from {{ company_name }} {% endif %}passed its due
+  date and is still showing as unpaid.
+</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:20px 0; border:1px solid #eeeff2; border-radius:8px;">
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Invoice
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-family:'Courier New', monospace; font-size:14px;
+               text-align:right;">
+      {{ invoice_number }}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Amount due
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:14px; text-align:right;">
+      <b>{{ total }} {{ currency_code }}</b>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:14px 18px;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Due date
+    </td>
+    <td style="padding:14px 18px; font-size:14px; text-align:right;">
+      {{ due_date }}
+      <span style="color:#b4462f; font-size:12px;">
+        ({{ days_overdue }} day{{ days_overdue|pluralize }} overdue)
+      </span>
+    </td>
+  </tr>
+</table>
+
+{% if public_url %}
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ public_url }}"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    View invoice
+  </a>
+</p>
+{% endif %}
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If you've already sent this payment, please disregard this reminder —
+  or reply to this email and it will reach the sender directly.
+</p>
+{% endblock %}

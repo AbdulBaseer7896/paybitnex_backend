@@ -21,6 +21,7 @@ from myapp.Models.Audit_models import AuditLog
 from myapp.Models.EmailOTP_models import EmailOTP, OTPPurpose
 from myapp.Utils.async_helpers import async_is_valid
 from myapp.Utils.email_tasks import send_email_async
+from myapp.Utils.staff_alerts import notify_staff
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -542,6 +543,24 @@ class SignupVerifyOTPView(APIView):
                 assign_defaults_to_user(user, granted_by=None)
             except Exception:
                 pass  # Never block registration
+
+            # Staff would otherwise only discover the account by browsing the
+            # user list. The link goes to the KYC queue rather than /users
+            # because that's where this signup lands next — and because the
+            # accountant portal has no users page to link to.
+            transaction.on_commit(
+                lambda: notify_staff(
+                    subject=f"New customer signup — {user.full_name or user.email}",
+                    template="staff/new_signup",
+                    context={
+                        "customer_name":  user.full_name or user.email,
+                        "customer_email": user.email,
+                        "phone":          user.phone or "",
+                    },
+                    path="/kyc",
+                    reply_to=[user.email],
+                )
+            )
 
         # Issue JWT tokens for immediate sign-in
         refresh = RefreshToken.for_user(user)

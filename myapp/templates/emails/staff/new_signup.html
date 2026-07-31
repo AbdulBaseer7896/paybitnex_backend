@@ -1,0 +1,65 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">
+  A new customer has signed up and verified their email address.
+</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:20px 0; border:1px solid #eeeff2; border-radius:8px;">
+  <tr>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Name
+    </td>
+    <td style="padding:14px 18px; border-bottom:1px solid #eeeff2;
+               font-size:14px; text-align:right;">
+      {{ customer_name }}
+    </td>
+  </tr>
+  <tr>
+    <td
+      {% if phone %}style="padding:14px 18px; border-bottom:1px solid #eeeff2; font-size:12px; color:#6b6f78; text-transform:uppercase; letter-spacing:1px;"
+      {% else %}style="padding:14px 18px; font-size:12px; color:#6b6f78; text-transform:uppercase; letter-spacing:1px;"
+      {% endif %}>
+      Email
+    </td>
+    <td
+      {% if phone %}style="padding:14px 18px; border-bottom:1px solid #eeeff2; font-size:14px; text-align:right;"
+      {% else %}style="padding:14px 18px; font-size:14px; text-align:right;"
+      {% endif %}>
+      {{ customer_email }}
+    </td>
+  </tr>
+  {% if phone %}
+  <tr>
+    <td style="padding:14px 18px;
+               font-size:12px; color:#6b6f78; text-transform:uppercase;
+               letter-spacing:1px;">
+      Phone
+    </td>
+    <td style="padding:14px 18px; font-size:14px; text-align:right;">
+      {{ phone }}
+    </td>
+  </tr>
+  {% endif %}
+</table>
+
+<p style="margin:16px 0; font-size:13px; color:#6b6f78;">
+  They still need to complete onboarding and pass KYC before they can submit
+  a payment. You'll get a separate alert when their profile is ready to review.
+</p>
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ review_url }}"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    Open KYC queue
+  </a>
+</p>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  Internal notification — the customer is not copied on this message.
+</p>
+{% endblock %}
