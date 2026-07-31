@@ -114,10 +114,16 @@ class VendorPKRPaymentSerializer(serializers.ModelSerializer):
         ]
 
     def validate_vendor(self, value):
+        # Recording a PKR payment against someone IS the evidence that they
+        # convert — so flag them rather than reject the entry. Requiring the
+        # flag up front made this a dead end: the admin screen that sets it
+        # is the only way in, and a fresh install has nobody flagged, so no
+        # payment could be recorded at all. Mirrors what
+        # InternalTransactionViewSet._sync_vendor_pkr_payment already does
+        # for the single-transaction form.
         if not value.handles_pkr_conversion:
-            raise serializers.ValidationError(
-                "Select a vendor enabled for PKR conversion."
-            )
+            value.handles_pkr_conversion = True
+            value.save(update_fields=["handles_pkr_conversion", "updated_at"])
         return value
 
     def validate(self, data):
@@ -222,6 +228,13 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
         source="created_by.full_name", read_only=True,
     )
     linked_vendor_pkr_payment = VendorPKRPaymentSerializer(read_only=True)
+    linked_pkr_tx_count = serializers.SerializerMethodField()
+
+    def get_linked_pkr_tx_count(self, obj):
+        # Annotated by InternalTransactionViewSet; absent on other code paths
+        # (detail fetches through a plain queryset, nested serialisation), so
+        # fall back to None rather than blowing up.
+        return getattr(obj, "linked_pkr_tx_count", None)
 
     def get_fee_dist_partner_name(self, obj):
         if obj.fee_dist_partner_id and hasattr(obj, "fee_dist_partner") and obj.fee_dist_partner:
@@ -260,6 +273,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "document",
             # PKR converter (person/vendor who handled USD→PKR for this transfer)
             "pkr_converter_vendor", "linked_vendor_pkr_payment",
+            "linked_pkr_tx_count",
             # Bookkeeping
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
@@ -271,7 +285,7 @@ class InternalTransactionSerializer(serializers.ModelSerializer):
             "pk_amount_pkr", "pk_fee_expense_id",
             "card_received_pkr", "card_profit_pkr",
             "fee_dist_type", "fee_dist_partner_name",
-            "linked_vendor_pkr_payment",
+            "linked_vendor_pkr_payment", "linked_pkr_tx_count",
             "created_by", "created_by_email", "created_by_name",
             "created_at", "updated_at",
         ]

@@ -19,7 +19,7 @@ destroy it removes the linked expense alongside the transaction.
 from decimal import Decimal
 
 from django.db import transaction as dbtx
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Subquery, OuterRef, IntegerField
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -343,6 +343,23 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                     "source_credit_card__linked_usa_bank",
                     "dest_usa_bank", "dest_vendor", "dest_pk_bank",
                     "fee_expense", "fee_dist_partner",
+                    "linked_vendor_pkr_payment",
+                )
+                # How many transactions share this row's PKR payment. A bulk
+                # settlement covers several transfers with ONE payment, so a
+                # row can't claim the whole `pkr_received` — the UI needs the
+                # count to label it as a batch instead of showing the total
+                # once per row and appearing to multiply the money.
+                .annotate(
+                    linked_pkr_tx_count=Subquery(
+                        InternalTransaction.objects
+                        .filter(linked_vendor_pkr_payment_id=OuterRef(
+                            "linked_vendor_pkr_payment_id"))
+                        .values("linked_vendor_pkr_payment_id")
+                        .annotate(c=Count("id"))
+                        .values("c")[:1],
+                        output_field=IntegerField(),
+                    ),
                 ))
     serializer_class = InternalTransactionSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
