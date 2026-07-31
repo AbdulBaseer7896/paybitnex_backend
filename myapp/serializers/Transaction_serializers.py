@@ -17,6 +17,10 @@ from myapp.Models.Transaction_models import (
 )
 from myapp.Models.Core_models import PaymentMethod
 
+# Sentinel so a memoised `None` (genuinely no transfer) is distinguishable
+# from "not looked up yet" — otherwise every no-transfer row re-resolves.
+_UNRESOLVED = object()
+
 
 class PaymentMethodSerializer(serializers.ModelSerializer):
     class Meta:
@@ -195,14 +199,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             return "0.00"
 
     def get_has_pkr_transfer(self, obj):
-        if getattr(obj, "outgoing_transfer", None) is not None:
-            return True
-        # Bulk transfers link via the `covering_transfers` M2M instead of
-        # the single reverse OneToOne.
-        try:
-            return obj.covering_transfers.exists()
-        except Exception:
-            return False
+        return self._transfer(obj) is not None
 
     def _transfer(self, obj):
         """Internal helper — returns the related OutgoingTransfer or None.
@@ -211,14 +208,34 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
         back to the most recent bulk transfer covering this payment so the
         customer sees the shared bank txn ID + receipt on every payment the
         lump-sum settled.
+
+        PERFORMANCE — this is why the admin dashboard used to take 11s:
+        seven fields on this serializer need the transfer, and each one used
+        to run its own `covering_transfers.order_by(...).first()` /
+        `.exists()`. At 500 rows that was ~3,500 queries. Two changes fix it:
+
+          1. The result is memoised on the instance, so the seven fields
+             share ONE resolution.
+          2. It reads `covering_transfers.all()`, which consumes the
+             `Prefetch` set up in IncomingPaymentViewSet (already ordered by
+             -sent_at) instead of issuing a fresh ordered query. Calling
+             `.order_by()` or `.exists()` here would bypass the prefetch and
+             silently reintroduce the N+1 — don't.
         """
-        single = getattr(obj, "outgoing_transfer", None)
-        if single is not None:
-            return single
-        try:
-            return obj.covering_transfers.order_by("-sent_at").first()
-        except Exception:
-            return None
+        cached = getattr(obj, "_resolved_transfer", _UNRESOLVED)
+        if cached is not _UNRESOLVED:
+            return cached
+
+        resolved = getattr(obj, "outgoing_transfer", None)
+        if resolved is None:
+            try:
+                covering = list(obj.covering_transfers.all())
+                resolved = covering[0] if covering else None
+            except Exception:
+                resolved = None
+
+        obj._resolved_transfer = resolved
+        return resolved
 
     def get_transfer_receipt(self, obj):
         t = self._transfer(obj)

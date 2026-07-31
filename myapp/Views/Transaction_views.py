@@ -16,6 +16,7 @@ Accountant / Admin:
 """
 from decimal import Decimal
 from django.db import transaction as dbtx
+from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
@@ -129,7 +130,20 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             "handled_by", "verified_by",
             "outgoing_transfer",
         )
-        .prefetch_related("status_history__changed_by")
+        .prefetch_related(
+            "status_history__changed_by",
+            # Feeds IncomingPaymentSerializer._transfer. Pre-ordered by
+            # -sent_at so the serializer can take element 0 in Python rather
+            # than issuing its own ordered query per row — that per-row query,
+            # multiplied by the seven transfer fields, is what made a 500-row
+            # page take ~11s.
+            Prefetch(
+                "covering_transfers",
+                queryset=OutgoingPKRTransfer.objects
+                .select_related("sent_by")
+                .order_by("-sent_at"),
+            ),
+        )
         .all()
     )
     filterset_fields = ["status", "currency", "customer"]
