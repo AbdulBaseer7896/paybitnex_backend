@@ -32,6 +32,7 @@ from myapp.Models.Expense_models import Expense, ExpenseCategory
 from myapp.Models.InternalTx_models import (
     Vendor, USABankAccount, CreditCard, InternalPakistaniAccount,
     InternalTransaction, VendorPKRPayment, InternalTxDestination,
+    InternalTxSource,
 )
 from myapp.serializers.InternalTx_serializers import (
     VendorSerializer, USABankAccountSerializer, CreditCardSerializer,
@@ -344,22 +345,6 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                     "dest_usa_bank", "dest_vendor", "dest_pk_bank",
                     "fee_expense", "fee_dist_partner",
                     "linked_vendor_pkr_payment",
-                )
-                # How many transactions share this row's PKR payment. A bulk
-                # settlement covers several transfers with ONE payment, so a
-                # row can't claim the whole `pkr_received` — the UI needs the
-                # count to label it as a batch instead of showing the total
-                # once per row and appearing to multiply the money.
-                .annotate(
-                    linked_pkr_tx_count=Subquery(
-                        InternalTransaction.objects
-                        .filter(linked_vendor_pkr_payment_id=OuterRef(
-                            "linked_vendor_pkr_payment_id"))
-                        .values("linked_vendor_pkr_payment_id")
-                        .annotate(c=Count("id"))
-                        .values("c")[:1],
-                        output_field=IntegerField(),
-                    ),
                 ))
     serializer_class = InternalTransactionSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -384,6 +369,28 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             qs = qs.filter(occurred_on__gte=p.get("date_from"))
         if p.get("date_to"):
             qs = qs.filter(occurred_on__lte=p.get("date_to"))
+
+        # How many transactions share this row's PKR payment. A bulk
+        # settlement covers several transfers with ONE payment, so a row
+        # can't claim the whole `pkr_received` — the UI needs the count to
+        # label it as a batch instead of printing the total once per row and
+        # appearing to multiply the money.
+        #
+        # Row-returning actions ONLY. An annotation left on the queryset gets
+        # folded into the GROUP BY of any later .values().annotate(), which
+        # would silently split the aggregate rows in summary/dollar-flow.
+        if self.action in ("list", "retrieve"):
+            qs = qs.annotate(
+                linked_pkr_tx_count=Subquery(
+                    InternalTransaction.objects
+                    .filter(linked_vendor_pkr_payment_id=OuterRef(
+                        "linked_vendor_pkr_payment_id"))
+                    .values("linked_vendor_pkr_payment_id")
+                    .annotate(c=Count("id"))
+                    .values("c")[:1],
+                    output_field=IntegerField(),
+                ),
+            )
         return qs
 
     # ------------------------------------------------------------------
@@ -933,4 +940,150 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                 }
                 for r in by_destination
             ],
+        })
+
+    # ------------------------------------------------------------------
+    #  DOLLAR FLOW — where the dollars went and what rate they came back at
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=["get"], url_path="dollar-flow")
+    def dollar_flow(self, request):
+        """Company dollars out vs rupees in, sliced three ways.
+
+        Answers the questions the overview couldn't: where did the dollars
+        actually go (which vendor, which bank, by what method), and what
+        rate did each batch come back at.
+
+        A conversion is a SETTLEMENT EVENT, and there are exactly three
+        kinds. Each carries its own USD, rate and PKR, so `by_rate` is built
+        from the events rather than from transactions — a single vendor
+        settlement can cover several transfers, and walking transactions
+        would count that USD once per row.
+
+          1. USA→PK bank transfer   — pk_conversion_rate  / pk_amount_pkr
+          2. Card transaction       — card_dollar_rate    / card_profit_pkr
+          3. Vendor PKR settlement  — exchange_rate       / pkr_received
+
+        `by_destination` and `by_method` are built from transactions
+        instead, because "where did the dollars go" is about the outbound
+        leg and applies even to transfers nobody has settled yet.
+
+        Query params: date_from / date_to (plus the usual list filters,
+        which apply to the transaction-driven slices).
+        """
+        from collections import defaultdict
+
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+
+        def q2(value):
+            """Quantise to 2dp so 280.000000 and 280.00 land in one bucket."""
+            return Decimal(str(value or 0)).quantize(Decimal("0.01"))
+
+        # ── by_rate: one row per distinct rate, across all three sources ──
+        buckets = defaultdict(lambda: {"usd": Decimal("0"), "pkr": Decimal("0"),
+                                       "count": 0, "sources": set()})
+
+        for tx in qs.filter(
+            destination_type=InternalTxDestination.PK_BANK,
+            pk_conversion_rate__isnull=False,
+        ).values("amount", "pk_conversion_rate", "pk_amount_pkr"):
+            b = buckets[q2(tx["pk_conversion_rate"])]
+            b["usd"] += Decimal(str(tx["amount"] or 0))
+            b["pkr"] += Decimal(str(tx["pk_amount_pkr"] or 0))
+            b["count"] += 1
+            b["sources"].add("bank")
+
+        for tx in qs.filter(
+            source_type=InternalTxSource.CREDIT_CARD,
+            card_dollar_rate__isnull=False,
+        ).values("amount", "fee_amount", "card_dollar_rate", "card_profit_pkr"):
+            b = buckets[q2(tx["card_dollar_rate"])]
+            # Card PKR is computed on amount + fee, so the USD side has to
+            # match or the implied rate wouldn't reconcile.
+            b["usd"] += (Decimal(str(tx["amount"] or 0))
+                         + Decimal(str(tx["fee_amount"] or 0)))
+            b["pkr"] += Decimal(str(tx["card_profit_pkr"] or 0))
+            b["count"] += 1
+            b["sources"].add("card")
+
+        settlements = VendorPKRPayment.objects.all()
+        if date_from:
+            settlements = settlements.filter(occurred_on__gte=date_from)
+        if date_to:
+            settlements = settlements.filter(occurred_on__lte=date_to)
+        for s in settlements.values("usd_sent", "exchange_rate", "pkr_received"):
+            b = buckets[q2(s["exchange_rate"])]
+            b["usd"] += Decimal(str(s["usd_sent"] or 0))
+            b["pkr"] += Decimal(str(s["pkr_received"] or 0))
+            b["count"] += 1
+            b["sources"].add("vendor")
+
+        by_rate = [
+            {
+                "rate": str(rate),
+                "usd_out": str(v["usd"]),
+                "pkr_in": str(v["pkr"]),
+                "count": v["count"],
+                "sources": sorted(v["sources"]),
+            }
+            # Highest rate first — the lead wants to read best-rate down.
+            for rate, v in sorted(buckets.items(), key=lambda kv: kv[0], reverse=True)
+            if v["usd"] or v["pkr"]
+        ]
+
+        total_usd = sum((Decimal(r["usd_out"]) for r in by_rate), Decimal("0"))
+        total_pkr = sum((Decimal(r["pkr_in"]) for r in by_rate), Decimal("0"))
+        blended = (total_pkr / total_usd).quantize(Decimal("0.01")) if total_usd else None
+
+        # ── by_destination: where the dollars went ────────────────────
+        dest_rows = defaultdict(lambda: {"usd": Decimal("0"), "count": 0,
+                                         "label": "", "type": ""})
+        for tx in qs.select_related("dest_vendor", "dest_usa_bank", "dest_pk_bank"):
+            key = f"{tx.destination_type}:{tx.dest_vendor_id or tx.dest_usa_bank_id or tx.dest_pk_bank_id}"
+            row = dest_rows[key]
+            row["usd"] += Decimal(str(tx.amount or 0))
+            row["count"] += 1
+            # destination_label is a METHOD on the model, not a property —
+            # forgetting the parens yields a bound method that JSON can't
+            # serialise, which 500s the whole endpoint.
+            row["label"] = tx.destination_label() or tx.get_destination_type_display()
+            row["type"] = tx.destination_type
+
+        by_destination = sorted(
+            (
+                {
+                    "key": k,
+                    "label": v["label"],
+                    "destination_type": v["type"],
+                    "usd_out": str(v["usd"]),
+                    "count": v["count"],
+                }
+                for k, v in dest_rows.items()
+            ),
+            key=lambda r: Decimal(r["usd_out"]), reverse=True,
+        )
+
+        # ── by_method: wire / ach / other ─────────────────────────────
+        by_method = [
+            {
+                "method": r["method"],
+                "usd_out": str(r["total"] or 0),
+                "count": r["count"],
+            }
+            for r in qs.values("method")
+                       .annotate(total=Sum("amount"), count=Count("id"))
+                       .order_by("-total")
+        ]
+
+        return Response({
+            "totals": {
+                "usd_out": str(total_usd),
+                "pkr_in": str(total_pkr),
+                "blended_rate": str(blended) if blended is not None else None,
+                "settlement_count": sum(r["count"] for r in by_rate),
+            },
+            "by_rate": by_rate,
+            "by_destination": by_destination,
+            "by_method": by_method,
         })
