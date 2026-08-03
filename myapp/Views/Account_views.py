@@ -7,6 +7,8 @@ Account views:
   - Accountant/admin KYC review.
   - Admin "onboarding review" — list recent customers to verify.
 """
+import logging
+
 from adrf.views import APIView as AsyncAPIView
 from django.utils import timezone
 from django.db.models import Q
@@ -33,6 +35,21 @@ from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.async_helpers import async_is_valid, async_save
 from myapp.Utils.customer_scoring import compute_score
 from myapp.Utils.email_tasks import send_email_async
+from myapp.Utils.staff_alerts import notify_staff, anotify_staff
+
+log = logging.getLogger(__name__)
+
+
+def _kyc_alert_context(profile, user, changed=None):
+    """Body fields shared by the two staff-facing KYC alerts."""
+    return {
+        "customer_name":  profile.full_name or user.full_name or user.email,
+        "customer_email": user.email,
+        "phone":          profile.phone or "",
+        # Only set on a resubmission — tells the reviewer what to re-check
+        # instead of making them diff the whole profile by eye.
+        "changed":        [f.replace("_", " ") for f in (changed or [])],
+    }
 
 
 # =====================================================================
@@ -135,6 +152,27 @@ class UserAdminViewSet(viewsets.ModelViewSet):
                 assign_defaults_to_user(user, granted_by=self.request.user)
             except Exception:
                 pass  # Never block user creation
+
+        # Without this the account is invisible to its owner: the temporary
+        # password is only returned in the API response for the admin to
+        # relay by hand, so nothing tells the customer they have a login.
+        temp_password = getattr(user, "_plain_password", None)
+        if user.email and temp_password:
+            try:
+                send_email_async(
+                    to=[user.email],
+                    subject="Your PaidiX account is ready",
+                    template="auth/account_created",
+                    context={
+                        "name": user.full_name or "",
+                        "email": user.email,
+                        "temporary_password": temp_password,
+                        "role": user.get_role_display(),
+                        "is_customer": user.role == UserRole.CUSTOMER,
+                    },
+                )
+            except Exception:
+                log.exception("account-created email failed for %s", user.email)
 
     def create(self, request, *args, **kwargs):
         s = self.get_serializer(data=request.data)
@@ -348,6 +386,7 @@ class CustomerProfileView(AsyncAPIView):
                 profile, data=request.data, partial=True,
                 context={"request": request},
             )
+
             await async_is_valid(s, raise_exception=True)
             profile = await async_save(s)
         except CustomerProfile.DoesNotExist:
@@ -365,6 +404,20 @@ class CustomerProfileView(AsyncAPIView):
             update_fields=["is_profile_complete", "full_name", "phone",
                            "onboarding_step"],
         )
+
+        # KYC gates payment submission entirely (see Transaction_views.create),
+        # so an unreviewed profile silently blocks the customer from doing
+        # anything at all. Only alert while it's actually awaiting a decision.
+        if profile.kyc_status in (
+            CustomerProfile.KYC_PENDING, CustomerProfile.KYC_RESUBMITTED,
+        ):
+            await anotify_staff(
+                subject=f"KYC awaiting review — {profile.full_name or request.user.email}",
+                template="staff/kyc_pending",
+                context=_kyc_alert_context(profile, request.user),
+                path="/kyc",
+                reply_to=[request.user.email] if request.user.email else None,
+            )
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data,
@@ -465,6 +518,15 @@ class CustomerProfileView(AsyncAPIView):
                     "kyc_last_resubmit_changes": changed,
                 },
             )
+            await anotify_staff(
+                subject=(
+                    f"KYC resubmitted — {profile.full_name or request.user.email}"
+                ),
+                template="staff/kyc_pending",
+                context=_kyc_alert_context(profile, request.user, changed=changed),
+                path="/kyc",
+                reply_to=[request.user.email] if request.user.email else None,
+            )
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data
@@ -516,10 +578,14 @@ class KYCReviewView(AsyncAPIView):
         s = KYCReviewSerializer(data=request.data)
         await async_is_valid(s, raise_exception=True)
 
+        validated = s.validated_data or {}
+        new_status = validated.get("status")
+        if new_status is None:
+            raise ValidationError({"status": ["This field is required."]})
+
         before = profile.kyc_status
-        new_status = s.validated_data["status"]
         profile.kyc_status = new_status
-        profile.kyc_notes = s.validated_data.get("notes", "")
+        profile.kyc_notes = validated.get("notes", "")
         profile.kyc_reviewed_by = request.user
         profile.kyc_reviewed_at = timezone.now()
 
@@ -571,8 +637,32 @@ class KYCReviewView(AsyncAPIView):
                     context={"name": customer_name},
                 )
             except Exception:
-                # Email failure must not block the verification response.
-                pass
+                # Email failure must not block the verification response —
+                # but log it, or a broken mail config is indistinguishable
+                # from "no email was supposed to go out".
+                log.exception(
+                    "KYC approval email failed for profile=%s", profile_id,
+                )
+
+        # Rejection is a hard stop for the customer: KYC gates payment
+        # submission, so without this they're blocked with no explanation
+        # and no reason to check the portal.
+        if (new_status == CustomerProfile.KYC_REJECTED
+                and before != CustomerProfile.KYC_REJECTED):
+            try:
+                send_email_async(
+                    to=[profile.user.email],
+                    subject="Update on your PaidiX verification",
+                    template="kyc/rejected",
+                    context={
+                        "name": profile.user.full_name or profile.full_name or "",
+                        "reason": profile.kyc_notes or "",
+                    },
+                )
+            except Exception:
+                log.exception(
+                    "KYC rejection email failed for profile=%s", profile_id,
+                )
 
         return Response(CustomerProfileSerializer(profile).data)
 
@@ -607,6 +697,10 @@ class KYCRaiseObjectionsView(AsyncAPIView):
         s = KYCRaiseObjectionsSerializer(data=request.data)
         await async_is_valid(s, raise_exception=True)
 
+        validated = s.validated_data or {}
+        objections = validated.get("objections") or []
+        notes = validated.get("notes", profile.kyc_notes or "")
+
         now = timezone.now()
         raised_by_email = getattr(request.user, "email", "")
         new_items = [
@@ -616,14 +710,14 @@ class KYCRaiseObjectionsView(AsyncAPIView):
                 "raised_at": now.isoformat(),
                 "raised_by": raised_by_email,
             }
-            for item in s.validated_data["objections"]
+            for item in objections
         ]
 
         before_status = profile.kyc_status
         profile.kyc_objections = new_items
         profile.kyc_objection_round = (profile.kyc_objection_round or 0) + 1
         profile.kyc_status = CustomerProfile.KYC_OBJECTIONS
-        profile.kyc_notes = s.validated_data.get("notes", profile.kyc_notes or "")
+        profile.kyc_notes = notes
         profile.kyc_reviewed_by = request.user
         profile.kyc_reviewed_at = now
         # Reset the resubmit diff — the customer is starting a new

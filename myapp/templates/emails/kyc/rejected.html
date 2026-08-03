@@ -1,0 +1,40 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">Hi{% if name %} {{ name }}{% endif %},</p>
+
+<p style="margin:0 0 16px 0;">
+  We've completed the review of your verification documents, and
+  unfortunately we weren't able to approve your account at this time.
+</p>
+
+{% if reason %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="margin:20px 0; border:1px solid #eeeff2; border-radius:8px;">
+  <tr>
+    <td style="padding:16px 18px;">
+      <div style="font-size:12px; color:#6b6f78; text-transform:uppercase;
+                  letter-spacing:1px; margin-bottom:8px;">
+        Reason
+      </div>
+      <div style="font-size:14px; color:#101115;">{{ reason }}</div>
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+<p style="margin:16px 0; font-size:14px;">
+  This means you won't be able to submit payments until your account is
+  verified. If you believe this was decided in error, or you have updated
+  documents to provide, please contact our support team and we'll take
+  another look.
+</p>
+
+<p style="text-align:center; margin:24px 0;">
+  <a href="{{ frontend_url }}/app/onboarding"
+     style="display:inline-block; background:#0F3D30; color:#ffffff;
+            text-decoration:none; padding:12px 28px; border-radius:6px;
+            font-weight:600; font-size:14px;">
+    View your profile
+  </a>
+</p>
+{% endblock %}

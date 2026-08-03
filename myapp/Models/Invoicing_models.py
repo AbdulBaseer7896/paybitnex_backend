@@ -345,6 +345,15 @@ class Invoice(models.Model):
         help_text="When the customer marked this invoice as paid.",
     )
 
+    # Set the first time the overdue-reminder task mails an invoice. Its
+    # only job is to stop that daily task re-sending the same reminder
+    # forever — the task filters on `isnull=True`. Cleared nowhere: an
+    # invoice only goes overdue once, and paying it takes it out of scope.
+    overdue_reminder_sent_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When an overdue reminder was last emailed to the client.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 

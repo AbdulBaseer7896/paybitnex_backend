@@ -54,9 +54,56 @@ def flag_stale_payments():
         is_stale=False,
         updated_at__lt=cutoff,
     )
+    # Capture before the update: after it, `is_stale=False` matches nothing
+    # and the newly-flagged set is unrecoverable. This is also what keeps the
+    # reminder to exactly one per staleness episode — the filter above only
+    # ever sees a payment on the run that flips it, and customer_confirm /
+    # force_complete are what clear the flag again.
+    newly_stale = list(qs.values_list("id", flat=True))
     count = qs.update(is_stale=True)
+
+    if newly_stale:
+        _remind_customers_to_confirm(newly_stale)
+
     logger.info(
         "flag_stale_payments: flagged %s PKR-sent payments (threshold=%s min)",
         count, minutes,
     )
     return {"flagged": count, "threshold_minutes": minutes}
+
+
+def _remind_customers_to_confirm(payment_ids):
+    """Nudge each customer to confirm receipt of a payment we've sent.
+
+    Until they confirm, the payment can't complete and partner fees aren't
+    distributed — so this unblocks our books as much as it reassures them.
+    """
+    from myapp.Models.Transaction_models import IncomingPayment
+    from myapp.Utils.email_tasks import send_email_async
+
+    payments = (
+        IncomingPayment.objects
+        .filter(id__in=payment_ids)
+        .select_related("customer")
+    )
+    for payment in payments:
+        customer = getattr(payment, "customer", None)
+        email = customer.email if customer and getattr(customer, "email", None) else ""
+        if not email:
+            continue
+        try:
+            send_email_async(
+                to=[email],
+                subject=f"Action needed: confirm receipt for {payment.reference}",
+                template="payments/confirm_reminder",
+                context={
+                    "name":      payment.customer.full_name or "",
+                    "reference": payment.reference,
+                    "amount":    f"{payment.amount}",
+                    "currency":  getattr(payment, "currency_id", None),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "stale confirm reminder failed for payment %s", payment.reference,
+            )

@@ -1390,6 +1390,35 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 target=invoice, description=description,
             )
 
+        # Receipt to the client — gated on "status" so re-marking an already
+        # paid invoice to attach proof doesn't mail them a second receipt.
+        # The customer isn't copied: they're the one who just clicked this.
+        if "status" in update_fields:
+            client_email = (invoice.client_snapshot or {}).get("email")
+            if client_email:
+                import logging
+                from myapp.Utils.email_tasks import send_email_async
+                try:
+                    send_email_async(
+                        to=[client_email],
+                        subject=f"Payment received — invoice {invoice.number}",
+                        template="invoice/payment_received",
+                        context={
+                            "invoice_number": invoice.number,
+                            "client_name":   (invoice.client_snapshot or {}).get("name", ""),
+                            "company_name":  (invoice.company_snapshot or {}).get("name", ""),
+                            "total":         str(invoice.total),
+                            "currency_code": invoice.currency_code,
+                            "paid_at":       invoice.paid_at.date().isoformat() if invoice.paid_at else "",
+                            "note":          invoice.payment_proof_note or "",
+                        },
+                        reply_to=[request.user.email] if request.user.email else None,
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "invoice paid receipt failed: %s", invoice.number,
+                    )
+
         return Response(self.get_serializer(invoice).data)
 
     @action(detail=False, methods=["get"], url_path="stats")

@@ -344,11 +344,11 @@ from celery.schedules import crontab  # noqa: E402
 CELERY_BEAT_SCHEDULE = {
     "fetch-exchange-rates-hourly": {
         "task": "myapp.Utils.rate_tasks.fetch_live_rates",
-        "schedule": crontab(minute=0),
+        "schedule": crontab(minute="0"),
     },
     "generate-daily-report": {
         "task": "myapp.Utils.report_tasks.generate_daily_report",
-        "schedule": crontab(hour=0, minute=5),
+        "schedule": crontab(hour="0", minute="5"),
     },
     # Flag PKR-sent payments that have been awaiting customer confirmation
     # beyond the configured threshold (SystemSetting `stale_payment_days`).
@@ -363,7 +363,21 @@ CELERY_BEAT_SCHEDULE = {
     },
     "cleanup-expired-otps-daily": {
         "task": "myapp.Utils.email_tasks.cleanup_expired_otps",
-        "schedule": crontab(hour=2, minute=0),  # 2 AM Karachi time — low traffic
+        "schedule": crontab(hour="2", minute="0"),  # 2 AM Karachi time — low traffic
+    },
+    # Chase clients on invoices past their due date. Each invoice is mailed
+    # at most once ever (see overdue_reminder_sent_at), so the daily cadence
+    # only controls how soon after the due date the single chase-up goes out.
+    # 9 AM Karachi so it lands in a working-hours inbox, not overnight.
+    "invoice-overdue-reminders-daily": {
+        "task": "myapp.Utils.invoice_tasks.send_overdue_invoice_reminders",
+        "schedule": crontab(hour="9", minute="0"),
+    },
+    # Staff summary of everything still open. 8 AM — before the overdue
+    # reminders, so the digest reflects the queue as staff find it.
+    "daily-ops-digest": {
+        "task": "myapp.Utils.digest_tasks.send_daily_ops_digest",
+        "schedule": crontab(hour="8", minute="0"),
     },
 }
 
@@ -406,7 +420,12 @@ ANYMAIL = {
 EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PaidiX")
 
 # Frontend origin used inside emails for links like reset-password pages.
-FRONTEND_URL       = config("FRONTEND_URL", default="https://paybitnex.com")
+# FRONTEND_URL       = config("FRONTEND_URL", default="https://paidix.com")
+
+# Extra recipients for internal staff alerts (new payment, KYC waiting, new
+# signup), on top of every active admin/accountant account. Comma-separated.
+# Use for a shared ops inbox that isn't a login. Blank = staff accounts only.
+STAFF_ALERT_EMAILS = config("STAFF_ALERT_EMAILS", default="")
 
 # ── Production security headers ───────────────────────────────────────
 # These should also be set at the Nginx/CDN layer for belt-and-suspenders
