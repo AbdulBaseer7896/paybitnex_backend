@@ -224,13 +224,29 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     # transaction-date order, not just entry order.
     ordering_fields = ["created_at", "occurred_on", "tx_date", "amount", "status"]
 
+    def _is_dashboard_list(self):
+        """Recognize both the explicit and legacy admin-dashboard request.
+
+        Older/cached frontend bundles request the 500-row, include-stale list
+        without ``view=dashboard``. Keep that exact request on the compact
+        path so backend performance does not depend on a frontend deployment.
+        """
+        if self.action != "list":
+            return False
+        p = self.request.query_params
+        if p.get("view") == "dashboard":
+            return True
+        return (
+            getattr(self.request.user, "role", None) != UserRole.CUSTOMER
+            and p.get("page_size") == "500"
+            and p.get("include_stale") in ("1", "true", "True", "yes")
+            and p.get("ordering") == "-created_at"
+        )
+
     def get_serializer_class(self):
         if self.action == "create":
             return IncomingPaymentCreateSerializer
-        if (
-            self.action == "list"
-            and self.request.query_params.get("view") == "dashboard"
-        ):
+        if self._is_dashboard_list():
             return IncomingPaymentDashboardSerializer
         return IncomingPaymentSerializer
 
@@ -250,10 +266,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 output_field=DateField(),
             ),
         )
-        if (
-            self.action == "list"
-            and self.request.query_params.get("view") == "dashboard"
-        ):
+        if self._is_dashboard_list():
             # The dashboard serializer is relation-free. Drop the expensive
             # history/transfer prefetches and fetch only the columns it reads.
             qs = qs.prefetch_related(None).select_related(None).only(
