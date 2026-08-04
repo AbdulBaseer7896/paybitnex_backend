@@ -322,6 +322,26 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
         ]
 
 
+class IncomingPaymentDashboardSerializer(serializers.ModelSerializer):
+    """Small, relation-free payment shape used by the admin overview.
+
+    The overview calculates aggregate cards and charts in the browser. It does
+    not display proof files, transfer receipts, or status history, so generating
+    those fields for 500 rows only adds database, signing, and JSON work.
+    """
+    currency_code = serializers.CharField(source="currency_id", read_only=True)
+
+    class Meta:
+        model = IncomingPayment
+        fields = [
+            "id", "customer", "currency", "currency_code", "amount",
+            "exchange_rate", "real_exchange_rate", "fee_percentage",
+            "fee_amount_foreign", "net_pkr", "is_rate_provisional", "status",
+            "occurred_on", "created_at",
+        ]
+        read_only_fields = fields
+
+
 class PaymentVerifySerializer(serializers.Serializer):
     """Stage 1: accountant reviews the customer's proofs + marks verified."""
     note = serializers.CharField(required=False, allow_blank=True, max_length=2000)

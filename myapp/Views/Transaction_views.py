@@ -34,7 +34,8 @@ from myapp.Models.Transaction_models import (
     TransactionStatusHistory,
 )
 from myapp.serializers.Transaction_serializers import (
-    IncomingPaymentSerializer, IncomingPaymentCreateSerializer,
+    IncomingPaymentSerializer, IncomingPaymentDashboardSerializer,
+    IncomingPaymentCreateSerializer,
     AccountantApplySerializer, OutgoingTransferCreateSerializer,
     OutgoingTransferSerializer, StatusUpdateSerializer,
     PaymentVerifySerializer,
@@ -226,6 +227,11 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == "create":
             return IncomingPaymentCreateSerializer
+        if (
+            self.action == "list"
+            and self.request.query_params.get("view") == "dashboard"
+        ):
+            return IncomingPaymentDashboardSerializer
         return IncomingPaymentSerializer
 
     def get_queryset(self):
@@ -244,6 +250,19 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 output_field=DateField(),
             ),
         )
+        if (
+            self.action == "list"
+            and self.request.query_params.get("view") == "dashboard"
+        ):
+            # The dashboard serializer is relation-free. Drop the expensive
+            # history/transfer prefetches and fetch only the columns it reads.
+            qs = qs.prefetch_related(None).select_related(None).only(
+                "id", "customer_id", "currency_id", "amount",
+                "exchange_rate", "real_exchange_rate", "fee_percentage",
+                "fee_amount_foreign", "net_pkr", "is_rate_provisional",
+                "status", "occurred_on", "created_at", "updated_at",
+                "is_stale",
+            )
         if u.role == UserRole.CUSTOMER:
             # Customers see every one of their own payments, including stale
             # ones — they're the ones who need to confirm those.
