@@ -16,6 +16,7 @@ No provider in the list requires an API key.
 Respects manual overrides: if a currency has manual_override_until set
 and that datetime is in the future, we skip overwriting it.
 """
+import asyncio
 import logging
 from decimal import Decimal
 from typing import Optional
@@ -148,11 +149,13 @@ async def _fetch_from_provider(wanted_codes: list[str]) -> Optional[dict[str, De
         return {}
     out: dict[str, Decimal] = {}
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
-        for code in wanted_codes:
-            if code == "PKR":
-                out[code] = Decimal("1")
-                continue
-            result = await _fetch_one_with_fallback(client, code)
+        remote_codes = [code for code in wanted_codes if code != "PKR"]
+        results = await asyncio.gather(*(
+            _fetch_one_with_fallback(client, code) for code in remote_codes
+        ))
+        if "PKR" in wanted_codes:
+            out["PKR"] = Decimal("1")
+        for code, result in zip(remote_codes, results):
             if result is None:
                 log.warning("All providers failed for currency %s", code)
                 continue
@@ -220,6 +223,14 @@ async def _fetch_live_rates_async():
                 and current.manual_override_until > now
             ):
                 log.info("Skipping %s — manual override active.", code)
+                # Keep a fresh market reference while leaving the manually
+                # overridden operational rate untouched.
+                await ExchangeRateHistory.objects.acreate(
+                    currency_code=code,
+                    rate_to_pkr=rate_value,
+                    source=ExchangeRate.SOURCE_LIVE,
+                )
+                updated += 1
                 continue
             current.rate_to_pkr = rate_value
             current.source = ExchangeRate.SOURCE_LIVE

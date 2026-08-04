@@ -11,7 +11,9 @@ Rate views:
 - POST /rates/refresh/           → trigger an immediate live fetch (admin)
 """
 import asyncio
+import logging
 from datetime import timedelta
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -29,6 +31,8 @@ from myapp.serializers.Rate_serializers import (
 )
 from myapp.Utils.permissions import IsAdmin, IsAdminOrAccountant
 from myapp.Utils.rate_tasks import fetch_market_quote
+
+log = logging.getLogger(__name__)
 
 
 class ExchangeRateListView(APIView):
@@ -84,9 +88,8 @@ class ExchangeRateListView(APIView):
 
 class LiveMarketQuoteView(APIView):
     """
-    Pulls a fresh market quote from the free public API without writing to
-    the DB. Returns the same shape as /rates/ so the frontend can diff
-    quickly.
+    Returns the latest market quote persisted by the hourly background task.
+    Page loads never wait on a third-party exchange-rate provider.
 
     Query: ?codes=USD,EUR,GBP   (optional — defaults to all active non-base)
     """
@@ -105,18 +108,32 @@ class LiveMarketQuoteView(APIView):
         if not codes:
             return Response([], status=status.HTTP_200_OK)
 
-        quotes = asyncio.run(fetch_market_quote(codes))
-        # Return a stable shape, one row per requested code (missing = null).
-        rows = []
-        for code in codes:
-            v = quotes.get(code)
-            rows.append({
-                "currency_code": code,
-                "rate_to_pkr": str(v) if v is not None else None,
-                "source": "live-public-api",
-            })
+        latest_live = ExchangeRateHistory.objects.filter(
+            currency_code=OuterRef("code"),
+            source=ExchangeRate.SOURCE_LIVE,
+        ).order_by("-created_at")
+        stored = {
+            row["code"]: row
+            for row in Currency.objects.filter(code__in=codes).annotate(
+                market_rate=Subquery(latest_live.values("rate_to_pkr")[:1]),
+                market_fetched_at=Subquery(latest_live.values("created_at")[:1]),
+            ).values("code", "market_rate", "market_fetched_at")
+        }
+        rows = [{
+            "currency_code": code,
+            "rate_to_pkr": (
+                str(stored[code]["market_rate"])
+                if code in stored and stored[code]["market_rate"] is not None
+                else None
+            ),
+            "source": "stored-live-api",
+        } for code in codes]
+        fetched_times = [
+            row["market_fetched_at"] for row in stored.values()
+            if row["market_fetched_at"] is not None
+        ]
         return Response({
-            "fetched_at": timezone.now().isoformat(),
+            "fetched_at": max(fetched_times).isoformat() if fetched_times else None,
             "results": rows,
         })
 
@@ -171,11 +188,24 @@ def manual_override(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, IsAdmin])
 def trigger_refresh(request):
-    """Queue an immediate rate-fetch task (Celery if available, inline otherwise)."""
+    """Queue an immediate rate fetch without blocking the HTTP request."""
     from myapp.Utils.rate_tasks import fetch_live_rates
+
+    refresh_task = fetch_live_rates
+    delay_method = getattr(refresh_task, "delay", None)
+    if not callable(delay_method):
+        log.error("Live rate refresh task is not callable: %r", refresh_task)
+        return Response(
+            {"detail": "Rate refresh service is unavailable."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
     try:
-        fetch_live_rates.delay()
+        delay_method()
     except Exception:
-        # If Celery isn't running, run inline (safe for dev)
-        fetch_live_rates.apply(throw=False)
+        log.exception("Could not queue exchange-rate refresh")
+        return Response(
+            {"detail": "Rate refresh could not be queued. Please try again."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response({"detail": "Rate refresh queued."})
