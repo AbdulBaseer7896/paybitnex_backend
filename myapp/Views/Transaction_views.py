@@ -193,6 +193,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             "customer", "currency",
             "payment_method",
             "handled_by", "verified_by",
+            "force_completed_by",
             "outgoing_transfer",
         )
         .prefetch_related(
