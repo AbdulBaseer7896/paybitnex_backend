@@ -1,0 +1,11 @@
+Welcome to {{ company_name }}!
+
+To complete your signup, enter this verification code on the signup page:
+
+    {{ code }}
+
+This code expires in 1 minute.
+
+If you didn't request this code, you can safely ignore this email.
+
+— {{ company_name }}

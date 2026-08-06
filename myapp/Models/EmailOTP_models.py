@@ -21,6 +21,7 @@ from django.utils import timezone
 class OTPPurpose(models.TextChoices):
     SIGNUP        = "signup",        "Signup"
     PASSWORD_RESET = "password_reset", "Password reset"
+    EMAIL_VERIFICATION = "email_verification", "Email verification"
 
 
 def _generate_code() -> str:

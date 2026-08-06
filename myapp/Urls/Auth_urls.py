@@ -2,10 +2,12 @@
 from django.urls import path
 from myapp.Views.Auth_views import (
     LoginView, RefreshView, LogoutView, MeView, ChangePasswordView,
-    SignupRequestOTPView, SignupVerifyOTPView,
+    SignupRequestOTPView,
     ForgotPasswordRequestOTPView, ForgotPasswordResetView,
     OnboardingStepView,
     PaymentsPinView, PaymentsPinVerifyView, ForgotPaymentsPinView,
+    VerifyEmailEndpoint, ResendVerificationEndpoint, ChangeEmailPreLoginEndpoint,
+    ChangeEmailVerifyEndpoint,
 )
 
 urlpatterns = [
@@ -25,8 +27,15 @@ urlpatterns = [
     # OTP-based signup
     path("signup/request-otp/", SignupRequestOTPView.as_view(),
          name="auth-signup-request-otp"),
-    path("signup/verify-otp/", SignupVerifyOTPView.as_view(),
-         name="auth-signup-verify-otp"),
+
+    # Pre-Login Email Verification
+    path("email/verify/", VerifyEmailEndpoint.as_view(), name="auth-email-verify"),
+    path("email/resend/", ResendVerificationEndpoint.as_view(), name="auth-email-resend"),
+    path("email-change/request/", ChangeEmailPreLoginEndpoint.as_view(), name="auth-email-change-request"),
+    path("email-change/verify/", ChangeEmailVerifyEndpoint.as_view(), name="auth-email-change-verify"),
+    # Legacy alias
+    path("email/change/", ChangeEmailPreLoginEndpoint.as_view(), name="auth-email-change"),
+    path("email/change/verify/", ChangeEmailVerifyEndpoint.as_view(), name="auth-email-change-verify"),
 
     # OTP-based password reset
     path("forgot-password/request-otp/", ForgotPasswordRequestOTPView.as_view(),

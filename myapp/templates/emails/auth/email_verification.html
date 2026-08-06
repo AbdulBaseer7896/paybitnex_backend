@@ -1,0 +1,30 @@
+{% extends "emails/_base.html" %}
+{% block body %}
+<p style="margin:0 0 16px 0;">
+  Welcome to {{ company_name }}!
+</p>
+<p style="margin:0 0 20px 0;">
+  To complete your signup, please enter the verification code below on the
+  signup page. This code expires in <b>1 minute</b>.
+</p>
+
+<div style="text-align:center; margin:24px 0;">
+  <div style="display:inline-block;
+              background:#E7F1EC;
+              border:1px solid #0F3D30;
+              border-radius:8px;
+              padding:18px 32px;
+              font-family:'Courier New', monospace;
+              font-size:32px;
+              font-weight:700;
+              letter-spacing:6px;
+              color:#0F3D30;">
+    {{ code }}
+  </div>
+</div>
+
+<p style="margin:20px 0 0 0; font-size:13px; color:#6b6f78;">
+  If you didn't request this code, you can safely ignore this email — the
+  code will expire in 60 seconds and your email address won't be used.
+</p>
+{% endblock %}

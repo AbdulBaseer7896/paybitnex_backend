@@ -30,6 +30,9 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
         extra_fields.setdefault("role", UserRole.CUSTOMER)
+        extra_fields.setdefault("is_active", False)
+        extra_fields.setdefault("email_verified", False)
+        extra_fields.setdefault("verification_deadline", None)
         return self._create_user(email, password, **extra_fields)
 
     def create_superuser(self, email, password=None, **extra_fields):
@@ -38,6 +41,8 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("role", UserRole.ADMIN)
         extra_fields.setdefault("is_active", True)
         extra_fields.setdefault("is_profile_complete", True)
+        extra_fields.setdefault("email_verified", True)
+        extra_fields.setdefault("verification_deadline", None)
         return self._create_user(email, password, **extra_fields)
 
 
@@ -63,6 +68,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    email_verified = models.BooleanField(default=False)
+    verification_deadline = models.DateTimeField(null=True, blank=True)
 
     # Optional 4–8 digit PIN that locks the customer's "My Payments" page.
     # Stored as a salted hash (never plaintext). Because it lives on the
