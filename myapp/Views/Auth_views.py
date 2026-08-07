@@ -416,11 +416,18 @@ class OnboardingStepView(AsyncAPIView):
 # ─────────────────────────────────────────────────────────────────────
 class _SignupRequestOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    password = serializers.CharField(min_length=8, write_only=True)
+    full_name = serializers.CharField(max_length=150, required=True, allow_blank=False)
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+
+    def validate_full_name(self, value):
+        from myapp.serializers.User_serializers import clean_and_validate_full_name
+        return clean_and_validate_full_name(value, required=True)
 
 
 class SignupRequestOTPView(APIView):
     """
-    POST /auth/signup/request-otp/   {email}
+    POST /auth/signup/request-otp/   {email, password, full_name, phone?}
 
     If the email already belongs to a registered user, respond with 409
     so the frontend can redirect to login. Otherwise mint a 6-digit OTP,
@@ -529,7 +536,7 @@ class SignupVerifyOTPView(APIView):
             user = User.objects.create_user(
                 email=email,
                 password=s.validated_data["password"],
-                full_name=s.validated_data.get("full_name", ""),
+                full_name=s.validated_data["full_name"],
                 phone=s.validated_data.get("phone", ""),
             )
             AuditLog.record(
