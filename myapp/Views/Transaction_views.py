@@ -325,32 +325,24 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     def _apply_date_filter(self, qs):
         """Apply ?date_from / ?date_to query params if present.
 
-        Matches if EITHER the transaction date (`tx_date` / `occurred_on`) OR
-        the submission date (`created_at__date`) falls within the specified date
-        range. Invalid strings are ignored silently.
+        `date_by` parameter selects which date field to filter against:
+        - "tx_date" or "payment" (DEFAULT): filters by payment / transaction date (`tx_date` / `occurred_on`).
+        - "created_at" or "submission": filters by submission date (`created_at__date`).
         """
         from datetime import datetime
-        from django.db.models import Q
         p = self.request.query_params
         df = p.get("date_from")
         dt = p.get("date_to")
-        try:
-            df_date = datetime.strptime(df, "%Y-%m-%d").date() if df else None
-            dt_date = datetime.strptime(dt, "%Y-%m-%d").date() if dt else None
+        date_by = (p.get("date_by") or "tx_date").lower()
+        field_name = "created_at__date" if date_by in ("submission", "created_at") else "tx_date"
 
-            if df_date and dt_date:
-                qs = qs.filter(
-                    (Q(tx_date__gte=df_date) & Q(tx_date__lte=dt_date)) |
-                    (Q(created_at__date__gte=df_date) & Q(created_at__date__lte=dt_date))
-                )
-            elif df_date:
-                qs = qs.filter(
-                    Q(tx_date__gte=df_date) | Q(created_at__date__gte=df_date)
-                )
-            elif dt_date:
-                qs = qs.filter(
-                    Q(tx_date__lte=dt_date) | Q(created_at__date__lte=dt_date)
-                )
+        try:
+            if df:
+                df_date = datetime.strptime(df, "%Y-%m-%d").date()
+                qs = qs.filter(**{f"{field_name}__gte": df_date})
+            if dt:
+                dt_date = datetime.strptime(dt, "%Y-%m-%d").date()
+                qs = qs.filter(**{f"{field_name}__lte": dt_date})
         except (ValueError, TypeError):
             # Bad date string → just skip filtering rather than raising.
             pass
@@ -430,22 +422,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         try:
             df = request.query_params.get("date_from")
             dt_ = request.query_params.get("date_to")
-            df_date = datetime.strptime(df, "%Y-%m-%d").date() if df else None
-            dt_date = datetime.strptime(dt_, "%Y-%m-%d").date() if dt_ else None
+            date_by = (request.query_params.get("date_by") or "tx_date").lower()
+            field_name = "created_at__date" if date_by in ("submission", "created_at") else "tx_date"
 
-            if df_date and dt_date:
-                qs = qs.filter(
-                    (Q(tx_date__gte=df_date) & Q(tx_date__lte=dt_date)) |
-                    (Q(created_at__date__gte=df_date) & Q(created_at__date__lte=dt_date))
-                )
-            elif df_date:
-                qs = qs.filter(
-                    Q(tx_date__gte=df_date) | Q(created_at__date__gte=df_date)
-                )
-            elif dt_date:
-                qs = qs.filter(
-                    Q(tx_date__lte=dt_date) | Q(created_at__date__lte=dt_date)
-                )
+            if df:
+                qs = qs.filter(**{f"{field_name}__gte": datetime.strptime(df, "%Y-%m-%d").date()})
+            if dt_:
+                qs = qs.filter(**{f"{field_name}__lte": datetime.strptime(dt_, "%Y-%m-%d").date()})
         except (ValueError, TypeError):
             pass
 
