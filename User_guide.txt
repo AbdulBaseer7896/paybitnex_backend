@@ -156,3 +156,52 @@ sudo journalctl -u paybitnex-celery -f
 sudo journalctl -u paybitnex -f
 
 
+delete customers having no transactional record in paidix:
+
+BEGIN;
+-- Temporary table storing the 13 target customer UUIDs
+CREATE TEMP TABLE target_user_ids AS
+SELECT unnest(ARRAY[
+    '9edd0fc9-d9bb-4832-86b8-211c689d0750',
+    '2463a68b-ba1e-45d3-bd78-94e896b8a6f7',
+    'fb5463eb-b6fd-4f4e-af5e-7e492f7fd4ed',
+    'c16968f9-402b-4323-b3e6-ddcaee00aa08',
+    'e0c821e5-f641-4b97-9de1-29b59063ee0c',
+    '8fb053a5-81c2-47b9-a3d9-2abd3fec2fe7',
+    'd9fedf7e-f047-451c-970f-4eeeb140c4be',
+    '23a6331a-8089-430d-a478-a881b7d5e9b0',
+    '3d05215c-f40d-41c1-a035-4f1003921a67',
+    'bbf7e9fc-77ba-4781-a2f0-6d94e30a0bb8',
+    'f47a3f23-b667-4d8a-b460-34122116aea3',
+    '29509fb5-088b-49f8-99d2-5bbffeede831',
+    'c13015e2-eb8e-43d3-b1d0-0ce71e0f2b1e'
+]::uuid[]) AS id;
+-- 1. Invoices & Dispatches (including dispatch drivers & companies)
+DELETE FROM invoice_line_items      WHERE invoice_id IN (SELECT id FROM invoices WHERE customer_id IN (SELECT id FROM target_user_ids));
+DELETE FROM invoice_payment_methods WHERE invoice_id IN (SELECT id FROM invoices WHERE customer_id IN (SELECT id FROM target_user_ids));
+DELETE FROM dispatches              WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM dispatch_drivers        WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM dispatch_companies      WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM invoices                WHERE customer_id IN (SELECT id FROM target_user_ids);
+-- 2. Customer profile, clients & settings
+DELETE FROM customer_profiles                 WHERE user_id     IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_allowed_payment_methods WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_feature_access          WHERE user_id     IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_fee_configs             WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_bank_accounts           WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_merchant_accounts       WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_clients                 WHERE customer_id IN (SELECT id FROM target_user_ids);
+DELETE FROM customer_companies               WHERE customer_id IN (SELECT id FROM target_user_ids);
+-- 3. Auth logs & JWT token blacklists
+DELETE FROM audit_logs                       WHERE user_id IN (SELECT id FROM target_user_ids);
+DELETE FROM token_blacklist_blacklistedtoken WHERE token_id IN (SELECT id FROM token_blacklist_outstandingtoken WHERE user_id IN (SELECT id FROM target_user_ids));
+DELETE FROM token_blacklist_outstandingtoken WHERE user_id IN (SELECT id FROM target_user_ids);
+DELETE FROM users_groups                     WHERE user_id IN (SELECT id FROM target_user_ids);
+DELETE FROM users_user_permissions           WHERE user_id IN (SELECT id FROM target_user_ids);
+-- 4. Delete the 13 customer users
+DELETE FROM users WHERE id IN (SELECT id FROM target_user_ids);
+COMMIT;
+
+
+delete customers with the transactional records:
+

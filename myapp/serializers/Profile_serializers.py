@@ -87,6 +87,10 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
                            "allow_null": False},
         }
 
+    def validate_full_name(self, value):
+        from myapp.serializers.User_serializers import clean_and_validate_full_name
+        return clean_and_validate_full_name(value, required=True)
+
     def validate_cnic_number(self, value):
         qs = CustomerProfile.objects.filter(cnic_number=value)
         if self.instance is not None:

@@ -202,6 +202,16 @@ class CustomerAccountDetailSerializer(serializers.ModelSerializer):
         return p.full_name if p else ""
 
 
+def clean_and_validate_full_name(value, required=True):
+    """Ensure full_name is non-empty, non-whitespace, and not 'undefined'/'null'."""
+    val = (str(value) if value is not None else "").strip()
+    if not val or val.lower() in ("undefined", "null", "none", "nan"):
+        if required:
+            raise serializers.ValidationError("Full name is required and cannot be 'undefined' or blank.")
+        return ""
+    return val
+
+
 class AdminCreateUserSerializer(serializers.ModelSerializer):
     """Admin creates a new user (any role). Temporary password returned."""
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -213,6 +223,9 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             "password", "is_active",
         ]
         read_only_fields = ["id"]
+
+    def validate_full_name(self, value):
+        return clean_and_validate_full_name(value, required=True)
 
     def validate_role(self, value):
         if value not in UserRole.values:
@@ -253,6 +266,9 @@ class AdminUpdateUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["email", "full_name", "phone", "role", "is_active"]
+
+    def validate_full_name(self, value):
+        return clean_and_validate_full_name(value, required=False)
 
     def validate_role(self, value):
         if value not in UserRole.values:
