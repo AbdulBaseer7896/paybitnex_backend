@@ -20,6 +20,7 @@ from decimal import Decimal
 
 from django.db import transaction as dbtx
 from django.db.models import Sum, Count, Q, Subquery, OuterRef, IntegerField
+from django.utils import timezone
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -208,7 +209,7 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
     serializer_class = VendorPKRPaymentSerializer
     permission_classes = [IsAuthenticated, IsAdminOrAccountant]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-    filterset_fields = ["vendor"]
+    filterset_fields = ["vendor", "is_void", "is_auto_generated"]
     search_fields = [
         "vendor__name", "confirmation_code", "bank_transaction_id", "notes",
     ]
@@ -227,6 +228,7 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(occurred_on__lte=params["date_to"])
         return qs
 
+    @dbtx.atomic
     def perform_create(self, serializer):
         payment = serializer.save(created_by=self.request.user)
 
@@ -250,13 +252,34 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
                         InternalTxDestination.PK_BANK,
                     ],
                 )
+                previous_payments = []
                 for tx in txs:
+                    if (tx.linked_vendor_pkr_payment_id
+                            and tx.linked_vendor_pkr_payment_id != payment.id):
+                        previous_payments.append(tx.linked_vendor_pkr_payment)
                     tx.pkr_converter_vendor = payment.vendor
                     tx.linked_vendor_pkr_payment = payment
                     # If this is a PK bank transfer, ensure the destination bank matches where PKR landed
                     if payment.pk_bank_account_id and tx.destination_type == 'pk_bank':
                         tx.dest_pk_bank = payment.pk_bank_account
                     tx.save()
+
+                # Replacing an automatically generated settlement must not
+                # leave its old value in financial totals. Preserve it as a
+                # void ledger row once no transaction references it.
+                for old_payment in {
+                    p.id: p for p in previous_payments
+                }.values():
+                    if (old_payment.is_auto_generated
+                            and not old_payment.source_internal_transactions.exists()):
+                        old_payment.is_void = True
+                        old_payment.voided_at = timezone.now()
+                        old_payment.void_reason = (
+                            f"Superseded by vendor PKR payment {payment.id}"
+                        )
+                        old_payment.save(update_fields=[
+                            "is_void", "voided_at", "void_reason", "updated_at",
+                        ])
 
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_CREATE,
@@ -282,7 +305,9 @@ class VendorPKRPaymentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def summary(self, request):
-        qs = self.filter_queryset(self.get_queryset()).order_by()
+        qs = self.filter_queryset(self.get_queryset()).filter(
+            is_void=False,
+        ).order_by()
         totals = qs.aggregate(
             pkr_received=Sum("pkr_received"),
             usd_sent=Sum("usd_sent"),
@@ -651,10 +676,22 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
 
         if not eligible or not tx.pkr_converter_vendor_id:
             # No converter (or not eligible for one) — unlink, but keep the
-            # historical VendorPKRPayment row.
+            # historical VendorPKRPayment row. Generated rows are voided
+            # below once no transaction still references them.
             if tx.linked_vendor_pkr_payment_id:
+                old_payment = tx.linked_vendor_pkr_payment
                 tx.linked_vendor_pkr_payment = None
                 tx.save(update_fields=["linked_vendor_pkr_payment", "updated_at"])
+                if (old_payment.is_auto_generated
+                        and not old_payment.source_internal_transactions.exists()):
+                    old_payment.is_void = True
+                    old_payment.voided_at = timezone.now()
+                    old_payment.void_reason = (
+                        f"Superseded while updating internal transaction {tx.id}"
+                    )
+                    old_payment.save(update_fields=[
+                        "is_void", "voided_at", "void_reason", "updated_at",
+                    ])
             return
 
         vendor = tx.pkr_converter_vendor
@@ -697,11 +734,16 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                 setattr(pmt, k, v)
             if screenshot:
                 pmt.screenshot = screenshot
+            if pmt.is_auto_generated:
+                pmt.is_void = False
+                pmt.voided_at = None
+                pmt.void_reason = ""
             pmt.save()
         else:
             pmt = VendorPKRPayment(
                 **common_fields,
                 created_by=tx.created_by,
+                is_auto_generated=True,
             )
             if screenshot:
                 pmt.screenshot = screenshot
@@ -712,6 +754,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------------
     # CRUD lifecycle hooks
     # ------------------------------------------------------------------
+    @dbtx.atomic
     def perform_create(self, serializer):
         obj = serializer.save(created_by=self.request.user)
         # Parse custom splits from request data if present
@@ -756,6 +799,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             },
         )
 
+    @dbtx.atomic
     def perform_update(self, serializer):
         before = {
             "amount": str(serializer.instance.amount),
@@ -820,6 +864,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             "destination_type": instance.destination_type,
         }
         linked = instance.fee_expense
+        linked_pkr_payment = instance.linked_vendor_pkr_payment
         AuditLog.record(
             user=self.request.user, action=AuditLog.ACTION_DELETE,
             target=instance,
@@ -827,6 +872,17 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             metadata=snapshot,
         )
         instance.delete()
+        if (linked_pkr_payment is not None
+                and linked_pkr_payment.is_auto_generated
+                and not linked_pkr_payment.source_internal_transactions.exists()):
+            linked_pkr_payment.is_void = True
+            linked_pkr_payment.voided_at = timezone.now()
+            linked_pkr_payment.void_reason = (
+                f"Source internal transaction {snapshot['id']} was deleted"
+            )
+            linked_pkr_payment.save(update_fields=[
+                "is_void", "voided_at", "void_reason", "updated_at",
+            ])
         if linked is not None:
             try:
                 linked.delete()
@@ -893,7 +949,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
 
         # PKR received directly from enabled people/vendors in exchange for
         # USD sent to them. Match the same date window used by this summary.
-        converter_qs = VendorPKRPayment.objects.all()
+        converter_qs = VendorPKRPayment.objects.filter(is_void=False)
         if request.query_params.get("date_from"):
             converter_qs = converter_qs.filter(
                 occurred_on__gte=request.query_params["date_from"],
@@ -1007,7 +1063,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             b["count"] += 1
             b["sources"].add("card")
 
-        settlements = VendorPKRPayment.objects.all()
+        settlements = VendorPKRPayment.objects.filter(is_void=False)
         if date_from:
             settlements = settlements.filter(occurred_on__gte=date_from)
         if date_to:

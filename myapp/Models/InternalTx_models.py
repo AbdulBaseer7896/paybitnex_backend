@@ -262,6 +262,13 @@ class VendorPKRPayment(models.Model):
     )
     confirmation_code = models.CharField(max_length=120, blank=True, default="")
     notes = models.TextField(blank=True, default="")
+    # Automatically generated settlements are lifecycle-owned by an
+    # InternalTransaction. Keep superseded rows for audit history, but mark
+    # them void so they no longer contribute to financial reporting.
+    is_auto_generated = models.BooleanField(default=False, db_index=True)
+    is_void = models.BooleanField(default=False, db_index=True)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    void_reason = models.CharField(max_length=255, blank=True, default="")
     occurred_on = models.DateField(db_index=True)
     created_by = models.ForeignKey(
         "myapp.User", on_delete=models.PROTECT,

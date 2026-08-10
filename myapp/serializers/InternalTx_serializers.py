@@ -105,11 +105,13 @@ class VendorPKRPaymentSerializer(serializers.ModelSerializer):
             "bank_transaction_id",
             "screenshot",
             "confirmation_code", "notes", "occurred_on",
+            "is_auto_generated", "is_void", "voided_at", "void_reason",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "vendor_name", "pkr_equivalent", "balance_pkr",
             "pk_bank_account_label",
+            "is_auto_generated", "is_void", "voided_at", "void_reason",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
 
