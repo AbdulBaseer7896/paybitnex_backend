@@ -125,7 +125,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
                     ret[field] = process_uploaded_image(
                         ret[field],
                         watermark_path=watermark_path,
-                        process_cv=True,
+                        process_cv=(field != "selfie"),
                     )
                 except Exception as e:
                     print(f"Error processing {field} image: {e}")

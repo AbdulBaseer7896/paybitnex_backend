@@ -314,7 +314,11 @@ class ProcessImageView(APIView):
         result = {}
         for key, uploaded_file in files_to_process.items():
             if uploaded_file:
-                processed = process_uploaded_image(uploaded_file, watermark_path=None, process_cv=True)
+                processed = process_uploaded_image(
+                    uploaded_file,
+                    watermark_path=None,
+                    process_cv=(key != "selfie"),
+                )
                 img_bytes = processed.read()
                 b64_str = base64.b64encode(img_bytes).decode("utf-8")
                 result[key] = f"data:image/webp;base64,{b64_str}"

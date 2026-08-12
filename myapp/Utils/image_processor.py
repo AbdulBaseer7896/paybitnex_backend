@@ -219,19 +219,22 @@ def remove_glare(image: np.ndarray) -> np.ndarray:
 
 
 def enhance_document(image: np.ndarray) -> np.ndarray:
-    """Advanced high-speed enhancement: Denoising + CLAHE + Sharpening."""
+    """Apply conservative local contrast and sharpening to a detected card."""
     if cv2 is None:
         return image
     try:
-        denoised = cv2.medianBlur(image, 3)
+        # CNICs contain guilloche patterns and fine Urdu text.  Strong CLAHE
+        # and unsharp masking turn that legitimate detail into the white/black
+        # "worms" seen in previews, so keep both operations deliberately mild.
+        denoised = cv2.bilateralFilter(image, 5, 35, 35)
         lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=1.15, tileGridSize=(16, 16))
         l = clahe.apply(l)
         enhanced = cv2.merge((l, a, b))
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-        gaussian_blur = cv2.GaussianBlur(enhanced, (0, 0), 3)
-        final_output = cv2.addWeighted(enhanced, 1.5, gaussian_blur, -0.5, 0)
+        gaussian_blur = cv2.GaussianBlur(enhanced, (0, 0), 1.2)
+        final_output = cv2.addWeighted(enhanced, 1.12, gaussian_blur, -0.12, 0)
         return final_output
     except Exception:
         return image
@@ -246,42 +249,61 @@ def scan_document(image: np.ndarray) -> np.ndarray:
         img_height, img_width = image.shape[:2]
         original = image.copy()
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.bilateralFilter(gray, 9, 75, 75)
-        thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-        edged = cv2.Canny(thresh, 30, 150)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edged = cv2.dilate(edged, kernel, iterations=1)
+        # Detect the outer card boundary from a down-scaled luminance image.
+        # Adaptive thresholding is intentionally avoided: on a CNIC it makes
+        # every printed character and security pattern look like an edge.
+        detection_scale = min(1.0, 1200.0 / max(img_width, img_height))
+        if detection_scale < 1.0:
+            detection = cv2.resize(
+                image, None, fx=detection_scale, fy=detection_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            detection = image
+
+        gray = cv2.cvtColor(detection, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        median = float(np.median(blurred))
+        lower = int(max(20, 0.66 * median))
+        upper = int(min(255, max(lower + 30, 1.33 * median)))
+        edged = cv2.Canny(blurred, lower, upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        edged = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel, iterations=2)
 
         contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:12]
 
         document_contour = None
-        min_area = (img_width * img_height) * 0.1
+        detection_height, detection_width = gray.shape[:2]
+        frame_area = detection_width * detection_height
+        min_area = frame_area * 0.08
+        max_area = frame_area * 0.95
 
         for c in contours:
             area = cv2.contourArea(c)
-            if area < min_area:
+            if area < min_area or area > max_area:
                 continue
             perimeter = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * perimeter, True)
             if len(approx) == 4:
-                document_contour = approx
-                break
-
-        if document_contour is None and len(contours) > 0:
-            if cv2.contourArea(contours[0]) > min_area:
-                rect = cv2.minAreaRect(contours[0])
-                box = cv2.boxPoints(rect)
-                document_contour = np.int32(box).reshape(4, 1, 2)
+                candidate = order_points(approx.reshape(4, 2).astype(np.float32))
+                candidate_width, candidate_height = compute_output_size(candidate)
+                aspect = max(candidate_width, candidate_height) / max(
+                    1, min(candidate_width, candidate_height)
+                )
+                # ISO ID-1 cards are 1.586:1. Allow perspective distortion and
+                # imperfect captures, but reject text blocks and near-squares.
+                if 1.25 <= aspect <= 2.05 and cv2.isContourConvex(approx):
+                    document_contour = approx
+                    break
 
         if document_contour is None:
-            return enhance_document(original)
+            # A failed detection must be non-destructive.  In particular this
+            # prevents faces, clothing and CNIC security patterns from being
+            # sharpened as though they were document edges.
+            return original
 
-        pts = document_contour.reshape(4, 2).astype(np.float32)
+        pts = document_contour.reshape(4, 2).astype(np.float32) / detection_scale
         rect = order_points(pts)
         width, height = compute_output_size(rect)
 
