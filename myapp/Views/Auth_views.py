@@ -1,5 +1,6 @@
 """Auth views: JWT login, refresh, logout, whoami, change password,
 OTP-based signup, and OTP-based password reset."""
+# pyrefly: ignore [missing-import]
 from adrf.views import APIView as AsyncAPIView
 from rest_framework import status, serializers
 from rest_framework.throttling import AnonRateThrottle
@@ -56,6 +57,18 @@ class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
     throttle_classes = [LoginRateThrottle]
+    
+    def post(self, request, *args, **kwargs):
+        from rest_framework_simplejwt.exceptions import AuthenticationFailed
+        try:
+            return super().post(request, *args, **kwargs)
+        except AuthenticationFailed as exc:
+            if exc.get_codes() == "EMAIL_UNVERIFIED":
+                return Response(
+                    {"error": "EMAIL_UNVERIFIED", "message": str(exc.detail)},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+            raise
 
 
 class RefreshView(TokenRefreshView):
@@ -430,13 +443,9 @@ class SignupRequestOTPView(APIView):
     POST /auth/signup/request-otp/   {email, password, full_name, phone?}
 
     If the email already belongs to a registered user, respond with 409
-    so the frontend can redirect to login. Otherwise mint a 6-digit OTP,
-    email it, and return 200. The OTP expires in 60 seconds.
+    so the frontend can redirect to login. Otherwise create an inactive User, 
+    mint an EMAIL_VERIFICATION OTP, email it, and return 200.
     """
-    # Disable auth entirely — this endpoint is publicly reachable. Without
-    # this, DRF's JWT auth class rejects any stale Authorization header
-    # the frontend may still be sending, returning 401 before AllowAny
-    # has a chance to kick in.
     authentication_classes = []
     permission_classes = [AllowAny]
 
@@ -453,129 +462,27 @@ class SignupRequestOTPView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        otp = EmailOTP.issue(email=email, purpose=OTPPurpose.SIGNUP)
-        send_email_async(
-            to=[email],
-            subject="Your PaidiX signup code",
-            template="auth/otp_signup",
-            context={"code": otp.code},
-        )
-        return Response(
-            {"detail": "Verification code sent. It expires in 60 seconds.",
-             "expires_in_seconds": 60},
-            status=status.HTTP_200_OK,
-        )
-
-
-class _SignupVerifySerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    code = serializers.CharField(min_length=6, max_length=6)
-    password = serializers.CharField(min_length=8, write_only=True)
-    full_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
-    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
-
-
-class SignupVerifyOTPView(APIView):
-    """
-    POST /auth/signup/verify-otp/   {email, code, password, full_name?, phone?}
-
-    Verifies the OTP, creates the user account, and returns JWT tokens +
-    user info so the frontend can sign the user in immediately and send
-    them to onboarding.
-    """
-    authentication_classes = []
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        s = _SignupVerifySerializer(data=request.data)
-        s.is_valid(raise_exception=True)
-        email = s.validated_data["email"].lower()
-
-        # Guard against a race: email could have been registered between
-        # request-otp and verify-otp (e.g. another tab).
-        if User.objects.filter(email__iexact=email).exists():
-            return Response(
-                {"detail": "An account with this email already exists. "
-                           "Please log in instead.",
-                 "code": "email_exists"},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        # Find the most recent outstanding OTP for this email+purpose.
-        otp = (
-            EmailOTP.objects
-            .filter(email=email, purpose=OTPPurpose.SIGNUP,
-                    consumed_at__isnull=True)
-            .order_by("-created_at")
-            .first()
-        )
-        if otp is None:
-            return Response(
-                {"detail": "No active code for this email. "
-                           "Please request a new one.",
-                 "code": "no_otp"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        ok, reason = otp.verify(s.validated_data["code"])
-        if not ok:
-            messages = {
-                "expired":  "This code has expired. Please request a new one.",
-                "locked":   "Too many failed attempts. Please request a new code.",
-                "invalid":  "The code you entered is incorrect.",
-                "consumed": "This code has already been used.",
-            }
-            return Response(
-                {"detail": messages.get(reason, "Invalid code."),
-                 "code": reason},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Create the user atomically + auto-assign default payment methods
         with transaction.atomic():
             user = User.objects.create_user(
                 email=email,
                 password=s.validated_data["password"],
                 full_name=s.validated_data["full_name"],
                 phone=s.validated_data.get("phone", ""),
-            )
-            AuditLog.record(
-                user=user, action="auth.signup_verified",
-                target=user,
-                metadata={"email": email, "via": "email_otp"},
-            )
-            # Auto-assign all is_default=True payment methods to this new customer
-            try:
-                from myapp.Utils.auto_assign_payment_methods import assign_defaults_to_user
-                assign_defaults_to_user(user, granted_by=None)
-            except Exception:
-                pass  # Never block registration
-
-            # Staff would otherwise only discover the account by browsing the
-            # user list. The link goes to the KYC queue rather than /users
-            # because that's where this signup lands next — and because the
-            # accountant portal has no users page to link to.
-            transaction.on_commit(
-                lambda: notify_staff(
-                    subject=f"New customer signup — {user.full_name or user.email}",
-                    template="staff/new_signup",
-                    context={
-                        "customer_name":  user.full_name or user.email,
-                        "customer_email": user.email,
-                        "phone":          user.phone or "",
-                    },
-                    path="/kyc",
-                    reply_to=[user.email],
-                )
+                is_active=False
             )
 
-        # Issue JWT tokens for immediate sign-in
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            "access":  str(refresh.access_token),
-            "refresh": str(refresh),
-            "user":    UserSerializer(user).data,
-        }, status=status.HTTP_201_CREATED)
+            otp = EmailOTP.issue(email=email, purpose=OTPPurpose.EMAIL_VERIFICATION)
+            send_email_async(
+                to=[email],
+                subject="Verify your PaidiX email",
+                template="auth/email_verification",
+                context={"code": otp.code, "name": user.full_name or ""},
+            )
+            
+        return Response(
+            {"detail": "User created. Verification code sent."},
+            status=status.HTTP_200_OK,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -750,3 +657,250 @@ class ForgotPasswordResetView(APIView):
             {"detail": "Password updated. You can now log in with your new password."},
             status=status.HTTP_200_OK,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Pre-Login Email Verification
+# ─────────────────────────────────────────────────────────────────────
+class _VerifyEmailSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(min_length=6, max_length=6)
+
+class VerifyEmailEndpoint(APIView):
+    """POST /auth/email/verify/ {email, code}"""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        s = _VerifyEmailSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        email = s.validated_data["email"].lower()
+        
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        otp = EmailOTP.objects.filter(
+            email=email, purpose=OTPPurpose.EMAIL_VERIFICATION, consumed_at__isnull=True
+        ).order_by("-created_at").first()
+        
+        if not otp:
+            return Response({"detail": "No active code for this email. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        ok, reason = otp.verify(s.validated_data["code"])
+        if not ok:
+            messages = {
+                "expired": "This code has expired. Please request a new one.",
+                "locked": "Too many failed attempts. Please request a new code.",
+                "invalid": "The code you entered is incorrect.",
+                "consumed": "This code has already been used.",
+            }
+            return Response({"detail": messages.get(reason, "Invalid code.")}, status=status.HTTP_400_BAD_REQUEST)
+            
+        with transaction.atomic():
+            is_new_activation = not user.is_active
+
+            user.email_verified = True
+            user.is_active = True
+            user.verification_deadline = None
+            user.save(update_fields=["email_verified", "is_active", "verification_deadline", "updated_at"])
+            
+            if is_new_activation:
+                AuditLog.record(
+                    user=user, action="auth.signup_verified",
+                    target=user,
+                    metadata={"email": email, "via": "email_otp"},
+                )
+                try:
+                    from myapp.Utils.auto_assign_payment_methods import assign_defaults_to_user
+                    assign_defaults_to_user(user, granted_by=None)
+                except Exception:
+                    pass
+
+                transaction.on_commit(
+                    lambda: notify_staff(
+                        subject=f"New customer signup — {user.full_name or user.email}",
+                        template="staff/new_signup",
+                        context={
+                            "customer_name":  user.full_name or user.email,
+                            "customer_email": user.email,
+                            "phone":          user.phone or "",
+                        },
+                        path="/kyc",
+                        reply_to=[user.email],
+                    )
+                )
+
+            AuditLog.record(user=user, action=AuditLog.ACTION_UPDATE, target=user, description="Verified email address via OTP")
+        return Response({"detail": "Email verified successfully."}, status=status.HTTP_200_OK)
+
+class _ResendVerificationSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=False)
+    password = serializers.CharField(write_only=True, required=False)
+
+class ResendVerificationEndpoint(APIView):
+    """POST /auth/email/resend/ {email?, password?}"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        from django.core.cache import cache
+        s = _ResendVerificationSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        
+        if request.user and request.user.is_authenticated:
+            user = request.user
+            email = user.email.lower()
+        else:
+            email = s.validated_data.get("email", "").lower()
+            password = s.validated_data.get("password", "")
+            if not email or not password:
+                return Response(
+                    {"detail": "Email and password are required."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            user = User.objects.filter(email__iexact=email).first()
+            if not user or not user.check_password(password):
+                return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if getattr(user, "email_verified", False):
+            return Response({"detail": "Email is already verified."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Rate limit check using Redis cache
+        cache_key = f"email_resend_limit_{email}"
+        attempts = cache.get(cache_key, 0)
+        if attempts >= 3:
+            return Response(
+                {"detail": "Too many verification requests. Please try again after 10 minutes."}, 
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+            
+        cache.set(cache_key, attempts + 1, timeout=600)
+        
+        otp = EmailOTP.issue(email=email, purpose=OTPPurpose.EMAIL_VERIFICATION)
+        send_email_async(
+            to=[email],
+            subject="Verify your PaidiX email",
+            template="auth/email_verification",
+            context={"code": otp.code, "name": user.full_name or ""}
+        )
+        return Response({"detail": "Verification code sent."}, status=status.HTTP_200_OK)
+
+class _ChangeEmailPreLoginSerializer(serializers.Serializer):
+    current_email = serializers.EmailField(required=False)
+    password = serializers.CharField(write_only=True)
+    new_email = serializers.EmailField()
+
+class ChangeEmailPreLoginEndpoint(APIView):
+    """POST /auth/email/change/ {current_email?, password, new_email}"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        from django.core.cache import cache
+        s = _ChangeEmailPreLoginSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        
+        if request.user and request.user.is_authenticated:
+            current_email = request.user.email.lower()
+        else:
+            current_email = s.validated_data.get("current_email", "").lower()
+            if not current_email:
+                return Response({"detail": "Current email is required."}, status=status.HTTP_400_BAD_REQUEST)
+                
+        new_email = s.validated_data["new_email"].lower()
+        
+        if current_email == new_email:
+            return Response({"detail": "New email cannot be the same as your current email."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Rate limit check using Redis cache
+        cache_key = f"email_resend_limit_{current_email}"
+        attempts = cache.get(cache_key, 0)
+        
+        if attempts >= 3:
+            return Response(
+                {"detail": "Too many verification requests. Please try again after 10 minutes."}, 
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        
+        user = User.objects.filter(email__iexact=current_email).first()
+        if not user or not user.check_password(s.validated_data["password"]):
+            cache.set(cache_key, attempts + 1, timeout=600)
+            return Response({"detail": "Invalid credentials."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if User.objects.filter(email__iexact=new_email).exclude(pk=user.pk).exists():
+            return Response({"detail": "This email is already in use by another account."}, status=status.HTTP_409_CONFLICT)
+            
+        cache.set(cache_key, attempts + 1, timeout=600)
+        
+        # Issue OTP for the new email (does NOT mutate user.email yet!)
+        otp = EmailOTP.issue(email=new_email, purpose=OTPPurpose.EMAIL_VERIFICATION)
+        send_email_async(
+            to=[new_email],
+            subject="Verify your new PaidiX email",
+            template="auth/email_verification",
+            context={"code": otp.code, "name": user.full_name or ""}
+        )
+        
+        return Response({"detail": "Verification code sent to your new email."}, status=status.HTTP_200_OK)
+
+
+class _ChangeEmailVerifySerializer(serializers.Serializer):
+    current_email = serializers.EmailField(required=False)
+    new_email = serializers.EmailField()
+    code = serializers.CharField(max_length=6)
+
+class ChangeEmailVerifyEndpoint(APIView):
+    """POST /auth/email/change/verify/ {current_email?, new_email, code}"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        s = _ChangeEmailVerifySerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+
+        if request.user and request.user.is_authenticated:
+            user = request.user
+        else:
+            current_email = s.validated_data.get("current_email", "").lower()
+            if not current_email:
+                return Response({"detail": "Current email is required."}, status=status.HTTP_400_BAD_REQUEST)
+            user = User.objects.filter(email__iexact=current_email).first()
+            if not user:
+                return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        new_email = s.validated_data["new_email"].lower()
+        code = s.validated_data["code"].strip()
+
+        # Check if new email is taken in the meantime
+        if User.objects.filter(email__iexact=new_email).exclude(pk=user.pk).exists():
+            return Response({"detail": "This email is already in use by another account."}, status=status.HTTP_409_CONFLICT)
+
+        otp = EmailOTP.objects.filter(
+            email=new_email, purpose=OTPPurpose.EMAIL_VERIFICATION, consumed_at__isnull=True
+        ).order_by("-created_at").first()
+        
+        if not otp:
+            return Response({"detail": "No active code for this email. Please request a new one."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        ok, reason = otp.verify(code)
+        if not ok:
+            messages = {
+                "expired": "This code has expired. Please request a new one.",
+                "locked": "Too many failed attempts. Please request a new code.",
+                "invalid": "The code you entered is incorrect.",
+                "consumed": "This code has already been used.",
+            }
+            return Response({"detail": messages.get(reason, "Invalid code.")}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_email = user.email
+        user.email = new_email
+        user.email_verified = True
+        user.verification_deadline = None
+        user.save(update_fields=["email", "email_verified", "verification_deadline", "updated_at"])
+
+        AuditLog.record(
+            user=user,
+            action=AuditLog.ACTION_UPDATE,
+            target=user,
+            description=f"Changed email from {old_email} to {new_email} via 2-step OTP verification"
+        )
+        return Response({"detail": "Email updated and verified successfully."}, status=status.HTTP_200_OK)
+

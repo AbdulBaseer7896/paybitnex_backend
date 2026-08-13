@@ -11,7 +11,7 @@ class UserBriefSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["id", "email", "full_name", "role", "is_profile_complete",
-                  "onboarding_step"]
+                  "onboarding_step", "email_verified", "verification_deadline"]
         read_only_fields = fields
 
 
@@ -40,7 +40,8 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             "id", "email", "full_name", "role", "phone",
-            "is_active", "is_profile_complete", "onboarding_step",
+            "is_active", "email_verified", "verification_deadline",
+            "is_profile_complete", "onboarding_step",
             "profile_picture_url",
             "payments_pin_set",
             "is_vendor", "vendor_name",
@@ -49,6 +50,7 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id", "created_at", "updated_at", "is_profile_complete",
+            "email_verified", "verification_deadline",
             "profile_picture_url", "payments_pin_set",
             "is_vendor", "vendor_name",
             "bank_accounts", "merchant_accounts",
@@ -337,6 +339,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 )
             if not user_obj.is_active:
                 from rest_framework_simplejwt.exceptions import AuthenticationFailed
+                if not getattr(user_obj, "email_verified", True) and user_obj.role != UserRole.ADMIN:
+                    raise AuthenticationFailed(
+                        "Please verify your email to continue.",
+                        code="EMAIL_UNVERIFIED",
+                    )
                 raise AuthenticationFailed(
                     "This account has been deactivated. Please contact support.",
                     code="account_deactivated",
