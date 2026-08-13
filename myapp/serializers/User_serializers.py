@@ -337,13 +337,18 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     "Your password is incorrect. Please try again.",
                     code="incorrect_password",
                 )
+            from rest_framework_simplejwt.exceptions import AuthenticationFailed
+            # Verification is independent of activation. Admin-created users
+            # are active immediately, but they must still prove ownership of
+            # their email before receiving tokens. Admin accounts remain
+            # exempt so an email-delivery problem cannot lock out the system.
+            if (not getattr(user_obj, "email_verified", True)
+                    and user_obj.role != UserRole.ADMIN):
+                raise AuthenticationFailed(
+                    "Please verify your email to continue.",
+                    code="EMAIL_UNVERIFIED",
+                )
             if not user_obj.is_active:
-                from rest_framework_simplejwt.exceptions import AuthenticationFailed
-                if not getattr(user_obj, "email_verified", True) and user_obj.role != UserRole.ADMIN:
-                    raise AuthenticationFailed(
-                        "Please verify your email to continue.",
-                        code="EMAIL_UNVERIFIED",
-                    )
                 raise AuthenticationFailed(
                     "This account has been deactivated. Please contact support.",
                     code="account_deactivated",

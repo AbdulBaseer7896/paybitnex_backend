@@ -11,6 +11,7 @@ import logging
 
 from adrf.views import APIView as AsyncAPIView
 from django.utils import timezone
+from django.db import IntegrityError
 from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -398,7 +399,32 @@ class CustomerProfileView(AsyncAPIView):
                 data=request.data, context={"request": request},
             )
             await async_is_valid(s, raise_exception=True)
-            profile = await async_save(s, user=request.user)
+            try:
+                profile = await async_save(s, user=request.user)
+            except IntegrityError as create_error:
+                # Two near-simultaneous onboarding submissions can both see
+                # "no profile" before either creates it. Recover the losing
+                # insert as an update to the row that won the race.
+                try:
+                    profile = await CustomerProfile.objects.select_related(
+                        "user", "kyc_reviewed_by"
+                    ).aget(user=request.user)
+                except CustomerProfile.DoesNotExist:
+                    # This was a different constraint (for example CNIC
+                    # uniqueness), so preserve the original database error.
+                    raise create_error
+
+                if profile.is_locked:
+                    return Response(
+                        {"detail": "Profile is locked after KYC approval and cannot be edited."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                s = CustomerProfileSerializer(
+                    profile, data=request.data, partial=True,
+                    context={"request": request},
+                )
+                await async_is_valid(s, raise_exception=True)
+                profile = await async_save(s)
 
         request.user.is_profile_complete = True
         request.user.full_name = profile.full_name
