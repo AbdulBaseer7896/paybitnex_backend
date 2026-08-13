@@ -11,8 +11,8 @@ def forwards_func(apps, schema_editor):
     # 1. Admins are exempt
     User.objects.filter(role="admin").update(email_verified=True, verification_deadline=None)
     
-    # 2. Existing non-admins get a 7-day grace period
-    grace_period = timezone.now() + timedelta(days=7)
+    # 2. Existing non-admins get a 14-day grace period
+    grace_period = timezone.now() + timedelta(days=14)
     
     # We must fetch them before bulk updating to send emails
     users_to_update = list(User.objects.exclude(role="admin").filter(email_verified=False))

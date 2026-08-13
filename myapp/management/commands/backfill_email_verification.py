@@ -9,12 +9,12 @@ from myapp.Utils.email_tasks import send_email_async
 log = logging.getLogger(__name__)
 
 class Command(BaseCommand):
-    help = 'Backfill verification_deadline (7 days) for existing unverified users and send them a notice.'
+    help = 'Backfill verification_deadline (14 days) for existing unverified users and send them a notice.'
 
     def handle(self, *args, **options):
         User = get_user_model()
         now = timezone.now()
-        deadline = now + timedelta(days=7)
+        deadline = now + timedelta(days=14)
         
         # Find all active, unverified, non-admin users who do not have a deadline set yet.
         users_to_backfill = User.objects.filter(

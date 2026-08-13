@@ -2,6 +2,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.password_validation import validate_password
+from django.utils import timezone
 from django.utils.crypto import get_random_string
 
 from myapp.Models.Auth_models import User, UserRole
@@ -338,12 +339,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     code="incorrect_password",
                 )
             from rest_framework_simplejwt.exceptions import AuthenticationFailed
-            # Verification is independent of activation. Admin-created users
-            # are active immediately, but they must still prove ownership of
-            # their email before receiving tokens. Admin accounts remain
-            # exempt so an email-delivery problem cannot lock out the system.
+            # Existing users may keep signing in during their explicit grace
+            # period so the dashboard can show the verification deadline.
+            # New/admin-created users have no deadline and must verify before
+            # first login. Once a legacy deadline expires, verification is
+            # required as well. Admins remain exempt.
+            deadline = getattr(user_obj, "verification_deadline", None)
             if (not getattr(user_obj, "email_verified", True)
-                    and user_obj.role != UserRole.ADMIN):
+                    and user_obj.role != UserRole.ADMIN
+                    and (deadline is None or deadline <= timezone.now())):
                 raise AuthenticationFailed(
                     "Please verify your email to continue.",
                     code="EMAIL_UNVERIFIED",
