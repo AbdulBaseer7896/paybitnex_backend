@@ -425,9 +425,9 @@ EMAIL_FROM_NAME    = config("EMAIL_FROM_NAME", default="PaidiX")
 # Frontend origin used inside emails for links like reset-password pages.
 # FRONTEND_URL       = config("FRONTEND_URL", default="https://paidix.com")
 
-# Extra recipients for internal staff alerts (new payment, KYC waiting, new
-# signup), on top of every active admin/accountant account. Comma-separated.
-# Use for a shared ops inbox that isn't a login. Blank = staff accounts only.
+# Optional recipients for internal alerts (new payment, KYC waiting, signup).
+# Admin/accountant account emails are never added automatically. Set this only
+# to a dedicated shared operations inbox; blank disables staff alert emails.
 STAFF_ALERT_EMAILS = config("STAFF_ALERT_EMAILS", default="")
 
 # ── Production security headers ───────────────────────────────────────

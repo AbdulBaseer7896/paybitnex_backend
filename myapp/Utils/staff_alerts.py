@@ -1,16 +1,13 @@
 """
 Internal staff notifications — "something is waiting in your queue".
 
-Everything here goes to the people who work the queues (active admins and
-accountants) and never to a customer. Customer-facing mail is sent from the
-individual views, addressed to the customer alone, so staff addresses are
-never exposed.
+Staff accounts are not recipients by default. Alerts are sent only when a
+dedicated shared inbox is explicitly configured through
+``STAFF_ALERT_EMAILS``. Customer-facing mail remains addressed to the customer
+alone, so staff addresses are never exposed.
 
-Recipients are resolved per role and sent one group per role. That grouping
-isn't cosmetic: the two portals mount the same review screens under different
-prefixes (`/admin/kyc` vs `/accountant/kyc`), so a single shared link would
-404 for half the recipients. Call sites pass a portal-RELATIVE path and each
-group gets it prefixed with their own root.
+The configured shared inbox receives admin-portal links. Call sites pass a
+portal-relative path and this module prefixes it with the admin portal root.
 
 Both sync and async call sites exist — payments live on a normal ViewSet,
 KYC on AsyncAPIView — hence the `anotify_staff` variant. The recipient lookup
@@ -21,13 +18,10 @@ import logging
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from myapp.Models.Auth_models import User, UserRole
+from myapp.Models.Auth_models import UserRole
 from myapp.Utils.email_tasks import send_email_async
 
 log = logging.getLogger(__name__)
-
-# Staff roles that work the review queues.
-ALERT_ROLES = (UserRole.ADMIN, UserRole.ACCOUNTANT)
 
 # Portal root per role. Paths passed in are relative to these.
 PORTAL_ROOT = {
@@ -37,27 +31,18 @@ PORTAL_ROOT = {
 
 
 def _recipients_by_role():
-    """{role: [email, ...]} for staff who can act on a queue item."""
-    by_role = {}
-    for email, role in (
-        User.objects
-        .filter(role__in=ALERT_ROLES, is_active=True)
-        .exclude(email="")
-        .values_list("email", "role")
-    ):
-        by_role.setdefault(role, []).append(email)
+    """Return only explicitly configured staff-alert recipients.
 
-    # A shared ops inbox that isn't a login. Given the admin-portal link
-    # because it has no role of its own to resolve against.
+    Admin and accountant account emails are never included implicitly. A
+    deployment may opt in with a dedicated shared operations inbox through
+    ``STAFF_ALERT_EMAILS``.
+    """
     extra = [
         e.strip()
         for e in (getattr(settings, "STAFF_ALERT_EMAILS", "") or "").split(",")
         if e.strip()
     ]
-    if extra:
-        by_role.setdefault(UserRole.ADMIN, []).extend(extra)
-
-    return by_role
+    return {UserRole.ADMIN: extra} if extra else {}
 
 
 def _send(by_role, *, subject, template, context, path, reply_to):

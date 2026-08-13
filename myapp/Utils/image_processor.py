@@ -355,8 +355,8 @@ def process_transaction_pipeline(
         final_image = scanned_pil_image
 
     # 4. Optional watermark
-    if watermark_path and os.path.exists(watermark_path):
-        final_image = add_watermark(final_image, watermark_path)
+    # if watermark_path and os.path.exists(watermark_path):
+    #     final_image = add_watermark(final_image, watermark_path)
 
     # 5. Save with WebP compression
     quality = 80
