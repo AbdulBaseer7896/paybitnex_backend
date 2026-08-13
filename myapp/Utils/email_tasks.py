@@ -45,6 +45,7 @@ import asyncio
 import logging
 import sys
 import threading
+import time
 from email.message import EmailMessage
 from typing import Dict, Iterable, List, Optional
 
@@ -55,6 +56,13 @@ from django.template.loader import render_to_string
 from django.template import TemplateDoesNotExist
 
 log = logging.getLogger(__name__)
+
+# Resend currently permits 10 API requests/second. Anymail calls are made from
+# independent background threads, so serialize them slightly below that limit.
+_resend_rate_lock = threading.Lock()
+_last_resend_request_at = 0.0
+_RESEND_MIN_INTERVAL_SECONDS = 0.12
+_RESEND_MAX_ATTEMPTS = 4
 
 
 def _format_from() -> str:
@@ -198,7 +206,37 @@ def _send_via_django(
     )
     if body_html:
         msg.attach_alternative(body_html, "text/html")
-    msg.send(fail_silently=False)
+    backend = getattr(settings, "EMAIL_BACKEND", "")
+    if not backend.endswith("resend.EmailBackend"):
+        msg.send(fail_silently=False)
+        return
+
+    # Resend returns 429 when bursts exceed its per-second allowance. Keep the
+    # limiter here (rather than at individual call sites) so OTPs, migrations,
+    # reminders and invoices all share the same process-wide budget.
+    global _last_resend_request_at
+    for attempt in range(_RESEND_MAX_ATTEMPTS):
+        with _resend_rate_lock:
+            wait_for = _RESEND_MIN_INTERVAL_SECONDS - (
+                time.monotonic() - _last_resend_request_at
+            )
+            if wait_for > 0:
+                time.sleep(wait_for)
+            try:
+                msg.send(fail_silently=False)
+                return
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                response = getattr(exc, "response", None)
+                if status_code is None and response is not None:
+                    status_code = getattr(response, "status_code", None)
+                if status_code != 429 or attempt == _RESEND_MAX_ATTEMPTS - 1:
+                    raise
+                # Exponential backoff is held under the same lock so another
+                # thread cannot immediately consume the retry window.
+                time.sleep(0.5 * (2 ** attempt))
+            finally:
+                _last_resend_request_at = time.monotonic()
 
 
 def _dispatch_sync(payload: dict) -> None:
