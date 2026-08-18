@@ -216,7 +216,8 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     filterset_fields = ["status", "currency", "customer"]
     search_fields = [
         "reference", "external_transaction_id",
-        "sender_name", "sender_company", "customer__email",
+        "sender_name", "sender_company",
+        "customer__full_name", "customer__email",
     ]
     # `tx_date` is an annotation added in get_queryset — the *business* /
     # transaction date (occurred_on, falling back to the entry date for
@@ -406,6 +407,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 | Q(external_transaction_id__icontains=search)
                 | Q(sender_name__icontains=search)
                 | Q(sender_company__icontains=search)
+                | Q(customer__full_name__icontains=search)
                 | Q(customer__email__icontains=search)
             )
         # Date range — inclusive of both bounds, calendar-day semantics.
