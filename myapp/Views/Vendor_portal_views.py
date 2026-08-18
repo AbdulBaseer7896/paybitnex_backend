@@ -128,6 +128,7 @@ class VendorTransactionSerializer(serializers.ModelSerializer):
     method_display = serializers.CharField(
         source="get_method_display", read_only=True,
     )
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = InternalTransaction
@@ -142,7 +143,8 @@ class VendorTransactionSerializer(serializers.ModelSerializer):
             "reference", "description",
             "card_label", "card_brand",
             "document_url", "document_name",
-            "created_at",
+            "status", "created_at",
+            "card_dollar_rate", "card_profit_pkr"
         ]
         read_only_fields = fields
 
@@ -189,6 +191,9 @@ class VendorTransactionSerializer(serializers.ModelSerializer):
         doc = getattr(obj, "document", None)
         name = getattr(doc, "name", "") or ""
         return name.rsplit("/", 1)[-1] if name else ""
+
+    def get_status(self, obj):
+        return "Paid" if obj.linked_vendor_pkr_payment_id else "Unpaid"
 
 
 # ---------------------------------------------------------------------
@@ -240,9 +245,15 @@ def vendor_dashboard(request):
     if date_to:
         qs = qs.filter(occurred_on__lte=date_to)
 
+    status_filter = (request.query_params.get("status") or "").strip().lower()
+    if status_filter == "paid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=False)
+    elif status_filter == "unpaid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=True)
+
     by_currency = list(
         qs.order_by().values("currency_id").annotate(
-            total=Sum("amount"), fees=Sum("fee_amount"), count=Count("id"),
+            total=Sum("card_profit_pkr"), fees=Sum("fee_amount"), count=Count("id"),
         ).order_by("currency_id")
     )
 
@@ -251,14 +262,14 @@ def vendor_dashboard(request):
         qs.order_by()
           .annotate(m=TruncMonth("occurred_on"))
           .values("m", "currency_id")
-          .annotate(total=Sum("amount"), count=Count("id"))
+          .annotate(total=Sum("card_profit_pkr"), count=Count("id"))
           .order_by("-m")[:36]
     )
 
     by_card = list(
         qs.order_by()
           .values("source_credit_card__label", "currency_id")
-          .annotate(total=Sum("amount"), count=Count("id"))
+          .annotate(total=Sum("card_profit_pkr"), count=Count("id"))
           .order_by("-total")[:20]
     )
 
@@ -271,7 +282,138 @@ def vendor_dashboard(request):
         "occurred_on", flat=True,
     ).first()
 
+    # Calculate closing report ledger
+    from myapp.Models.InternalTx_models import VendorPKRPayment
+    from decimal import Decimal
+    from collections import defaultdict
+
+    base_qs = _vendor_scope(vendor)
+    
+    agg = qs.aggregate(
+        debt=Sum("card_profit_pkr"),
+        usd=Sum("amount"),
+        fees=Sum("fee_amount"),
+    )
+    period_debt = agg["debt"] or 0
+    period_usd_raw = agg["usd"] or 0
+    period_fees = agg["fees"] or 0
+    period_usd = period_usd_raw + period_fees
+
+    # Group card transactions in period by rate for rate breakdown
+    rate_groups = defaultdict(lambda: {"usd_gross": Decimal("0"), "fees": Decimal("0"), "pkr": Decimal("0"), "count": 0})
+    for tx in qs.values("amount", "fee_amount", "card_dollar_rate", "card_profit_pkr"):
+        r = tx["card_dollar_rate"]
+        usd_gross = Decimal(str(tx["amount"] or 0))
+        fee_val = Decimal(str(tx["fee_amount"] or 0))
+        pkr_val = Decimal(str(tx["card_profit_pkr"] or 0))
+        rate_key = str(Decimal(str(r)).quantize(Decimal("0.01"))) if r is not None else "Unassigned"
+        rate_groups[rate_key]["usd_gross"] += usd_gross
+        rate_groups[rate_key]["fees"] += fee_val
+        rate_groups[rate_key]["pkr"] += pkr_val
+        rate_groups[rate_key]["count"] += 1
+
+    rate_breakdown = [
+        {
+            "rate": k,
+            "usd_gross": str(v["usd_gross"]),
+            "fees": str(v["fees"]),
+            "total_usd": str(v["usd_gross"] + v["fees"]),
+            "total_pkr": str(v["pkr"]),
+            "count": v["count"],
+        }
+        for k, v in sorted(
+            rate_groups.items(),
+            key=lambda item: (Decimal(item[0]) if item[0] != "Unassigned" else Decimal(0)),
+            reverse=True,
+        )
+    ]
+
+    # 2. Previous Pending (Opening Balance B/F)
+    if date_from:
+        prev_debt_qs = base_qs.filter(occurred_on__lt=date_from)
+        prev_debt = prev_debt_qs.aggregate(v=Sum("card_profit_pkr"))["v"] or 0
+        
+        prev_paid_qs = VendorPKRPayment.objects.filter(vendor=vendor, is_void=False, occurred_on__lt=date_from)
+        prev_paid = prev_paid_qs.aggregate(v=Sum("pkr_received"))["v"] or 0
+    else:
+        prev_debt = 0
+        prev_paid = 0
+    
+    previous_pending = prev_debt - prev_paid
+
+    # 3. Payments Received
+    period_payments_qs = VendorPKRPayment.objects.filter(vendor=vendor, is_void=False)
+    if date_from:
+        period_payments_qs = period_payments_qs.filter(occurred_on__gte=date_from)
+    if date_to:
+        period_payments_qs = period_payments_qs.filter(occurred_on__lte=date_to)
+        
+    period_payments = list(
+        period_payments_qs
+        .select_related("pk_bank_account")
+        .order_by("occurred_on")
+    )
+    period_payments_list = []
+    for p in period_payments:
+        doc_url = None
+        if p.screenshot:
+            try:
+                doc_url = p.screenshot.url
+                if request is not None and doc_url and doc_url.startswith("/"):
+                    doc_url = request.build_absolute_uri(doc_url)
+            except Exception:
+                doc_url = None
+
+        period_payments_list.append({
+            "id": str(p.id),
+            "date": p.occurred_on.isoformat() if p.occurred_on else None,
+            "bank_label": p.pk_bank_account.label if p.pk_bank_account else "Bank Transfer",
+            "bank_name": p.pk_bank_account.bank_name if p.pk_bank_account else "",
+            "bank_transaction_id": p.bank_transaction_id or "",
+            "amount": str(p.pkr_received or 0),
+            "usd_sent": str(p.usd_sent or 0) if p.usd_sent else None,
+            "exchange_rate": str(p.exchange_rate) if p.exchange_rate else None,
+            "screenshot_url": doc_url,
+            "notes": p.notes or "",
+        })
+    
+    # 4. Total Paid
+    total_paid = sum((p.pkr_received or 0 for p in period_payments), 0)
+    
+    # 5. Total Pending Amount (Closing Balance C/F)
+    total_pending = previous_pending + period_debt - total_paid
+
+    # Blended / Effective rate for period
+    blended_rate = (period_debt / period_usd).quantize(Decimal("0.01")) if period_usd > 0 else None
+
+    status_str = "settled" if total_pending == 0 else ("pending" if total_pending > 0 else "credit")
+
+    ledger = {
+        "opening_balance_pkr": str(previous_pending),
+        "period_gross_usd": str(period_usd_raw),
+        "period_fees_usd": str(period_fees),
+        "period_total_usd": str(period_usd),
+        "effective_rate": str(blended_rate) if blended_rate else None,
+        "period_charges_pkr": str(period_debt),
+        "rates_breakdown": rate_breakdown,
+        "total_due_pkr": str(previous_pending + period_debt),
+        "payments": period_payments_list,
+        "total_paid_pkr": str(total_paid),
+        "closing_balance_pkr": str(total_pending),
+        "settlement_status": status_str,
+
+        # Backwards compatibility keys
+        "period_usd": str(period_usd),
+        "period_fees": str(period_fees),
+        "blended_rate": str(blended_rate) if blended_rate else None,
+        "period_pkr": str(period_debt),
+        "previous_pending_pkr": str(previous_pending),
+        "total_pkr": str(previous_pending + period_debt),
+        "total_pending_pkr": str(total_pending),
+    }
+
     return Response({
+        "ledger": ledger,
         "vendor": {"id": str(vendor.id), "name": vendor.name},
         "totals": {
             "transaction_count": qs.count(),
@@ -279,18 +421,34 @@ def vendor_dashboard(request):
             "last_transaction": last,
             "by_currency": [
                 {
-                    "currency": r["currency_id"],
+                    "currency": "PKR",
                     "total": str(r["total"] or 0),
                     "fees": str(r["fees"] or 0),
                     "count": r["count"],
                 }
                 for r in by_currency
             ],
+            "unpaid_by_currency": [
+                {
+                    "currency": "PKR",
+                    "total": str(r["total"] or 0),
+                    "count": r["count"],
+                }
+                for r in qs.filter(linked_vendor_pkr_payment__isnull=True).order_by().values("currency_id").annotate(total=Sum("card_profit_pkr"), count=Count("id")).order_by("currency_id")
+            ],
+            "paid_by_currency": [
+                {
+                    "currency": "PKR",
+                    "total": str(r["total"] or 0),
+                    "count": r["count"],
+                }
+                for r in qs.filter(linked_vendor_pkr_payment__isnull=False).order_by().values("currency_id").annotate(total=Sum("card_profit_pkr"), count=Count("id")).order_by("currency_id")
+            ],
         },
         "monthly": [
             {
                 "month": r["m"].isoformat() if r["m"] else None,
-                "currency": r["currency_id"],
+                "currency": "PKR",
                 "total": str(r["total"] or 0),
                 "count": r["count"],
             }
@@ -299,7 +457,7 @@ def vendor_dashboard(request):
         "by_card": [
             {
                 "card_label": r["source_credit_card__label"] or "—",
-                "currency": r["currency_id"],
+                "currency": "PKR",
                 "total": str(r["total"] or 0),
                 "count": r["count"],
             }
@@ -341,6 +499,12 @@ def vendor_transactions(request):
     currency = (request.query_params.get("currency") or "").strip()
     if currency and currency.lower() != "all":
         qs = qs.filter(currency_id=currency)
+
+    status_filter = (request.query_params.get("status") or "").strip().lower()
+    if status_filter == "paid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=False)
+    elif status_filter == "unpaid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=True)
 
     # Card filter. Note this narrows an ALREADY-scoped queryset, so passing
     # the id of a card that never paid this vendor simply yields zero rows —
@@ -396,6 +560,7 @@ def vendor_transactions(request):
             "date_to": date_to.isoformat() if date_to else None,
             "currency": currency or "all",
             "card": card or "all",
+            "status": status_filter or "all",
             "q": q or "",
         },
         "results": VendorTransactionSerializer(
@@ -437,6 +602,12 @@ def vendor_transactions_csv(request):
     if currency and currency.lower() != "all":
         qs = qs.filter(currency_id=currency)
 
+    status_filter = (request.query_params.get("status") or "").strip().lower()
+    if status_filter == "paid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=False)
+    elif status_filter == "unpaid":
+        qs = qs.filter(linked_vendor_pkr_payment__isnull=True)
+
     card = (request.query_params.get("card") or "").strip()
     if card and card.lower() != "all":
         qs = qs.filter(source_credit_card_id=card)
@@ -452,7 +623,7 @@ def vendor_transactions_csv(request):
     buf = StringIO()
     w = csv.writer(buf)
     w.writerow([
-        "Date", "Card", "Method",
+        "Date", "Card", "Method", "Status",
         "Currency", "Amount", "Fee", "Description", "Document",
     ])
     for t in qs:
@@ -468,6 +639,7 @@ def vendor_transactions_csv(request):
             t.occurred_on.isoformat() if t.occurred_on else "",
             getattr(t.source_credit_card, "label", "") or "",
             t.get_method_display(),
+            "Paid" if t.linked_vendor_pkr_payment_id else "Unpaid",
             t.currency_id,
             str(t.amount),
             str(t.fee_amount or Decimal("0")),

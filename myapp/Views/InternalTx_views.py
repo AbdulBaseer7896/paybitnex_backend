@@ -909,6 +909,10 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                   fees=Sum("fee_amount"),
                   pk_fees=Sum("pk_fee_amount"),
                   count=Count("id"),
+                  paid_total=Sum("amount", filter=Q(linked_vendor_pkr_payment__isnull=False)),
+                  paid_count=Count("id", filter=Q(linked_vendor_pkr_payment__isnull=False)),
+                  unpaid_total=Sum("amount", filter=Q(linked_vendor_pkr_payment__isnull=True)),
+                  unpaid_count=Count("id", filter=Q(linked_vendor_pkr_payment__isnull=True)),
               )
               .order_by("currency_id")
         )
@@ -985,6 +989,10 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
                     "fees": str(r["fees"] or 0),
                     "pk_fees": str(r["pk_fees"] or 0),
                     "count": r["count"],
+                    "paid_total": str(r["paid_total"] or 0),
+                    "paid_count": r["paid_count"],
+                    "unpaid_total": str(r["unpaid_total"] or 0),
+                    "unpaid_count": r["unpaid_count"],
                 }
                 for r in by_currency
             ],
