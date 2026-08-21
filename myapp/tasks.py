@@ -19,12 +19,10 @@ from myapp.Utils.email_tasks import cleanup_expired_otps
 from myapp.Utils.invoice_tasks import send_overdue_invoice_reminders
 from myapp.Utils.rate_tasks import fetch_live_rates
 from myapp.Utils.report_tasks import generate_daily_report
-from myapp.Utils.stale_payment_tasks import flag_stale_payments
 
 __all__ = [
     "cleanup_expired_otps",
     "fetch_live_rates",
-    "flag_stale_payments",
     "generate_daily_report",
     "send_daily_ops_digest",
     "send_overdue_invoice_reminders",
