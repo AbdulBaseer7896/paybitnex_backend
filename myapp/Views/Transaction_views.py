@@ -283,10 +283,11 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             return self._apply_date_filter(qs)
 
         # Staff: apply the stale filter ONLY on the list action. For a
-        # retrieve (detail page), custom @action endpoints, or update,
-        # we must return the full unfiltered queryset — otherwise staff
-        # can't open, edit, or force-complete a payment whose URL they
-        # navigate to directly, because it's been filtered out as stale.
+        # retrieve (detail page) or update, we return the full unfiltered queryset
+        # so staff can open, edit, or force-complete any payment directly.
+        if self.action == "summary":
+            return self._apply_date_filter(qs)
+
         if self.action != "list":
             return qs
 
@@ -347,6 +348,149 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             # Bad date string → just skip filtering rather than raising.
             pass
         return qs
+
+    # ---- server-side summary for overview dashboard & customer portal ----
+    @action(
+        detail=False, methods=["get"],
+        permission_classes=[IsAuthenticated],
+        url_path="summary", 
+    )
+    def summary(self, request):
+        """Server-side aggregated metrics computed entirely in SQL."""
+        from django.db.models import Sum, Count, F, Q, DecimalField
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        is_customer = getattr(request.user, "role", None) == UserRole.CUSTOMER
+
+        total_count = qs.count()
+        non_rejected = qs.exclude(status=TransactionStatus.REJECTED)
+        completed_qs = qs.filter(status=TransactionStatus.COMPLETED)
+
+        submitted_total = non_rejected.aggregate(v=Sum("amount"))["v"] or Decimal("0")
+
+        by_currency_rows = non_rejected.values("currency_id").annotate(
+            total=Sum("amount"), count=Count("id")
+        )
+        submitted_by_currency = {
+            r["currency_id"]: {"total": float(r["total"] or 0), "count": r["count"]}
+            for r in by_currency_rows
+        }
+
+        gross_pkr_received = completed_qs.aggregate(
+            v=Sum(F("amount") * F("exchange_rate"), output_field=DecimalField(max_digits=20, decimal_places=2))
+        )["v"] or Decimal("0")
+
+        transferred = completed_qs.aggregate(v=Sum("net_pkr"))["v"] or Decimal("0")
+
+        status_counts = qs.aggregate(
+            completed=Count("id", filter=Q(status=TransactionStatus.COMPLETED)),
+            pending=Count("id", filter=Q(status__in=[
+                TransactionStatus.SUBMITTED, TransactionStatus.UNDER_REVIEW,
+                TransactionStatus.VERIFIED, TransactionStatus.ON_HOLD,
+                TransactionStatus.PKR_SENT,
+            ])),
+            rejected=Count("id", filter=Q(status=TransactionStatus.REJECTED)),
+        )
+
+        # Time series grouped by day
+        time_series_rows = list(
+            qs.values("tx_date")
+            .annotate(
+                pkr=Sum("net_pkr", filter=Q(status=TransactionStatus.COMPLETED)),
+                completed=Count("id", filter=Q(status=TransactionStatus.COMPLETED)),
+                pending=Count("id", filter=Q(status__in=[
+                    TransactionStatus.SUBMITTED, TransactionStatus.UNDER_REVIEW,
+                    TransactionStatus.VERIFIED, TransactionStatus.ON_HOLD,
+                    TransactionStatus.PKR_SENT,
+                ])),
+                rejected=Count("id", filter=Q(status=TransactionStatus.REJECTED)),
+                total_amount=Sum("amount", filter=~Q(status=TransactionStatus.REJECTED)),
+                count=Count("id"),
+            )
+            .order_by("tx_date")
+        )
+        time_series = [
+            {
+                "date": str(r["tx_date"]),
+                "pkr": float(r["pkr"] or 0),
+                "completed": r["completed"],
+                "pending": r["pending"],
+                "rejected": r["rejected"],
+                "count": r["count"],
+            }
+            for r in time_series_rows
+        ]
+
+        if is_customer:
+            return Response({
+                "total_count": total_count,
+                "submitted_total": float(submitted_total),
+                "submitted_by_currency": submitted_by_currency,
+                "gross_pkr_received": float(gross_pkr_received),
+                "transferred": float(transferred),
+                "pending": status_counts["pending"] or 0,
+                "completed": status_counts["completed"] or 0,
+                "rejected": status_counts["rejected"] or 0,
+                "time_series": time_series,
+            })
+
+        fee_pkr = completed_qs.aggregate(
+            v=Sum(F("fee_amount_foreign") * F("exchange_rate"), output_field=DecimalField(max_digits=20, decimal_places=2))
+        )["v"] or Decimal("0")
+
+        rate_spread_pkr = completed_qs.filter(
+            real_exchange_rate__gt=F("exchange_rate")
+        ).aggregate(
+            v=Sum(F("amount") * (F("real_exchange_rate") - F("exchange_rate")), output_field=DecimalField(max_digits=20, decimal_places=2))
+        )["v"] or Decimal("0")
+
+        fee_charged_pkr = fee_pkr
+        total_company_pkr = fee_charged_pkr + rate_spread_pkr
+
+        # Top 20 customers (staff only)
+        top_cust_rows = list(
+            non_rejected
+            .values("customer_id", "customer__full_name", "customer__email")
+            .annotate(
+                received=Sum("amount"),
+                transferred=Sum("net_pkr", filter=Q(status=TransactionStatus.COMPLETED)),
+                profit=Sum(
+                    F("fee_amount_foreign") * F("exchange_rate"),
+                    filter=Q(status=TransactionStatus.COMPLETED),
+                    output_field=DecimalField(max_digits=20, decimal_places=2)
+                ),
+                count=Count("id"),
+            )
+            .order_by("-received")[:20]
+        )
+        top_customers = [
+            {
+                "id": str(r["customer_id"]),
+                "name": r["customer__full_name"] or r["customer__email"] or str(r["customer_id"])[:8],
+                "email": r["customer__email"] or "",
+                "value": float(r["received"] or 0),
+                "transferred": float(r["transferred"] or 0),
+                "profit": float(r["profit"] or 0),
+                "count": r["count"],
+            }
+            for r in top_cust_rows
+        ]
+
+        return Response({
+            "total_count": total_count,
+            "submitted_total": float(submitted_total),
+            "submitted_by_currency": submitted_by_currency,
+            "gross_pkr_received": float(gross_pkr_received),
+            "transferred": float(transferred),
+            "fee_pkr": float(fee_pkr),
+            "fee_charged_pkr": float(fee_charged_pkr),
+            "rate_spread_pkr": float(rate_spread_pkr),
+            "total_company_pkr": float(total_company_pkr),
+            "pending": status_counts["pending"] or 0,
+            "completed": status_counts["completed"] or 0,
+            "rejected": status_counts["rejected"] or 0,
+            "top_customers": top_customers,
+            "time_series": time_series,
+        })
 
     # ---- admin / accountant: CSV export of (filtered) transactions ----
     @action(
