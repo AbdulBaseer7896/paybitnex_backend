@@ -353,6 +353,23 @@ CELERY_BEAT_SCHEDULE = {
         "task": "myapp.Utils.report_tasks.generate_daily_report",
         "schedule": crontab(hour="0", minute="5"),
     },
+    # Flag PKR-sent payments that have been awaiting customer confirmation
+    # beyond SystemSetting `stale_payment_minutes`, surfacing them in the
+    # "Awaiting customer confirmation" queue. Every 30 minutes so minute-level
+    # thresholds actually trigger within a reasonable window of the cutoff.
+    "flag-stale-payments-half-hourly": {
+        "task": "myapp.Utils.stale_payment_tasks.flag_stale_payments",
+        "schedule": crontab(minute="*/30"),
+    },
+    # Close out payments the customer never confirmed. Runs on the same
+    # cadence as the flagging task and offset by nothing in particular —
+    # ordering between the two doesn't matter, because a payment can only be
+    # auto-confirmed a full `auto_confirm_payment_minutes` after it was
+    # flagged, which is far longer than the gap between runs.
+    "auto-confirm-stale-payments-half-hourly": {
+        "task": "myapp.Utils.stale_payment_tasks.auto_confirm_stale_payments",
+        "schedule": crontab(minute="*/30"),
+    },
     "cleanup-expired-otps-daily": {
         "task": "myapp.Utils.email_tasks.cleanup_expired_otps",
         "schedule": crontab(hour="2", minute="0"),  # 2 AM Karachi time — low traffic

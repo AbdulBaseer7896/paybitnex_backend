@@ -290,6 +290,36 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         if self.action != "list":
             return qs
 
+        # List view: by default exclude stale PKR_SENT payments so the
+        # main transactions list stays focused on active work. The
+        # "Awaiting customer confirmation" page passes `?only_stale=true`
+        # to flip the filter, or `?include_stale=true` to see both mixed.
+        #
+        # Staleness is computed on the fly by comparing `updated_at`
+        # against the configured threshold minutes, rather than relying
+        # solely on the `is_stale` DB flag. This means the Awaiting page
+        # reflects reality instantly even without celery-beat running.
+        from datetime import timedelta
+        from django.db.models import Q
+
+        p = self.request.query_params
+        only_stale = p.get("only_stale") in ("1", "true", "True", "yes")
+        include_stale = p.get("include_stale") in ("1", "true", "True", "yes")
+
+        from myapp.Utils.stale_payment_tasks import _resolve_threshold_minutes
+        minutes = _resolve_threshold_minutes()
+        cutoff = timezone.now() - timedelta(minutes=minutes)
+
+        stale_q = (
+            Q(status=TransactionStatus.PKR_SENT)
+            & (Q(is_stale=True) | Q(updated_at__lt=cutoff))
+        )
+
+        if only_stale:
+            qs = qs.filter(stale_q)
+        elif not include_stale:
+            qs = qs.exclude(stale_q)
+
         return self._apply_date_filter(qs)
 
     def _apply_date_filter(self, qs):
@@ -874,10 +904,71 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         url_path="customer-confirm",
     )
     def customer_confirm(self, request, pk=None):
-        return Response(
-            {"detail": "Customer confirmation has been deprecated in the new flow."},
-            status=status.HTTP_410_GONE,
-        )
+        """
+        Customer clicks "I received my PKR" on their portal after the
+        accountant has recorded an OutgoingPKRTransfer. Flips status to
+        COMPLETED and fires the partner fee-distribution logic.
+        """
+        from myapp.Models.Auth_models import UserRole
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+        from myapp.serializers.Transaction_serializers import CustomerConfirmSerializer
+
+        payment = self.get_object()
+
+        # Only the owning customer can confirm. Staff have their own path
+        # (force_complete) — they should NOT be hitting this endpoint.
+        if request.user.role != UserRole.CUSTOMER or payment.customer_id != request.user.id:
+            return Response(
+                {"detail": "Only the payment's customer can confirm receipt."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if payment.status != TransactionStatus.PKR_SENT:
+            return Response(
+                {"detail":
+                 "Payment is not awaiting customer confirmation "
+                 f"(current status: {payment.get_status_display()})."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        s = CustomerConfirmSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        note = s.validated_data.get("note", "") or ""
+
+        before_status = payment.status
+        with dbtx.atomic():
+            payment.customer_confirmed_at = timezone.now()
+            payment.completed_at = timezone.now()
+            payment.status = TransactionStatus.COMPLETED
+            # Confirming un-stales a stale payment if this happened after the
+            # beat task already flagged it. `stale_at` is cleared too so a
+            # payment that somehow re-enters PKR_SENT starts a fresh clock
+            # rather than inheriting the old one and auto-confirming at once.
+            payment.is_stale = False
+            payment.stale_at = None
+            payment.save(update_fields=[
+                "customer_confirmed_at", "completed_at",
+                "status", "is_stale", "stale_at", "updated_at",
+            ])
+            _record_status_change(
+                payment, before_status, TransactionStatus.COMPLETED,
+                user=request.user,
+                note=("Customer confirmed receipt"
+                      + (f" — {note}" if note else "")),
+            )
+            # After commit: fee distribution below runs in the same block,
+            # and staff shouldn't be told the books closed until they have.
+            dbtx.on_commit(
+                lambda: _notify_admins_payment_confirmed(payment, confirmed_by=note)
+            )
+            # Run partner fee distribution now (was previously run at
+            # PKR_SENT; new flow runs it at true completion).
+            distribute_fee_for_payment(payment)
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=f"{payment.reference}: customer confirmed PKR receipt",
+            )
+        return Response(IncomingPaymentSerializer(payment).data)
 
     # ---- admin: force complete a stale payment ----
     @action(
@@ -886,10 +977,54 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         url_path="force-complete",
     )
     def force_complete(self, request, pk=None):
-        return Response(
-            {"detail": "Force complete has been deprecated in the new flow."},
-            status=status.HTTP_410_GONE,
-        )
+        """
+        Admin-only override for the "Awaiting customer confirmation" queue.
+        Moves a stale PKR_SENT payment to COMPLETED on the customer's behalf,
+        runs fee distribution, and logs a reason + `force_completed_by` on
+        the payment for the audit trail.
+        """
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+        from myapp.serializers.Transaction_serializers import ForceCompleteSerializer
+
+        payment = self.get_object()
+        if payment.status != TransactionStatus.PKR_SENT:
+            return Response(
+                {"detail":
+                 "Only PKR-sent payments awaiting customer confirmation "
+                 "can be force-completed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        s = ForceCompleteSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        reason = s.validated_data["reason"]
+
+        before_status = payment.status
+        with dbtx.atomic():
+            payment.force_completed_by = request.user
+            payment.force_completed_at = timezone.now()
+            payment.completed_at = timezone.now()
+            payment.status = TransactionStatus.COMPLETED
+            payment.is_stale = False
+            payment.stale_at = None
+            payment.save(update_fields=[
+                "force_completed_by", "force_completed_at", "completed_at",
+                "status", "is_stale", "stale_at", "updated_at",
+            ])
+            _record_status_change(
+                payment, before_status, TransactionStatus.COMPLETED,
+                user=request.user,
+                note=f"Force-completed by admin — reason: {reason}",
+            )
+            distribute_fee_for_payment(payment)
+            AuditLog.record(
+                user=request.user, action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                description=(
+                    f"{payment.reference}: force-completed by admin. "
+                    f"Reason: {reason}"
+                ),
+            )
+        return Response(IncomingPaymentSerializer(payment).data)
 
     @action(
         detail=False, methods=["post"],
@@ -897,10 +1032,112 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         url_path="bulk-force-complete",
     )
     def bulk_force_complete(self, request):
-        return Response(
-            {"detail": "Bulk force complete has been deprecated in the new flow."},
-            status=status.HTTP_410_GONE,
-        )
+        """
+        Force-complete MANY stale PKR_SENT payments in one request.
+
+        Body:
+            {
+              "ids": ["<uuid>", "<uuid>", ...],   # required, non-empty
+              "reason": "<text>"                  # required, applied to all
+            }
+
+        Each payment is processed in its own savepoint so one bad row
+        (e.g. already completed, or wrong status) doesn't roll back the
+        whole batch. Returns a per-id breakdown of what succeeded and what
+        was skipped, plus the updated rows.
+
+        Mirrors the single `force_complete` action exactly: same status
+        guard, same fee distribution, same status-history + audit logging,
+        and the same required-reason rule — just looped over a list.
+        """
+        from myapp.Utils.partner_ledger import distribute_fee_for_payment
+
+        ids = request.data.get("ids")
+        reason = (request.data.get("reason") or "").strip()
+
+        if not isinstance(ids, (list, tuple)) or not ids:
+            return Response(
+                {"detail": "Provide a non-empty list of payment ids in `ids`."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not reason:
+            return Response(
+                {"detail": "A reason is required and is logged against every "
+                           "payment in the batch."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # De-dupe while preserving order.
+        seen = set()
+        ordered_ids = []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                ordered_ids.append(i)
+
+        payments = {
+            str(p.id): p
+            for p in IncomingPayment.objects.filter(id__in=ordered_ids)
+        }
+
+        completed = []
+        skipped = []
+
+        for pid in ordered_ids:
+            payment = payments.get(str(pid))
+            if payment is None:
+                skipped.append({"id": str(pid), "reason": "Not found."})
+                continue
+            if payment.status != TransactionStatus.PKR_SENT:
+                skipped.append({
+                    "id": str(pid),
+                    "reference": payment.reference,
+                    "reason": "Not awaiting confirmation (status is "
+                              f"'{payment.status}').",
+                })
+                continue
+            try:
+                with dbtx.atomic():
+                    before_status = payment.status
+                    payment.force_completed_by = request.user
+                    payment.force_completed_at = timezone.now()
+                    payment.completed_at = timezone.now()
+                    payment.status = TransactionStatus.COMPLETED
+                    payment.is_stale = False
+                    payment.stale_at = None
+                    payment.save(update_fields=[
+                        "force_completed_by", "force_completed_at",
+                        "completed_at", "status", "is_stale", "stale_at",
+                        "updated_at",
+                    ])
+                    _record_status_change(
+                        payment, before_status, TransactionStatus.COMPLETED,
+                        user=request.user,
+                        note=f"Force-completed by admin (bulk) — reason: {reason}",
+                    )
+                    distribute_fee_for_payment(payment)
+                    AuditLog.record(
+                        user=request.user, action=AuditLog.ACTION_UPDATE,
+                        target=payment,
+                        description=(
+                            f"{payment.reference}: force-completed by admin "
+                            f"(bulk). Reason: {reason}"
+                        ),
+                    )
+                completed.append(payment)
+            except Exception as e:  # pragma: no cover — keep the batch going
+                skipped.append({
+                    "id": str(pid),
+                    "reference": getattr(payment, "reference", ""),
+                    "reason": f"Error: {e}",
+                })
+
+        return Response({
+            "completed_count": len(completed),
+            "skipped_count": len(skipped),
+            "completed": IncomingPaymentSerializer(completed, many=True).data,
+            "skipped": skipped,
+        })
 
     # ---- admin/accountant: update real exchange rate on existing transaction ----
     @action(
@@ -1015,23 +1252,28 @@ class OutgoingTransferViewSet(
                 sent_by=request.user,
                 **s.validated_data,
             )
-            
-            # --- NEW flow: Transition straight to COMPLETED.
-            payment.status = TransactionStatus.COMPLETED
-            payment.completed_at = timezone.now()
+
+            # Stop at PKR_SENT and wait for the customer to confirm receipt.
+            # The customer portal shows an "I received my PKR" button; when
+            # they click it, status flips to COMPLETED and partner fees are
+            # distributed (see the `customer_confirm` action). If they never
+            # respond, `flag_stale_payments` surfaces it in the Awaiting
+            # Customer Confirmation queue after `stale_payment_minutes`, and
+            # `auto_confirm_stale_payments` closes it out on their behalf
+            # `auto_confirm_payment_minutes` later.
+            payment.status = TransactionStatus.PKR_SENT
             payment.handled_by = request.user
-            payment.save(update_fields=["status", "completed_at", "handled_by", "updated_at"])
-            
+            # A fresh PKR_SENT episode must start with a clean staleness
+            # clock, otherwise a re-sent payment inherits an old `stale_at`
+            # and is auto-confirmed on the very next beat run.
+            payment.is_stale = False
+            payment.stale_at = None
+            payment.save(update_fields=[
+                "status", "handled_by", "is_stale", "stale_at", "updated_at",
+            ])
             _record_status_change(
-                payment, before_status, TransactionStatus.COMPLETED,
-                user=request.user, note=f"PKR sent and payment completed — ref {transfer.reference}",
-            )
-            
-            # Distribute commission while in atomic block
-            distribute_fee_for_payment(payment)
-            
-            dbtx.on_commit(
-                lambda: _notify_admins_payment_confirmed(payment, confirmed_by=f"Accountant {request.user.email}")
+                payment, before_status, TransactionStatus.PKR_SENT,
+                user=request.user, note=f"PKR sent — ref {transfer.reference}",
             )
 
         return Response(
@@ -1160,23 +1402,21 @@ class OutgoingTransferViewSet(
 
             for payment in payments:
                 before_status = payment.status
-                payment.status = TransactionStatus.COMPLETED
-                payment.completed_at = timezone.now()
+                # Same as the single-payment path: stop at PKR_SENT, let the
+                # customer confirm (or the auto-confirm task close it out),
+                # and distribute partner fees at true completion only.
+                payment.status = TransactionStatus.PKR_SENT
                 payment.handled_by = request.user
-                payment.save(update_fields=["status", "completed_at", "handled_by", "updated_at"])
-                
+                payment.is_stale = False
+                payment.stale_at = None
+                payment.save(update_fields=[
+                    "status", "handled_by", "is_stale", "stale_at", "updated_at",
+                ])
+
                 _record_status_change(
-                    payment, before_status, TransactionStatus.COMPLETED,
+                    payment, before_status, TransactionStatus.PKR_SENT,
                     user=request.user,
-                    note=f"PKR sent and payment completed (bulk) — ref {transfer.reference}",
-                )
-                
-                # Distribute commission while in atomic block
-                distribute_fee_for_payment(payment)
-                
-                # Python's lambda binding captures the variable by reference, so we need a default arg
-                dbtx.on_commit(
-                    lambda p=payment: _notify_admins_payment_confirmed(p, confirmed_by=f"Accountant {request.user.email}")
+                    note=f"PKR sent (bulk) — ref {transfer.reference}",
                 )
 
             AuditLog.record(

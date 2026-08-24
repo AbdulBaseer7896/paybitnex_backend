@@ -179,12 +179,36 @@ class IncomingPayment(models.Model):
     # PKR_SENT. Triggers final COMPLETED status + partner fee distribution.
     customer_confirmed_at = models.DateTimeField(null=True, blank=True)
 
-    # `is_stale` is toggled by a daily Celery-beat task when a payment has been
-    # in PKR_SENT for longer than SystemSetting `stale_payment_days` without
-    # the customer confirming. Stale payments drop out of the main staff
-    # transactions list and appear in the "Awaiting customer confirmation"
-    # section, where admin can force-complete.
+    # `is_stale` is toggled by the Celery-beat task `flag_stale_payments`
+    # when a payment has been in PKR_SENT for longer than SystemSetting
+    # `stale_payment_minutes` without the customer confirming. Stale payments
+    # drop out of the main staff transactions list and appear in the
+    # "Awaiting customer confirmation" section, where admin can force-complete.
     is_stale = models.BooleanField(default=False, db_index=True)
+
+    # The moment `is_stale` flipped true, i.e. when this entered the awaiting-
+    # confirmation queue. The auto-confirm timer is anchored here rather than
+    # to `updated_at`, which any unrelated edit would push forward and so
+    # silently restart the clock.
+    stale_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text=(
+            "When this payment was flagged stale and entered the "
+            "Awaiting Customer Confirmation queue."
+        ),
+    )
+
+    # Set when `auto_confirm_stale_payments` approved this on the customer's
+    # behalf. Distinct from `force_completed_by`, which records a *human*
+    # admin override — this one had no operator behind it, and the
+    # distinction matters when auditing why a payment closed.
+    auto_confirmed = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when the system approved this on the customer's "
+            "behalf after the auto-confirm window elapsed."
+        ),
+    )
 
     # If admin force-completed this payment on behalf of an unresponsive
     # customer, track who did it (for the activity log).
