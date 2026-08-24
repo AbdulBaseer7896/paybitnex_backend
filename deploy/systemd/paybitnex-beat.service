@@ -1,0 +1,51 @@
+[Unit]
+Description=PayBitnex Celery beat scheduler
+Documentation=file:///root/paybitnex_backend/deploy/systemd/README.md
+After=network-online.target redis-server.service paybitnex-celery.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/paybitnex_backend
+EnvironmentFile=/root/paybitnex_backend/.env
+
+# RUN EXACTLY ONE BEAT ACROSS THE WHOLE FLEET, and never add -B to the
+# worker unit. beat is a publisher, not a worker: a second instance
+# publishes every scheduled task a second time, so flag_stale_payments and
+# auto_confirm_stale_payments would each fire twice per tick. The tasks are
+# idempotent so nothing corrupts, but customers would get duplicate
+# confirmation reminder emails.
+#
+# The schedule itself lives in CELERY_BEAT_SCHEDULE in settings.py, under
+# version control. --schedule is only beat's own bookkeeping of when each
+# entry last fired; it is regenerated if deleted, so it is safe to wipe when
+# changing the schedule and beat seems stuck on the old cadence.
+ExecStart=/root/paybitnex_backend/venv/bin/celery -A paybitnex beat \
+    --loglevel=info \
+    --schedule=/var/lib/paybitnex/celerybeat-schedule \
+    --pidfile=
+
+Restart=always
+RestartSec=10s
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paybitnex-beat
+
+# Creates /var/lib/paybitnex for the schedule state file. Kept out of the
+# project directory so a redeploy (or a git clean) can't wipe it.
+StateDirectory=paybitnex
+StateDirectoryMode=0750
+
+# See the note in paybitnex-celery.service — no ProtectHome= under /root.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

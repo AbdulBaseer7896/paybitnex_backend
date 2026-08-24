@@ -1,0 +1,46 @@
+[Unit]
+Description=PayBitnex Celery worker
+Documentation=file:///root/paybitnex_backend/deploy/systemd/README.md
+# Redis is both broker and result backend — without it the worker spins on
+# connection errors instead of doing work.
+After=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/paybitnex_backend
+
+# Same .env manage.py reads, so the worker sees the identical DATABASE_URL,
+# REDIS_URL and mail credentials as the web process. systemd's parser is not
+# a shell: no `export`, no `${VAR}` interpolation, no inline comments after
+# a value. Keep .env to plain KEY=value lines or the unit fails to start.
+EnvironmentFile=/root/paybitnex_backend/.env
+
+ExecStart=/root/paybitnex_backend/venv/bin/celery -A paybitnex worker \
+    --loglevel=info \
+    --concurrency=4
+
+Restart=always
+RestartSec=10s
+
+# Give in-flight tasks a chance to finish before SIGKILL. Fee distribution
+# writes partner ledger rows; a task killed mid-transaction rolls back
+# cleanly, but a clean stop is still preferable.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paybitnex-celery
+
+# NOTE: no ProtectHome= here. The deploy lives under /root, and
+# ProtectHome=true would make it unreadable and the unit would fail to
+# start. If you ever relocate the app outside /root, add ProtectHome=true.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

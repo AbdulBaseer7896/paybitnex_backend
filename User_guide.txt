@@ -205,3 +205,108 @@ COMMIT;
 
 delete customers with the transactional records:
 
+
+
+CELERY WORKER + BEAT (SCHEDULED JOBS)
+-------------------------------------
+  Three services run the backend on the server:
+
+    paybitnex          gunicorn / the web API
+    paybitnex-celery   the worker — executes queued tasks
+    paybitnex-beat     the scheduler — publishes tasks on a schedule
+
+  Beat must run as its OWN service. Never add -B to the worker
+  (celery worker -B embeds the scheduler in the worker). Two workers
+  with -B means two schedulers, so every scheduled job fires twice and
+  customers get duplicate reminder emails. Restarting the worker would
+  also silently take the scheduler down with it.
+
+  Run exactly ONE beat across the whole server. One worker service can
+  have many processes (--concurrency); beat cannot.
+
+  The schedule lives in CELERY_BEAT_SCHEDULE in paybitnex/settings.py,
+  so it deploys with the code. Nothing to configure in the database.
+
+START / STOP / CHECK
+--------------------
+  sudo systemctl start   paybitnex-celery paybitnex-beat
+  sudo systemctl stop    paybitnex-celery paybitnex-beat
+  sudo systemctl restart paybitnex paybitnex-celery paybitnex-beat
+
+  # Must survive a reboot — check this says "enabled":
+  systemctl is-enabled paybitnex-beat
+  sudo systemctl enable paybitnex-celery paybitnex-beat
+
+  # Status + live logs
+  systemctl status paybitnex-celery paybitnex-beat
+  sudo journalctl -u paybitnex-beat -f
+  sudo journalctl -u paybitnex-celery -f
+
+  If a unit is missing or broken, reference copies are in the repo at
+  deploy/systemd/ — see deploy/systemd/README.md before installing, so
+  you don't end up with two beats running under different names.
+
+    sudo cp deploy/systemd/paybitnex-celery.service /etc/systemd/system/
+    sudo cp deploy/systemd/paybitnex-beat.service   /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now paybitnex-celery paybitnex-beat
+
+WHAT BEAT ACTUALLY DRIVES
+-------------------------
+  Hourly     fetch_live_rates              exchange rates
+  00:05      generate_daily_report
+  02:00      cleanup_expired_otps
+  08:00      send_daily_ops_digest         staff summary
+  09:00      send_overdue_invoice_reminders
+  every 30m  flag_stale_payments           -> Awaiting Confirmation queue
+  every 30m  auto_confirm_stale_payments   -> auto-approves after 1 day
+
+  The last two run the customer-confirmation queue:
+
+    1. Accountant records the PKR transfer -> payment sits at PKR_SENT
+       waiting for the customer to click "I received my PKR".
+    2. After SystemSetting stale_payment_minutes, flag_stale_payments
+       moves it into Awaiting Customer Confirmation and emails the
+       customer once.
+    3. After SystemSetting auto_confirm_payment_minutes (default 1440 =
+       1 day, counted from when it went stale), auto_confirm_stale_payments
+       approves it on the customer's behalf, completes it, and distributes
+       partner fees. Admin can force-complete earlier at any point.
+
+  Both thresholds are editable in the admin portal under Settings.
+  Set auto_confirm_payment_minutes to 0 to switch auto-approval off and
+  clear the queue by hand only.
+
+  IMPORTANT: the queue PAGE is computed live, so it looks correct even
+  when beat is dead. Auto-approval is not — if beat stops, payments pile
+  up in the queue and nothing closes them, with no error anywhere. Check
+  `systemctl is-enabled paybitnex-beat` after any server rebuild.
+
+SAFETY NET FOR A DEAD BEAT
+--------------------------
+  Run both sweeps once, synchronously, without celery or redis:
+
+    cd /root/paybitnex_backend
+    ./venv/bin/python manage.py run_payment_sweeps --dry-run   # report only
+    ./venv/bin/python manage.py run_payment_sweeps             # do the work
+
+  Add it to root's crontab as an hourly backstop so a beat outage
+  degrades to a coarser schedule instead of a silent stall:
+
+    0 * * * * cd /root/paybitnex_backend && ./venv/bin/python manage.py run_payment_sweeps >> /var/log/paybitnex-sweeps.log 2>&1
+
+  Safe to run alongside beat. Both sweeps filter by cutoff and re-check
+  status under a row lock before writing, so a cron run and a beat tick
+  landing together cannot double-approve a payment or pay partner fees
+  twice.
+
+LOCAL DEV ON WINDOWS
+--------------------
+  Celery's default prefork pool does not work on Windows — use solo:
+
+    .\venv\Scripts\celery.exe -A paybitnex worker --loglevel=info --pool=solo
+    .\venv\Scripts\celery.exe -A paybitnex beat --loglevel=info
+
+  Or skip celery entirely and drive the sweeps by hand (no redis needed):
+
+    .\venv\Scripts\python.exe manage.py run_payment_sweeps
