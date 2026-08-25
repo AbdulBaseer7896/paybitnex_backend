@@ -132,8 +132,11 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         return ret
 
     def validate(self, attrs):
-        # Once KYC is approved, profile is locked — no edits allowed.
-        if self.instance and self.instance.is_locked:
+        # Once KYC is approved, profile is locked — customer edits are blocked, but staff can override.
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        is_staff = user and getattr(user, "role", None) in ("admin", "accountant")
+        if self.instance and self.instance.is_locked and not is_staff:
             raise serializers.ValidationError(
                 "Profile is locked after KYC approval and cannot be edited."
             )

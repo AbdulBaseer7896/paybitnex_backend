@@ -340,9 +340,6 @@ class CustomerProfileView(AsyncAPIView):
         `user_id` is only honoured for admin/accountant — a customer
         passing someone else's id still gets their own row, never a
         different customer's KYC data.
-
-        GET only: POST/PATCH below remain self-service, so this read path
-        can't be used to modify another user's profile.
         """
         target = request.user
         if user_id and request.user.role in (UserRole.ADMIN, UserRole.ACCOUNTANT):
@@ -367,21 +364,26 @@ class CustomerProfileView(AsyncAPIView):
         )
 
     async def post(self, request, user_id=None):
-        # The staff read-route (users/<uuid>/profile/) shares this view.
-        # Writes must stay strictly self-service, so reject any attempt to
-        # create a profile *for* another user.
+        is_staff = request.user.role in (UserRole.ADMIN, UserRole.ACCOUNTANT)
+        target_user = request.user
         if user_id:
-            return Response(
-                {"detail": "Profiles can only be created by their owner."},
-                status=status.HTTP_405_METHOD_NOT_ALLOWED,
-            )
+            if not is_staff:
+                return Response(
+                    {"detail": "Profiles can only be created by their owner or staff."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            try:
+                target_user = await User.objects.aget(pk=user_id)
+            except (User.DoesNotExist, ValueError, ValidationError):
+                return Response({"detail": "User not found."},
+                                status=status.HTTP_404_NOT_FOUND)
 
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
-            ).aget(user=request.user)
+            ).aget(user=target_user)
 
-            if profile.is_locked:
+            if profile.is_locked and not is_staff:
                 return Response(
                     {"detail": "Profile is locked after KYC approval and cannot be edited."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -400,7 +402,7 @@ class CustomerProfileView(AsyncAPIView):
             )
             await async_is_valid(s, raise_exception=True)
             try:
-                profile = await async_save(s, user=request.user)
+                profile = await async_save(s, user=target_user)
             except IntegrityError as create_error:
                 # Two near-simultaneous onboarding submissions can both see
                 # "no profile" before either creates it. Recover the losing
@@ -408,13 +410,13 @@ class CustomerProfileView(AsyncAPIView):
                 try:
                     profile = await CustomerProfile.objects.select_related(
                         "user", "kyc_reviewed_by"
-                    ).aget(user=request.user)
+                    ).aget(user=target_user)
                 except CustomerProfile.DoesNotExist:
                     # This was a different constraint (for example CNIC
                     # uniqueness), so preserve the original database error.
                     raise create_error
 
-                if profile.is_locked:
+                if profile.is_locked and not is_staff:
                     return Response(
                         {"detail": "Profile is locked after KYC approval and cannot be edited."},
                         status=status.HTTP_403_FORBIDDEN,
@@ -426,11 +428,11 @@ class CustomerProfileView(AsyncAPIView):
                 await async_is_valid(s, raise_exception=True)
                 profile = await async_save(s)
 
-        request.user.is_profile_complete = True
-        request.user.full_name = profile.full_name
-        request.user.phone = profile.phone
-        request.user.onboarding_step = 4
-        await request.user.asave(
+        target_user.is_profile_complete = True
+        target_user.full_name = profile.full_name
+        target_user.phone = profile.phone
+        target_user.onboarding_step = 4
+        await target_user.asave(
             update_fields=["is_profile_complete", "full_name", "phone",
                            "onboarding_step"],
         )
@@ -438,15 +440,15 @@ class CustomerProfileView(AsyncAPIView):
         # KYC gates payment submission entirely (see Transaction_views.create),
         # so an unreviewed profile silently blocks the customer from doing
         # anything at all. Only alert while it's actually awaiting a decision.
-        if profile.kyc_status in (
+        if not is_staff and profile.kyc_status in (
             CustomerProfile.KYC_PENDING, CustomerProfile.KYC_RESUBMITTED,
         ):
             await anotify_staff(
-                subject=f"KYC awaiting review — {profile.full_name or request.user.email}",
+                subject=f"KYC awaiting review — {profile.full_name or target_user.email}",
                 template="staff/kyc_pending",
-                context=_kyc_alert_context(profile, request.user),
+                context=_kyc_alert_context(profile, target_user),
                 path="/kyc",
-                reply_to=[request.user.email] if request.user.email else None,
+                reply_to=[target_user.email] if target_user.email else None,
             )
 
         return Response(
@@ -455,24 +457,32 @@ class CustomerProfileView(AsyncAPIView):
         )
 
     async def patch(self, request, user_id=None):
-        # Same rule as post(): writes are self-service only. See above.
+        is_staff = request.user.role in (UserRole.ADMIN, UserRole.ACCOUNTANT)
+        target_user = request.user
         if user_id:
-            return Response(
-                {"detail": "Profiles can only be edited by their owner."},
-                status=status.HTTP_405_METHOD_NOT_ALLOWED,
-            )
+            if not is_staff:
+                return Response(
+                    {"detail": "Profiles can only be edited by their owner or staff."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            try:
+                target_user = await User.objects.aget(pk=user_id)
+            except (User.DoesNotExist, ValueError, ValidationError):
+                return Response({"detail": "User not found."},
+                                status=status.HTTP_404_NOT_FOUND)
+
         try:
             profile = await CustomerProfile.objects.select_related(
                 "user", "kyc_reviewed_by"
             ).defer(
                 "kyc_last_resubmit_at", "kyc_last_resubmit_changes"
-            ).aget(user=request.user)
+            ).aget(user=target_user)
         except CustomerProfile.DoesNotExist:
             return Response({"detail": "Profile not set up."},
                             status=status.HTTP_404_NOT_FOUND)
 
-        # Locked profiles (approved KYC) cannot be edited at all.
-        if profile.is_locked:
+        # Locked profiles (approved KYC) cannot be edited by normal customer.
+        if profile.is_locked and not is_staff:
             return Response(
                 {"detail": "Profile is locked after KYC approval and cannot be edited."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -489,7 +499,7 @@ class CustomerProfileView(AsyncAPIView):
         # only reliable signal for "the customer replaced this
         # photo" since the model field always points to *some*
         # object regardless.
-        was_resubmission = profile.kyc_status in (
+        was_resubmission = (not is_staff) and profile.kyc_status in (
             CustomerProfile.KYC_OBJECTIONS,
             CustomerProfile.KYC_REJECTED,
         )
@@ -508,8 +518,39 @@ class CustomerProfileView(AsyncAPIView):
         await async_is_valid(s, raise_exception=True)
         profile = await async_save(s)
 
-        # If the customer was responding to objections, flip status to RESUBMITTED.
-        if was_resubmission:
+        # Sync target_user full_name and phone if changed
+        user_update_fields = []
+        if profile.full_name and target_user.full_name != profile.full_name:
+            target_user.full_name = profile.full_name
+            user_update_fields.append("full_name")
+        if profile.phone and target_user.phone != profile.phone:
+            target_user.phone = profile.phone
+            user_update_fields.append("phone")
+        if user_update_fields:
+            await target_user.asave(update_fields=user_update_fields)
+
+        if is_staff:
+            changed_items = []
+            for field, before in pre_state.items():
+                after = getattr(profile, field, None) or ""
+                if before != after:
+                    changed_items.append(field)
+            for file_field in ("selfie", "cnic_front", "cnic_back"):
+                if file_field in request.FILES:
+                    changed_items.append(file_field)
+            await AuditLog.arecord(
+                user=request.user, action=AuditLog.ACTION_UPDATE, target=profile,
+                description=(
+                    f"Staff updated profile/KYC documents for {profile.full_name or target_user.email}"
+                    f" (changed: {', '.join(changed_items) if changed_items else 'no text diff'})"
+                ),
+                after={
+                    "full_name": profile.full_name,
+                    "cnic_number": profile.cnic_number,
+                    "changed": changed_items,
+                },
+            )
+        elif was_resubmission:
             # Compute the diff between pre- and post-PATCH state
             # for the simple text fields. For files, look at the
             # raw request — if a multipart field is present, the
