@@ -246,6 +246,12 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             validated_data.pop("password", None)
             or get_random_string(12)
         )
+        role = validated_data.get("role", UserRole.CUSTOMER)
+        if role in (UserRole.ADMIN, UserRole.ACCOUNTANT, "admin", "accountant"):
+            validated_data.setdefault("is_active", True)
+            validated_data.setdefault("email_verified", True)
+            validated_data.setdefault("verification_deadline", None)
+
         user = User(**validated_data)
         user.set_password(password)
         user.save()
@@ -346,7 +352,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             # required as well. Admins remain exempt.
             deadline = getattr(user_obj, "verification_deadline", None)
             if (not getattr(user_obj, "email_verified", True)
-                    and user_obj.role != UserRole.ADMIN
+                    and user_obj.role not in (UserRole.ADMIN, UserRole.ACCOUNTANT)
                     and (deadline is None or deadline <= timezone.now())):
                 raise AuthenticationFailed(
                     "Please verify your email to continue.",

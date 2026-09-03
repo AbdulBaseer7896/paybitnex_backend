@@ -10,12 +10,12 @@ class Command(BaseCommand):
         User = get_user_model()
         now = timezone.now()
         
-        # Query unverified non-admins whose deadline is in the past
+        # Query unverified non-admins and non-accountants whose deadline is in the past
         queryset = User.objects.filter(
             email_verified=False,
             verification_deadline__lt=now,
             is_active=True
-        ).exclude(role=UserRole.ADMIN)
+        ).exclude(role__in=[UserRole.ADMIN, UserRole.ACCOUNTANT])
         
         count = queryset.count()
         if count > 0:

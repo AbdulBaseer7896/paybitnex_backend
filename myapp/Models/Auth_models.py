@@ -29,10 +29,15 @@ class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
-        extra_fields.setdefault("role", UserRole.CUSTOMER)
-        extra_fields.setdefault("is_active", False)
-        extra_fields.setdefault("email_verified", False)
-        extra_fields.setdefault("verification_deadline", None)
+        role = extra_fields.setdefault("role", UserRole.CUSTOMER)
+        if role in (UserRole.ADMIN, UserRole.ACCOUNTANT, "admin", "accountant"):
+            extra_fields.setdefault("is_active", True)
+            extra_fields.setdefault("email_verified", True)
+            extra_fields.setdefault("verification_deadline", None)
+        else:
+            extra_fields.setdefault("is_active", False)
+            extra_fields.setdefault("email_verified", False)
+            extra_fields.setdefault("verification_deadline", None)
         return self._create_user(email, password, **extra_fields)
 
     def create_superuser(self, email, password=None, **extra_fields):

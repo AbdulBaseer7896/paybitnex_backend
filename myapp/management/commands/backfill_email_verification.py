@@ -30,11 +30,11 @@ class Command(BaseCommand):
         now = timezone.now()
         deadline = now + timedelta(days=14)
         
-        # Find all active, unverified, non-admin users who do not have a deadline set yet.
+        # Find all active, unverified, non-admin/accountant users who do not have a deadline set yet.
         users_to_backfill = User.objects.filter(
             is_active=True,
             email_verified=False,
-        ).exclude(role=UserRole.ADMIN)
+        ).exclude(role__in=[UserRole.ADMIN, UserRole.ACCOUNTANT])
         if not options["resend_notices"]:
             users_to_backfill = users_to_backfill.filter(
                 verification_deadline__isnull=True,
