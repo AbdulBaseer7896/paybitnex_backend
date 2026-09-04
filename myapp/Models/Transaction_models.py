@@ -344,6 +344,26 @@ class OutgoingPKRTransfer(models.Model):
         return f"{self.reference} • PKR {self.amount_pkr}"
 
 
+class OutgoingPKRTransferReceipt(models.Model):
+    """One of possibly several receipts/proofs attached to an OutgoingPKRTransfer."""
+    id = models.BigAutoField(primary_key=True)
+    transfer = models.ForeignKey(
+        OutgoingPKRTransfer,
+        on_delete=models.CASCADE,
+        related_name="receipts",
+    )
+    file = models.FileField(upload_to="transfers/receipts/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "outgoing_pkr_transfer_receipts"
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"Receipt #{self.id} for {self.transfer.reference}"
+
+
+
 class TransactionStatusHistory(models.Model):
     """Append-only log of every status transition."""
     id = models.BigAutoField(primary_key=True)

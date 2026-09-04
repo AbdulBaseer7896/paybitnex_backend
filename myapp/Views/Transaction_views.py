@@ -30,7 +30,7 @@ from rest_framework.response import Response
 from myapp.Models.Auth_models import UserRole
 from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Transaction_models import (
-    IncomingPayment, OutgoingPKRTransfer, TransactionStatus,
+    IncomingPayment, OutgoingPKRTransfer, OutgoingPKRTransferReceipt, TransactionStatus,
     TransactionStatusHistory,
 )
 from myapp.serializers.Transaction_serializers import (
@@ -198,6 +198,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         )
         .prefetch_related(
             "status_history__changed_by",
+            "outgoing_transfer__receipts",
             # Feeds IncomingPaymentSerializer._transfer. Pre-ordered by
             # -sent_at so the serializer can take element 0 in Python rather
             # than issuing its own ordered query per row — that per-row query,
@@ -207,6 +208,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 "covering_transfers",
                 queryset=OutgoingPKRTransfer.objects
                 .select_related("sent_by")
+                .prefetch_related("receipts")
                 .order_by("-sent_at"),
             ),
         )
@@ -1355,6 +1357,7 @@ class OutgoingTransferViewSet(
     queryset = (
         OutgoingPKRTransfer.objects
         .select_related("incoming_payment", "customer_bank_account__bank", "sent_by")
+        .prefetch_related("receipts")
         .all()
     )
     serializer_class = OutgoingTransferSerializer
@@ -1383,19 +1386,37 @@ class OutgoingTransferViewSet(
                 "Apply exchange rate and fee before recording the PKR transfer.",
             })
 
+        uploaded_files = []
+        if hasattr(request, "FILES"):
+            uploaded_files = (
+                request.FILES.getlist("receipts")
+                or request.FILES.getlist("receipts[]")
+                or request.FILES.getlist("receipt")
+            )
+        if len(uploaded_files) > 5:
+            raise ValidationError({
+                "receipts": "A maximum of 5 receipts can be uploaded per PKR transfer.",
+            })
+
         with dbtx.atomic():
             # Ensure payment hasn't been completed concurrently
             payment = IncomingPayment.objects.select_for_update().get(pk=payment.pk)
             if payment.status != TransactionStatus.VERIFIED:
                 raise ValidationError({"incoming_payment": f"Payment must be VERIFIED. Current status is {payment.status}."})
 
+            data_to_create = dict(s.validated_data)
+            if uploaded_files:
+                data_to_create["receipt"] = uploaded_files[0]
+
             before_status = payment.status
             ref = next_reference(OutgoingPKRTransfer, prefix="OUT")
             transfer = OutgoingPKRTransfer.objects.create(
                 reference=ref,
                 sent_by=request.user,
-                **s.validated_data,
+                **data_to_create,
             )
+            for f in uploaded_files:
+                OutgoingPKRTransferReceipt.objects.create(transfer=transfer, file=f)
 
             # Stop at PKR_SENT and wait for the customer to confirm receipt.
             # The customer portal shows an "I received my PKR" button; when
@@ -1451,10 +1472,13 @@ class OutgoingTransferViewSet(
         # payment_ids may arrive as a JSON list or as repeated form fields.
         data = request.data
         if hasattr(data, "getlist"):
-            ids = data.getlist("payment_ids") or data.getlist("payment_ids[]")
+            data = data.copy()
+            ids = request.data.getlist("payment_ids") or request.data.getlist("payment_ids[]")
             if ids:
-                data = data.copy()
                 data.setlist("payment_ids", ids)
+            receipt_files = request.FILES.getlist("receipts") or request.FILES.getlist("receipts[]")
+            if receipt_files:
+                data.setlist("receipts", receipt_files)
 
         s = OutgoingTransferBulkCreateSerializer(data=data)
         s.is_valid(raise_exception=True)
@@ -1508,6 +1532,19 @@ class OutgoingTransferViewSet(
                 f"All payments must be VERIFIED. Invalid: {', '.join(not_verified)}.",
             })
 
+        uploaded_files = []
+        if hasattr(request, "FILES"):
+            uploaded_files = (
+                request.FILES.getlist("receipts")
+                or request.FILES.getlist("receipts[]")
+                or request.FILES.getlist("receipt")
+            )
+        if len(uploaded_files) > 5:
+            raise ValidationError({
+                "receipts": "A maximum of 5 receipts can be uploaded per PKR transfer.",
+            })
+        primary_receipt = uploaded_files[0] if uploaded_files else vd.get("receipt")
+
         with dbtx.atomic():
             # Refresh all payments to ensure none were completed concurrently
             payment_ids = sorted(p.pk for p in payments)
@@ -1540,9 +1577,11 @@ class OutgoingTransferViewSet(
                 amount_pkr=vd["amount_pkr"],
                 bank_transaction_id=vd["bank_transaction_id"],
                 notes=vd.get("notes", "") or "",
-                receipt=vd.get("receipt"),
+                receipt=primary_receipt,
             )
             transfer.payments.set(payments)
+            for f in uploaded_files:
+                OutgoingPKRTransferReceipt.objects.create(transfer=transfer, file=f)
 
             for payment in payments:
                 before_status = payment.status

@@ -13,6 +13,7 @@ from myapp.Models.Banking_models import (
 from myapp.Models.Transaction_models import (
     IncomingPayment,
     OutgoingPKRTransfer,
+    OutgoingPKRTransferReceipt,
     TransactionStatusHistory,
 )
 from myapp.Models.Rate_models import ExchangeRate, ExchangeRateHistory
@@ -43,7 +44,7 @@ __all__ = [
     "CustomerProfile",
     "PakistaniBank", "ForeignBank",
     "CustomerBankAccount", "CustomerMerchantAccount",
-    "IncomingPayment", "OutgoingPKRTransfer", "TransactionStatusHistory",
+    "IncomingPayment", "OutgoingPKRTransfer", "OutgoingPKRTransferReceipt", "TransactionStatusHistory",
     "ExchangeRate", "ExchangeRateHistory",
     "CustomerFeeConfig",
     "Partner", "PartnerShare", "PartnerLedgerEntry",

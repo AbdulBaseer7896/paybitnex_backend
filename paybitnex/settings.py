@@ -442,7 +442,7 @@ STAFF_ALERT_EMAILS = config("STAFF_ALERT_EMAILS", default="")
 # non-Nginx deployments.
 SECURE_BROWSER_XSS_FILTER     = True
 SECURE_CONTENT_TYPE_NOSNIFF   = True   # prevents MIME-type sniffing
-X_FRAME_OPTIONS               = "DENY"  # stops clickjacking
+X_FRAME_OPTIONS               = "SAMEORIGIN"  # allows same-origin document/PDF embedding while preventing clickjacking
 
 # Only enable HSTS + cookie flags in production (DEBUG=False).
 # Enabling in dev would break plain-http localhost flows.

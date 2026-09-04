@@ -13,7 +13,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from myapp.Models.Transaction_models import (
-    IncomingPayment, OutgoingPKRTransfer, TransactionStatusHistory,
+    IncomingPayment, OutgoingPKRTransfer, OutgoingPKRTransferReceipt, TransactionStatusHistory,
 )
 from myapp.Models.Core_models import PaymentMethod
 
@@ -182,6 +182,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
 
     has_pkr_transfer = serializers.SerializerMethodField()
     transfer_receipt = serializers.SerializerMethodField()
+    transfer_receipts = serializers.SerializerMethodField()
     transfer_notes = serializers.SerializerMethodField()
     transfer_bank_transaction_id = serializers.SerializerMethodField()
     transfer_amount_pkr = serializers.SerializerMethodField()
@@ -239,14 +240,44 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
 
     def get_transfer_receipt(self, obj):
         t = self._transfer(obj)
-        if not t or not t.receipt:
+        if not t:
+            return None
+        request = self.context.get("request")
+        try:
+            receipts_list = list(t.receipts.all())
+            if receipts_list and receipts_list[0].file:
+                return request.build_absolute_uri(receipts_list[0].file.url) if request else receipts_list[0].file.url
+        except Exception:
+            pass
+        if not t.receipt:
             return None
         # Return absolute URL if we have a request context, else the path
-        request = self.context.get("request")
         try:
             return request.build_absolute_uri(t.receipt.url) if request else t.receipt.url
         except Exception:
             return None
+
+    def get_transfer_receipts(self, obj):
+        t = self._transfer(obj)
+        if not t:
+            return []
+        request = self.context.get("request")
+        urls = []
+        try:
+            for r in t.receipts.all():
+                if r.file:
+                    try:
+                        urls.append(request.build_absolute_uri(r.file.url) if request else r.file.url)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        if not urls and t.receipt:
+            try:
+                urls.append(request.build_absolute_uri(t.receipt.url) if request else t.receipt.url)
+            except Exception:
+                pass
+        return urls
 
     def get_transfer_notes(self, obj):
         t = self._transfer(obj)
@@ -299,7 +330,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "created_at", "updated_at", "completed_at",
             "status_history",
             "has_pkr_transfer",
-            "transfer_receipt", "transfer_notes", "transfer_bank_transaction_id",
+            "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
             "transfer_amount_pkr", "transfer_recorded_at", "transfer_recorded_by_email",
         ]
         read_only_fields = [
@@ -315,7 +346,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "customer_confirmed_at", "is_stale", "stale_at", "auto_confirmed",
             "force_completed_by_email", "force_completed_at",
             "has_pkr_transfer",
-            "transfer_receipt", "transfer_notes", "transfer_bank_transaction_id",
+            "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
             "transfer_amount_pkr", "transfer_recorded_at", "transfer_recorded_by_email",
             "occurred_on",
             "created_at", "updated_at", "verified_at", "completed_at",
@@ -387,6 +418,28 @@ class AccountantApplySerializer(serializers.Serializer):
         return attrs
 
 
+class OutgoingTransferReceiptSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+    filename = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OutgoingPKRTransferReceipt
+        fields = ["id", "url", "filename", "uploaded_at"]
+
+    def get_url(self, obj):
+        request = self.context.get("request")
+        if not obj.file:
+            return None
+        try:
+            return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+        except Exception:
+            return None
+
+    def get_filename(self, obj):
+        import os
+        return os.path.basename(obj.file.name) if obj.file else None
+
+
 class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = OutgoingPKRTransfer
@@ -400,6 +453,7 @@ class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
 class OutgoingTransferSerializer(serializers.ModelSerializer):
     sent_by_email = serializers.CharField(source="sent_by.email", read_only=True)
     payment_ids = serializers.SerializerMethodField()
+    receipts = OutgoingTransferReceiptSerializer(many=True, read_only=True)
 
     def get_payment_ids(self, obj):
         # All payments this transfer covers: the legacy single FK (if any)
@@ -417,11 +471,11 @@ class OutgoingTransferSerializer(serializers.ModelSerializer):
             "id", "reference",
             "incoming_payment", "payment_ids", "customer_bank_account",
             "amount_pkr", "bank_transaction_id",
-            "receipt", "notes",
+            "receipt", "receipts", "notes",
             "sent_by", "sent_by_email", "sent_at",
         ]
         read_only_fields = [
-            "id", "reference", "payment_ids",
+            "id", "reference", "payment_ids", "receipts",
             "sent_by", "sent_by_email", "sent_at",
         ]
 
@@ -443,7 +497,10 @@ class OutgoingTransferBulkCreateSerializer(serializers.Serializer):
     customer_bank_account = serializers.UUIDField()
     amount_pkr = serializers.DecimalField(max_digits=18, decimal_places=2)
     bank_transaction_id = serializers.CharField(max_length=100)
-    receipt = serializers.ImageField(required=False, allow_null=True)
+    receipt = serializers.FileField(required=False, allow_null=True)
+    receipts = serializers.ListField(
+        child=serializers.FileField(), required=False, allow_empty=True
+    )
     notes = serializers.CharField(required=False, allow_blank=True)
 
     def validate_customer_bank_account(self, value):
@@ -452,6 +509,11 @@ class OutgoingTransferBulkCreateSerializer(serializers.Serializer):
             return CustomerBankAccount.objects.get(pk=value)
         except CustomerBankAccount.DoesNotExist:
             raise serializers.ValidationError("Unknown bank account.")
+
+    def validate_receipts(self, value):
+        if value and len(value) > 5:
+            raise serializers.ValidationError("A maximum of 5 receipts can be uploaded.")
+        return value
 
 
 class StatusUpdateSerializer(serializers.Serializer):
