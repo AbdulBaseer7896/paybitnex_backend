@@ -324,7 +324,18 @@ class OutgoingPKRTransfer(models.Model):
         related_name="pkr_transfers",
     )
 
-    amount_pkr = models.DecimalField(max_digits=18, decimal_places=2)
+    amount_pkr = models.DecimalField(
+        max_digits=18, decimal_places=2,
+        help_text="Final PKR amount sent to the customer after deductions",
+    )
+    original_amount_pkr = models.DecimalField(
+        max_digits=18, decimal_places=2, null=True, blank=True,
+        help_text="Original PKR equivalent amount before deductions",
+    )
+    deduction_pkr = models.DecimalField(
+        max_digits=18, decimal_places=2, default=Decimal("0.00"),
+        help_text="Deductions applied in PKR (e.g. customer owes money)",
+    )
     bank_transaction_id = models.CharField(
         max_length=100, help_text="Reference from our bank",
     )
@@ -335,6 +346,10 @@ class OutgoingPKRTransfer(models.Model):
         "myapp.User", on_delete=models.PROTECT, related_name="sent_transfers",
     )
     sent_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    transfer_date = models.DateField(
+        null=True, blank=True, db_index=True,
+        help_text="Date the PKR were transferred to the customer bank account from ours",
+    )
 
     class Meta:
         db_table = "outgoing_pkr_transfers"

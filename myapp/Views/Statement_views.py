@@ -86,7 +86,8 @@ import io
 from datetime import date as _date
 from decimal import Decimal
 
-from django.db.models import Q
+from django.db.models import DateField, Q
+from django.db.models.functions import Coalesce, TruncDate
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -528,11 +529,13 @@ def _pkr_payout_entries(f):
     qs = OutgoingPKRTransfer.objects.select_related(
         "customer_bank_account", "customer_bank_account__bank",
         "customer_bank_account__customer",
+    ).annotate(
+        effective_date=Coalesce("transfer_date", TruncDate("sent_at"), output_field=DateField()),
     )
     if f["date_from"]:
-        qs = qs.filter(sent_at__date__gte=f["date_from"])
+        qs = qs.filter(effective_date__gte=f["date_from"])
     if f["date_to"]:
-        qs = qs.filter(sent_at__date__lte=f["date_to"])
+        qs = qs.filter(effective_date__lte=f["date_to"])
     if f["q"]:
         qs = qs.filter(
             Q(reference__icontains=f["q"])
@@ -549,9 +552,10 @@ def _pkr_payout_entries(f):
             bank_name = cba.bank.name if cba and cba.bank_id else ""
         except Exception:
             bank_name = ""
+        entry_date = (t.transfer_date or t.sent_at.date()).isoformat()
         out.append({
             "id": f"pkr:{t.id}",
-            "date": t.sent_at.date().isoformat(),
+            "date": entry_date,
             "datetime": t.sent_at.isoformat(),
             "direction": "out",
             "type": TYPE_PKR_PAYOUT,

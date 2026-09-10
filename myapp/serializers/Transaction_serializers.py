@@ -186,6 +186,9 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
     transfer_notes = serializers.SerializerMethodField()
     transfer_bank_transaction_id = serializers.SerializerMethodField()
     transfer_amount_pkr = serializers.SerializerMethodField()
+    transfer_original_amount_pkr = serializers.SerializerMethodField()
+    transfer_deduction_pkr = serializers.SerializerMethodField()
+    transfer_date = serializers.SerializerMethodField()
     transfer_recorded_at = serializers.SerializerMethodField()
     transfer_recorded_by_email = serializers.SerializerMethodField()
 
@@ -291,6 +294,20 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
         t = self._transfer(obj)
         return str(t.amount_pkr) if t else None
 
+    def get_transfer_original_amount_pkr(self, obj):
+        t = self._transfer(obj)
+        if not t:
+            return None
+        val = t.original_amount_pkr or t.amount_pkr
+        return str(val) if val is not None else None
+
+    def get_transfer_deduction_pkr(self, obj):
+        t = self._transfer(obj)
+        if not t:
+            return None
+        val = t.deduction_pkr if t.deduction_pkr is not None else Decimal("0.00")
+        return str(val)
+
     def get_transfer_recorded_at(self, obj):
         t = self._transfer(obj)
         return t.sent_at.isoformat() if t and t.sent_at else None
@@ -298,6 +315,13 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
     def get_transfer_recorded_by_email(self, obj):
         t = self._transfer(obj)
         return getattr(t.sent_by, "email", None) if t and t.sent_by else None
+
+    def get_transfer_date(self, obj):
+        t = self._transfer(obj)
+        if not t:
+            return None
+        d = t.transfer_date or (t.sent_at.date() if t.sent_at else None)
+        return d.isoformat() if d else None
 
     class Meta:
         model = IncomingPayment
@@ -331,7 +355,8 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "status_history",
             "has_pkr_transfer",
             "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
-            "transfer_amount_pkr", "transfer_recorded_at", "transfer_recorded_by_email",
+            "transfer_amount_pkr", "transfer_original_amount_pkr", "transfer_deduction_pkr",
+            "transfer_date", "transfer_recorded_at", "transfer_recorded_by_email",
         ]
         read_only_fields = [
             "id", "reference", "customer",
@@ -347,7 +372,8 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "force_completed_by_email", "force_completed_at",
             "has_pkr_transfer",
             "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
-            "transfer_amount_pkr", "transfer_recorded_at", "transfer_recorded_by_email",
+            "transfer_amount_pkr", "transfer_original_amount_pkr", "transfer_deduction_pkr",
+            "transfer_date", "transfer_recorded_at", "transfer_recorded_by_email",
             "occurred_on",
             "created_at", "updated_at", "verified_at", "completed_at",
         ]
@@ -441,11 +467,20 @@ class OutgoingTransferReceiptSerializer(serializers.ModelSerializer):
 
 
 class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
+    transfer_date = serializers.DateField(required=True)
+    original_amount_pkr = serializers.DecimalField(
+        max_digits=18, decimal_places=2, required=False, allow_null=True,
+    )
+    deduction_pkr = serializers.DecimalField(
+        max_digits=18, decimal_places=2, required=False, default=Decimal("0.00"),
+    )
+
     class Meta:
         model = OutgoingPKRTransfer
         fields = [
             "incoming_payment", "customer_bank_account",
-            "amount_pkr", "bank_transaction_id",
+            "amount_pkr", "original_amount_pkr", "deduction_pkr",
+            "bank_transaction_id", "transfer_date",
             "receipt", "notes",
         ]
 
@@ -470,7 +505,8 @@ class OutgoingTransferSerializer(serializers.ModelSerializer):
         fields = [
             "id", "reference",
             "incoming_payment", "payment_ids", "customer_bank_account",
-            "amount_pkr", "bank_transaction_id",
+            "amount_pkr", "original_amount_pkr", "deduction_pkr",
+            "bank_transaction_id", "transfer_date",
             "receipt", "receipts", "notes",
             "sent_by", "sent_by_email", "sent_at",
         ]
@@ -496,7 +532,14 @@ class OutgoingTransferBulkCreateSerializer(serializers.Serializer):
     # (which would assert at class-definition before any __init__ runs).
     customer_bank_account = serializers.UUIDField()
     amount_pkr = serializers.DecimalField(max_digits=18, decimal_places=2)
+    original_amount_pkr = serializers.DecimalField(
+        max_digits=18, decimal_places=2, required=False, allow_null=True,
+    )
+    deduction_pkr = serializers.DecimalField(
+        max_digits=18, decimal_places=2, required=False, default=Decimal("0.00"),
+    )
     bank_transaction_id = serializers.CharField(max_length=100)
+    transfer_date = serializers.DateField(required=True)
     receipt = serializers.FileField(required=False, allow_null=True)
     receipts = serializers.ListField(
         child=serializers.FileField(), required=False, allow_empty=True

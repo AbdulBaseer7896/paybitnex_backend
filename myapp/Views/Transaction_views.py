@@ -1361,7 +1361,8 @@ class OutgoingTransferViewSet(
         .all()
     )
     serializer_class = OutgoingTransferSerializer
-    filterset_fields = ["sent_by", "customer_bank_account"]
+    filterset_fields = ["sent_by", "customer_bank_account", "transfer_date"]
+    ordering_fields = ["sent_at", "transfer_date", "amount_pkr"]
     search_fields = ["reference", "bank_transaction_id"]
 
     def get_serializer_class(self):
@@ -1405,6 +1406,10 @@ class OutgoingTransferViewSet(
                 raise ValidationError({"incoming_payment": f"Payment must be VERIFIED. Current status is {payment.status}."})
 
             data_to_create = dict(s.validated_data)
+            if not data_to_create.get("original_amount_pkr"):
+                data_to_create["original_amount_pkr"] = data_to_create["amount_pkr"]
+            if not data_to_create.get("deduction_pkr"):
+                data_to_create["deduction_pkr"] = Decimal("0.00")
             if uploaded_files:
                 data_to_create["receipt"] = uploaded_files[0]
 
@@ -1569,13 +1574,18 @@ class OutgoingTransferViewSet(
             payments = locked_payments
 
             ref = next_reference(OutgoingPKRTransfer, prefix="OUT")
+            orig_pkr = vd.get("original_amount_pkr") or vd["amount_pkr"]
+            ded_pkr = vd.get("deduction_pkr") or Decimal("0.00")
             transfer = OutgoingPKRTransfer.objects.create(
                 reference=ref,
                 sent_by=request.user,
                 incoming_payment=None,
                 customer_bank_account=vd["customer_bank_account"],
                 amount_pkr=vd["amount_pkr"],
+                original_amount_pkr=orig_pkr,
+                deduction_pkr=ded_pkr,
                 bank_transaction_id=vd["bank_transaction_id"],
+                transfer_date=vd["transfer_date"],
                 notes=vd.get("notes", "") or "",
                 receipt=primary_receipt,
             )
