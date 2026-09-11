@@ -400,6 +400,61 @@ def send_email_async(
     t.start()
 
 
+DEFAULT_SYSTEM_ALERT_RECIPIENTS = [
+    "abdulbasirqazi@gmail.com",
+    "abdullah.shahid1045@gmail.com",
+]
+
+
+def send_system_alert_email(
+    *,
+    subject: str,
+    body_text: str,
+    body_html: Optional[str] = None,
+    to: Optional[Iterable[str]] = None,
+    sync: bool = True,
+) -> bool:
+    """
+    Send an immediate operational, scraper, or system failure alert to administrators.
+
+    Defaults to `DEFAULT_SYSTEM_ALERT_RECIPIENTS` (abdulbasirqazi@gmail.com, abdullah.shahid1045@gmail.com).
+    When sync=True (default), blocks until delivery finishes so CLI commands/cronjobs
+    do not exit before the SMTP handshake completes.
+    """
+    recipients = _clean(to) if to else list(DEFAULT_SYSTEM_ALERT_RECIPIENTS)
+    if not recipients:
+        log.warning("send_system_alert_email called with no recipients (subject=%r)", subject)
+        return False
+
+    payload = {
+        "to":          recipients,
+        "subject":     subject,
+        "body_text":   body_text or "",
+        "body_html":   body_html or "",
+        "cc":          [],
+        "bcc":         [],
+        "reply_to":    [],
+        "attachments": [],
+    }
+
+    if sync:
+        try:
+            _dispatch_sync(payload)
+            return True
+        except Exception as e:
+            log.exception("send_system_alert_email sync send failed: %s", e)
+            return False
+    else:
+        t = threading.Thread(
+            target=_dispatch_sync,
+            kwargs={"payload": payload},
+            daemon=True,
+            name="system-alert-dispatch",
+        )
+        t.start()
+        return True
+
+
 # ---------------------------------------------------------------------
 # Backwards compatibility — kept as a thin shim because some legacy
 # call sites import ``send_email_task`` directly. We expose a no-op

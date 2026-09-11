@@ -26,6 +26,7 @@ from myapp.Services.ubl_reconciliation import (
     get_latest_statement_file,
 )
 from myapp.Services.UBL_scrapper import scrape_ubl_statement
+from myapp.Utils.email_tasks import send_system_alert_email
 
 
 class Command(BaseCommand):
@@ -120,6 +121,134 @@ class Command(BaseCommand):
             help="Re-verify all transfers in the window, including already verified ones. By default, already verified transfers are protected and skipped.",
         )
 
+    def _send_failure_alert(self, exc, stage="Execution", start_date=None, end_date=None):
+        import traceback
+        import datetime
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        pkt_tz = datetime.timezone(datetime.timedelta(hours=5))
+        now_pkt = now_utc.astimezone(pkt_tz)
+
+        err_msg = str(exc).strip() or type(exc).__name__
+        tb_str = traceback.format_exc()
+
+        is_quota = any(
+            phrase in (err_msg + " " + tb_str).lower()
+            for phrase in [
+                "traffic limit",
+                "quota",
+                "407",
+                "proxy authentication",
+                "proxy gateway error",
+                "restricted target",
+                "err_tunnel_connection_failed",
+            ]
+        )
+
+        if is_quota:
+            subject = "[URGENT] UBL Scraper Failed: Decodo Proxy Quota Exceeded"
+            action_notice = (
+                "ACTION REQUIRED: Decodo residential proxy data plan traffic limit has been reached "
+                "or proxy authentication was rejected (407). Please top up / recharge data on gate.decodo.com."
+            )
+        else:
+            subject = f"[ALERT] UBL Payment Verification Failed ({stage}): {type(exc).__name__}"
+            action_notice = (
+                "ACTION REQUIRED: The automated UBL reconciliation job encountered an error during execution. "
+                "Please inspect the server logs at /root/paybitnex_backend/Bank_statments/cron_ubl.log."
+            )
+
+        body_text = f"""=======================================================
+   UBL PAYMENT VERIFICATION - FAILURE ALERT
+=======================================================
+
+Stage:       {stage}
+Status:      FAILED
+Time (PKT):  {now_pkt.strftime('%Y-%m-%d %I:%M:%S %p')}
+Time (UTC):  {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}
+Date Range:  {start_date or 'N/A'} to {end_date or 'N/A'}
+Server:      PayBitnex VPS (root@PayBitnex)
+
+{action_notice}
+
+-------------------------------------------------------
+ERROR SUMMARY:
+-------------------------------------------------------
+{err_msg}
+
+-------------------------------------------------------
+FULL TRACEBACK:
+-------------------------------------------------------
+{tb_str}
+"""
+
+        header_bg = "#991b1b" if is_quota else "#1e293b"
+        header_title = "⚠️ Decodo Proxy Quota Exceeded" if is_quota else "⚠️ UBL Transfer Verification Failed"
+        alert_bg = "#fef2f2" if is_quota else "#fffbeb"
+        alert_border = "#dc2626" if is_quota else "#f59e0b"
+        alert_color = "#991b1b" if is_quota else "#92400e"
+
+        body_html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f1f5f9; margin: 0; padding: 24px; color: #0f172a; }}
+    .card {{ background: #ffffff; border-radius: 8px; max-width: 680px; margin: 0 auto; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
+    .header {{ background: {header_bg}; color: #ffffff; padding: 20px 24px; }}
+    .header h2 {{ margin: 0; font-size: 20px; font-weight: 700; }}
+    .header p {{ margin: 4px 0 0; font-size: 13px; opacity: 0.9; }}
+    .content {{ padding: 24px; }}
+    .alert-box {{ background: {alert_bg}; border-left: 4px solid {alert_border}; padding: 14px 16px; margin-bottom: 20px; border-radius: 0 6px 6px 0; font-size: 14px; line-height: 1.5; color: {alert_color}; }}
+    .meta-table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }}
+    .meta-table td {{ padding: 8px 10px; border-bottom: 1px solid #f1f5f9; }}
+    .meta-table td.label {{ font-weight: 600; color: #64748b; width: 130px; }}
+    .error-code {{ background: #0f172a; color: #f87171; padding: 14px; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 280px; overflow-y: auto; }}
+    .footer {{ background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 14px 24px; font-size: 12px; color: #64748b; text-align: center; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h2>{header_title}</h2>
+      <p>Automated Portal Scraper &amp; Reconciliation Engine</p>
+    </div>
+    <div class="content">
+      <div class="alert-box">
+        <strong>{action_notice}</strong>
+      </div>
+      <table class="meta-table">
+        <tr><td class="label">Stage:</td><td><strong>{stage}</strong></td></tr>
+        <tr><td class="label">Time (PKT):</td><td>{now_pkt.strftime('%Y-%m-%d %I:%M:%S %p')}</td></tr>
+        <tr><td class="label">Time (UTC):</td><td>{now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</td></tr>
+        <tr><td class="label">Date Range:</td><td>{start_date or 'N/A'} to {end_date or 'N/A'}</td></tr>
+        <tr><td class="label">Server:</td><td>PayBitnex VPS (root@PayBitnex)</td></tr>
+      </table>
+      <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #334155;">Error Output:</div>
+      <div class="error-code">{err_msg}
+
+{tb_str}</div>
+    </div>
+    <div class="footer">
+      PayBitnex Automated Bank Reconciliation System &bull; Recipients: abdulbasirqazi@gmail.com, abdullah.shahid1045@gmail.com
+    </div>
+  </div>
+</body>
+</html>"""
+
+        self.stdout.write(self.style.WARNING(f"\n[ALERT] Sending failure notification email to admin recipients..."))
+        ok = send_system_alert_email(
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            to=["abdulbasirqazi@gmail.com", "abdullah.shahid1045@gmail.com"],
+            sync=True,
+        )
+        if ok:
+            self.stdout.write(self.style.SUCCESS("[ALERT] Failure alert email sent successfully."))
+        else:
+            self.stderr.write(self.style.ERROR("[ALERT] Failed to dispatch alert email."))
+
     def handle(self, *args, **options):
         dry_run = not options["commit"]
         is_undo = options["undo"]
@@ -207,9 +336,9 @@ class Command(BaseCommand):
                     statement_file = str(downloaded_temp_path)
                     self.stdout.write(self.style.SUCCESS(f">>> Scraper completed successfully: {downloaded_temp_path.name}\n"))
                 except Exception as e:
-                    self.stderr.write(self.style.ERROR(f"Scraper error: {e}"))
-                    self.stdout.write(self.style.WARNING("Falling back to latest local statement in Bank_statments..."))
-                    statement_file = None
+                    self.stderr.write(self.style.ERROR(f"\n[FATAL] UBL scraper execution failed: {e}"))
+                    self._send_failure_alert(e, stage="UBL Portal Scraping", start_date=start_date, end_date=end_date)
+                    return
 
         try:
             res = reconcile_ubl_transfers(
@@ -222,7 +351,8 @@ class Command(BaseCommand):
                 only_unverified=not options["reverify_all"],
             )
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f"\nError: {e}"))
+            self.stderr.write(self.style.ERROR(f"\n[FATAL] UBL reconciliation failed: {e}"))
+            self._send_failure_alert(e, stage="Bank Reconciliation", start_date=start_date, end_date=end_date)
             return
 
         if is_undo:

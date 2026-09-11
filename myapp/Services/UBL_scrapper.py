@@ -87,6 +87,7 @@ class LocalProxyTunnel:
         self.server.bind(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         self.server.listen(200)
+        self.last_proxy_error = None
 
         self.running = True
         self.thread = threading.Thread(target=self._accept_loop, daemon=True)
@@ -166,7 +167,9 @@ class LocalProxyTunnel:
                     if m:
                         target_str = str(first_line).lower()
                         if not any(bg in target_str for bg in ("googleapis.com", "google.com", "gstatic.com", "gvt1.com")):
-                            print(f"\n[PROXY ERROR] Upstream gateway rejected connection ({status_code}): {m.group(1).strip()}\n")
+                            proxy_msg = m.group(1).strip()
+                            self.last_proxy_error = f"{status_code}: {proxy_msg}"
+                            print(f"\n[PROXY ERROR] Upstream gateway rejected connection ({status_code}): {proxy_msg}\n")
                     client.sendall(upstream_resp)
                     return
 
@@ -983,6 +986,8 @@ def scrape_ubl_statement(
             log(f"[DEBUG] Saved failure screenshot to: {err_shot}")
         except Exception:
             pass
+        if proxy_tunnel and getattr(proxy_tunnel, "last_proxy_error", None):
+            raise RuntimeError(f"Proxy Gateway Error ({proxy_tunnel.last_proxy_error}) during scraping: {exc}") from exc
         raise exc
 
     finally:
