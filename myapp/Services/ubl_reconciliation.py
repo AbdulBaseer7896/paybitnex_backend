@@ -17,6 +17,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Any, Optional, Tuple
+from pathlib import Path
 
 from django.db import transaction
 from django.utils import timezone
@@ -24,7 +25,7 @@ from django.conf import settings
 
 log = logging.getLogger(__name__)
 
-DEFAULT_UBL_STATEMENTS_DIR = r"C:\Users\Abdullah Shahid\Downloads\UBL_scrapper\Bank_statments"
+DEFAULT_UBL_STATEMENTS_DIR = str(getattr(settings, "UBL_STATEMENTS_DIR", None) or (Path(__file__).resolve().parent.parent.parent / "Bank_statments"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

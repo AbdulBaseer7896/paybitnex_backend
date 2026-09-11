@@ -17,6 +17,9 @@ import time
 import re
 import imaplib
 import email
+import socket
+import threading
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Set, Dict, Any
@@ -49,134 +52,199 @@ OTP_PATTERNS = [
 DEFAULT_DOWNLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "Bank_statments"
 
 # Proxy configuration (e.g. Decodo Pakistan residential proxy)
-DEFAULT_PROXY = "gate.decodo.com:10001:user-spduoaryo1-sessionduration-360-asn-136969:5gsB8b3LSlx~4sysRp"
-PROXY_STRING = os.environ.get("UBL_PROXY", DEFAULT_PROXY)
+DEFAULT_PROXY = os.environ.get(
+    "UBL_PROXY",
+    "gate.decodo.com:10001:user-spduoaryo1-country-PK:5gsB8b3LSlx~4sysRp"
+)
+PROXY_STRING = DEFAULT_PROXY
 
 
-def create_proxy_auth_extension(proxy_str: str) -> Optional[Dict[str, Any]]:
-    """Creates a temporary Chrome extension (unpacked directory + zip) for authenticated HTTP proxy.
-    Resolves proxy domain (e.g. gate.decodo.com) to direct IP with fallback to eliminate host DNS errors.
-    Returns dict with zip_path, dir_path, resolved_host, port, original_host or None if disabled.
+class LocalProxyTunnel:
+    """Lightweight in-process HTTP/HTTPS proxy tunnel forwarder that injects
+    Proxy-Authorization headers for authenticated upstream proxies (like Decodo).
+
+    Properly handles both:
+    - HTTP requests: injects Proxy-Authorization header directly
+    - HTTPS CONNECT tunnels: reads the upstream 200 response before piping data
+      so Chrome can complete the SSL handshake correctly without any auth prompts.
     """
-    if not proxy_str or proxy_str.strip().lower() in ("none", "false", "0", "off", ""):
+    def __init__(self, upstream_host: str, upstream_port: int, user: str, password: str):
+        self.upstream_host = upstream_host
+        self.upstream_port = int(upstream_port)
+        auth_bytes = f"{user}:{password}".encode("utf-8")
+        self.auth_b64 = base64.b64encode(auth_bytes).decode("ascii")
+
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind(("127.0.0.1", 0))
+        self.port = self.server.getsockname()[1]
+        self.server.listen(200)
+
+        self.running = True
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                client, _ = self.server.accept()
+                threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+            except Exception:
+                break
+
+    @staticmethod
+    def _recv_until_headers_end(sock: socket.socket, timeout: float = 15.0) -> bytes:
+        """Reads from sock until we see the end of HTTP headers (\\r\\n\\r\\n)."""
+        buf = b""
+        sock.settimeout(timeout)
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+
+    @staticmethod
+    def _pipe(src: socket.socket, dst: socket.socket):
+        """One-directional copy loop."""
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                dst.sendall(data)
+        except Exception:
+            pass
+
+    def _handle_client(self, client: socket.socket):
+        upstream = None
+        try:
+            # ── Read the full request headers from Chrome ──────────────
+            raw = self._recv_until_headers_end(client)
+            if not raw:
+                return
+
+            first_line_end = raw.find(b"\r\n")
+            first_line = raw[:first_line_end].decode("latin-1", errors="replace")
+            method = first_line.split(" ", 1)[0].upper()
+
+            # ── Connect to upstream proxy ──────────────────────────────
+            upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            upstream.settimeout(30)
+            target_host = self.upstream_host
+            try:
+                target_host = socket.gethostbyname(self.upstream_host)
+            except Exception:
+                if "decodo" in self.upstream_host.lower():
+                    target_host = "95.177.122.28"
+            upstream.connect((target_host, self.upstream_port))
+
+            if method == "CONNECT":
+                target = first_line.split(" ")[1]  # host:port
+                connect_req = (
+                    f"CONNECT {target} HTTP/1.1\r\n"
+                    f"Host: {target}\r\n"
+                    f"Proxy-Authorization: Basic {self.auth_b64}\r\n"
+                    f"Proxy-Connection: keep-alive\r\n"
+                    f"\r\n"
+                ).encode("latin-1")
+                upstream.sendall(connect_req)
+
+                upstream_resp = self._recv_until_headers_end(upstream, timeout=20)
+                if not upstream_resp:
+                    client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    return
+
+                status_line = upstream_resp.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+                status_code = status_line.split(" ")[1] if " " in status_line else "000"
+
+                if not status_code.startswith("2"):
+                    client.sendall(upstream_resp)
+                    return
+
+                client.sendall(upstream_resp if upstream_resp.endswith(b"\r\n\r\n")
+                               else upstream_resp + b"\r\n")
+
+                t1 = threading.Thread(target=self._pipe, args=(client, upstream), daemon=True)
+                t2 = threading.Thread(target=self._pipe, args=(upstream, client), daemon=True)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+
+            else:
+                header_end = raw.find(b"\r\n")
+                injected = raw[:header_end + 2]
+                injected += b"Proxy-Authorization: Basic " + self.auth_b64.encode("ascii") + b"\r\n"
+                injected += raw[header_end + 2:]
+                upstream.sendall(injected)
+
+                t1 = threading.Thread(target=self._pipe, args=(client, upstream), daemon=True)
+                t2 = threading.Thread(target=self._pipe, args=(upstream, client), daemon=True)
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+
+        except Exception:
+            pass
+        finally:
+            for s in (client, upstream):
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+    def stop(self):
+        self.running = False
+        try:
+            self.server.close()
+        except Exception:
+            pass
+
+
+def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, Any]]:
+    """Parses proxy string into host, port, user, pass dictionary."""
+    if not proxy_str or not proxy_str.strip():
         return None
 
-    proxy_str = proxy_str.strip()
-    host = ""
-    port = 80
-    user = ""
-    password = ""
+    clean = proxy_str.strip().replace("http://", "").replace("https://", "")
+    if "@" in clean:
+        auth_part, host_part = clean.split("@", 1)
+        user, pwd = auth_part.split(":", 1) if ":" in auth_part else (auth_part, "")
+        host, port = host_part.split(":", 1) if ":" in host_part else (host_part, "80")
+        return {"host": host, "port": int(port), "user": user, "pass": pwd}
 
-    if "@" in proxy_str or "://" in proxy_str:
-        from urllib.parse import urlparse
-        raw_url = proxy_str if "://" in proxy_str else f"http://{proxy_str}"
-        p = urlparse(raw_url)
-        host = p.hostname or ""
-        port = p.port or 80
-        user = p.username or ""
-        password = p.password or ""
-    else:
-        parts = proxy_str.split(":")
-        if len(parts) == 4:
-            host, port_s, user, password = parts[0], parts[1], parts[2], parts[3]
-            try:
-                port = int(port_s)
-            except ValueError:
-                port = 80
-        elif len(parts) == 2:
-            host, port_s = parts[0], parts[1]
-            try:
-                port = int(port_s)
-            except ValueError:
-                port = 80
-        else:
-            return None
+    parts = clean.split(":")
+    if len(parts) == 4:
+        return {"host": parts[0], "port": int(parts[1]), "user": parts[2], "pass": parts[3]}
+    elif len(parts) == 2:
+        return {"host": parts[0], "port": int(parts[1]), "user": None, "pass": None}
 
-    # Resolve proxy host to direct IP with fallback to eliminate ERR_NAME_NOT_RESOLVED on foreign servers
-    resolved_host = host
-    if host.lower() == "gate.decodo.com":
-        import socket
-        try:
-            resolved_host = socket.gethostbyname("gate.decodo.com")
-        except Exception:
-            # Direct Anycast IP fallback for Decodo gateway if server resolver fails
-            resolved_host = "95.177.122.28"
-    elif host:
-        import socket
-        try:
-            resolved_host = socket.gethostbyname(host)
-        except Exception:
-            resolved_host = host
+    return None
 
-    manifest = """{
-    "version": "1.0.0",
-    "manifest_version": 2,
-    "name": "Chrome Proxy Auth",
-    "permissions": [
-        "proxy",
-        "tabs",
-        "unlimitedStorage",
-        "storage",
-        "<all_urls>",
-        "webRequest",
-        "webRequestBlocking"
-    ],
-    "background": {
-        "scripts": ["background.js"]
-    }
-}"""
 
-    bg_script = f"""
-var config = {{
-    mode: "fixed_servers",
-    rules: {{
-        singleProxy: {{
-            scheme: "http",
-            host: "{resolved_host}",
-            port: parseInt({port})
-        }},
-        bypassList: ["localhost", "127.0.0.1"]
-    }}
-}};
-chrome.proxy.settings.set({{value: config, scope: "regular"}}, function() {{}});
-"""
-    if user and password:
-        safe_user = user.replace('\\', '\\\\').replace('"', '\\"')
-        safe_pass = password.replace('\\', '\\\\').replace('"', '\\"')
-        bg_script += f"""
-chrome.webRequest.onAuthRequired.addListener(
-    function(details) {{
-        return {{
-            authCredentials: {{
-                username: "{safe_user}",
-                password: "{safe_pass}"
-            }}
-        }};
-    }},
-    {{urls: ["<all_urls>"]}},
-    ['blocking']
-);
-"""
+def strip_proxy_session_pins(proxy_str: str) -> str:
+    """Remove Decodo session-pinning parameters (asn, sessionduration) and ensure Pakistan routing."""
+    import re as _re
+    if not proxy_str:
+        return proxy_str
+    info = parse_proxy_string(proxy_str)
+    if not info or not info.get("user"):
+        return proxy_str
 
-    import tempfile, zipfile
-    ext_dir = tempfile.mkdtemp(prefix="ubl_proxy_dir_")
-    with open(os.path.join(ext_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        f.write(manifest)
-    with open(os.path.join(ext_dir, "background.js"), "w", encoding="utf-8") as f:
-        f.write(bg_script)
+    clean_user = _re.sub(
+        r"-(sessionduration|session|asn)-[^-]+",
+        "",
+        info["user"],
+        flags=_re.IGNORECASE
+    ).rstrip("-")
 
-    zip_path = ext_dir + ".zip"
-    with zipfile.ZipFile(zip_path, "w") as zp:
-        zp.write(os.path.join(ext_dir, "manifest.json"), "manifest.json")
-        zp.write(os.path.join(ext_dir, "background.js"), "background.js")
+    if "country-" not in clean_user.lower():
+        clean_user += "-country-PK"
 
-    return {
-        "zip_path": zip_path,
-        "dir_path": ext_dir,
-        "resolved_host": resolved_host,
-        "port": port,
-        "original_host": host,
-    }
+    return f"{info['host']}:{info['port']}:{clean_user}:{info['pass']}"
 
 
 def normalize_date_for_ubl(d_str: str, default_val: str) -> str:
@@ -422,27 +490,25 @@ def scrape_ubl_statement(
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
 
-    proxy_info = None
+    proxy_tunnel = None
     target_proxy = proxy if proxy is not None else PROXY_STRING
-    if target_proxy:
-        proxy_info = create_proxy_auth_extension(target_proxy)
-        if proxy_info:
-            r_host = proxy_info["resolved_host"]
-            r_port = proxy_info["port"]
-            orig = proxy_info["original_host"]
-            log(f"[1.1] Routing through proxy: {r_host}:{r_port}" + (f" ({orig})" if orig != r_host else ""))
-            # 1. Directly bind Chrome network stack to proxy IP on launch (prevents local host DNS failures)
-            options.add_argument(f"--proxy-server=http://{r_host}:{r_port}")
-            # 2. Load extension both as unpacked folder and packed zip for cross-platform compatibility
-            options.add_argument(f"--load-extension={proxy_info['dir_path']}")
-            options.add_extension(proxy_info["zip_path"])
-            # 3. Prevent modern Chrome (130+, 150+) from disabling Manifest V2 proxy auth extensions
-            options.add_argument("--disable-features=ExtensionManifestV2Deprecation,ExtensionManifestV2Disabled")
-            options.add_argument("--ignore-certificate-errors")
-            options.add_argument("--allow-running-insecure-content")
+    if target_proxy and target_proxy.strip().lower() not in ("none", "false", "0", "off", ""):
+        cleaned_proxy = strip_proxy_session_pins(target_proxy)
+        proxy_info = parse_proxy_string(cleaned_proxy)
+        if proxy_info and proxy_info.get("user") and proxy_info.get("pass"):
+            log(f"[1.1] Starting local proxy tunnel to {proxy_info['host']}:{proxy_info['port']} (routing via Pakistan)...")
+            proxy_tunnel = LocalProxyTunnel(
+                upstream_host=proxy_info["host"],
+                upstream_port=proxy_info["port"],
+                user=proxy_info["user"],
+                password=proxy_info["pass"],
+            )
+            log(f"[1.1] Local proxy tunnel active on 127.0.0.1:{proxy_tunnel.port}")
+            options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+        elif proxy_info:
+            options.add_argument(f"--proxy-server=http://{proxy_info['host']}:{proxy_info['port']}")
 
-    if not proxy_info:
-        options.add_argument("--disable-extensions")
+    options.add_argument("--disable-extensions")
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -609,15 +675,11 @@ def scrape_ubl_statement(
             driver.quit()
         except Exception:
             pass
-        if proxy_info:
-            import shutil
-            if proxy_info.get("dir_path") and os.path.exists(proxy_info["dir_path"]):
-                shutil.rmtree(proxy_info["dir_path"], ignore_errors=True)
-            if proxy_info.get("zip_path") and os.path.exists(proxy_info["zip_path"]):
-                try:
-                    os.remove(proxy_info["zip_path"])
-                except Exception:
-                    pass
+        if proxy_tunnel:
+            try:
+                proxy_tunnel.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
