@@ -256,6 +256,46 @@ def get_reconciliation_window(
     return start_date, end_date
 
 
+def get_unverified_transfers_window(
+    reference_date: Optional[date] = None,
+    lag_days: int = 1,
+    current_month_only: bool = True,
+) -> Tuple[date, date, int]:
+    """Derives the date window for UBL reconciliation (mirroring MCB service).
+    
+    By default, automation runs month-to-month starting from the 1st of the
+    current month up to yesterday (accounting for lag_days, e.g. 01.09.2026 to 11.09.2026).
+    When the month rolls over, the window automatically resets to the 1st of the new month.
+    
+    Returns:
+        (start_date, end_date, unverified_count_in_window)
+    """
+    from myapp.Models.Transaction_models import OutgoingPKRTransfer
+    from django.db.models import Min, Max
+
+    ref = reference_date or timezone.localtime(timezone.now()).date()
+    end_date = ref - timedelta(days=lag_days)
+    
+    if current_month_only:
+        start_date = date(ref.year, ref.month, 1)
+        if start_date > end_date:
+            start_date = end_date
+    else:
+        agg = OutgoingPKRTransfer.objects.filter(
+            bank_verification_status="unverified"
+        ).aggregate(min_d=Min("transfer_date"), max_d=Max("transfer_date"))
+        min_d = agg.get("min_d")
+        start_date = min_d if min_d else date(ref.year, ref.month, 1)
+
+    count = OutgoingPKRTransfer.objects.filter(
+        bank_verification_status="unverified",
+        transfer_date__gte=start_date,
+        transfer_date__lte=end_date,
+    ).count()
+
+    return start_date, end_date, count
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Reconciliation Engine
 # ─────────────────────────────────────────────────────────────────────────────

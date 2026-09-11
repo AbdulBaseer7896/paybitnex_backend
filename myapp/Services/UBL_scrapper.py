@@ -164,7 +164,9 @@ class LocalProxyTunnel:
                     err_text = upstream_resp.decode("latin-1", errors="replace")
                     m = re.search(r"x-error-message:\s*(.+)", err_text, re.IGNORECASE)
                     if m:
-                        print(f"\n[PROXY ERROR] Upstream gateway rejected connection ({status_code}): {m.group(1).strip()}\n")
+                        target_str = str(first_line).lower()
+                        if not any(bg in target_str for bg in ("googleapis.com", "google.com", "gstatic.com", "gvt1.com")):
+                            print(f"\n[PROXY ERROR] Upstream gateway rejected connection ({status_code}): {m.group(1).strip()}\n")
                     client.sendall(upstream_resp)
                     return
 
@@ -527,6 +529,12 @@ def scrape_ubl_statement(
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-domain-reliability")
+    options.add_argument("--disable-sync")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--no-pings")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--allow-insecure-localhost")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")

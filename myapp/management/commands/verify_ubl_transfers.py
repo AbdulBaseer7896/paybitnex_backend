@@ -22,6 +22,7 @@ from django.core.management.base import BaseCommand
 from myapp.Services.ubl_reconciliation import (
     reconcile_ubl_transfers,
     get_reconciliation_window,
+    get_unverified_transfers_window,
     get_latest_statement_file,
 )
 from myapp.Services.UBL_scrapper import scrape_ubl_statement
@@ -75,8 +76,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--days",
             type=int,
-            default=3,
-            help="Number of days in sliding window (default: 3).",
+            default=None,
+            help="Number of days in sliding window (e.g. 3). If omitted, defaults to month-to-date up to yesterday.",
         )
         parser.add_argument(
             "--lag",
@@ -161,10 +162,16 @@ class Command(BaseCommand):
             end_date = today
 
         if not start_date or not end_date:
-            calc_start, calc_end = get_reconciliation_window(
-                window_days=options["days"],
-                lag_days=options["lag"],
-            )
+            if options.get("days"):
+                calc_start, calc_end = get_reconciliation_window(
+                    window_days=options["days"],
+                    lag_days=options["lag"],
+                )
+            else:
+                calc_start, calc_end, _ = get_unverified_transfers_window(
+                    lag_days=options["lag"],
+                    current_month_only=not options.get("all_month"),
+                )
             start_date = start_date or calc_start
             end_date = end_date or calc_end
 
