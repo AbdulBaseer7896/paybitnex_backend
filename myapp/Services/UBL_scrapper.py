@@ -19,7 +19,7 @@ import imaplib
 import email
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Dict, Any
 
 # ─────────────────────────────────────────────
 #  DEFAULT CREDENTIALS & PORTAL CONFIG
