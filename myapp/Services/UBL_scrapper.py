@@ -498,7 +498,13 @@ def scrape_ubl_statement(
     TO_DATE_LOCATOR          = (By.XPATH, "//div[@id='casaModalDatePicker']//*[normalize-space()='To']/following::input[1]")
     DONE_BTN_LOCATOR         = (By.XPATH, "//div[@id='casaModalDatePicker']//input[@value='Done'] | //div[@id='casaModalDatePicker']//button[normalize-space()='Done'] | //div[@id='casaModalDatePicker']//a[normalize-space()='Done']")
     PROCEED_LOCATOR          = (By.XPATH, "//input[@value='Proceed'] | //button[normalize-space()='Proceed'] | //a[normalize-space()='Proceed']")
-    EXPORT_DROPDOWN          = (By.XPATH, "//*[contains(@class,'ui-selectmenu-status') and normalize-space()='Please Select']/ancestor::a[1]")
+    EXPORT_DROPDOWN          = (
+        By.XPATH,
+        "//span[@id='exportSpan']/following::a[contains(@class,'ui-selectmenu')][1] | "
+        "//span[@id='exportSpan']/parent::*//a[contains(@class,'ui-selectmenu')] | "
+        "//*[contains(@class,'ui-selectmenu-status') and normalize-space()='Please Select']/ancestor::a[1] | "
+        "//*[@id='exportSpan']"
+    )
     CSV_OPTION               = (By.XPATH, "//ul[contains(@id,'menu')]//a[normalize-space()='CSV'] | //li//a[normalize-space()='CSV']")
     LOGOUT_DASHBOARD         = (By.XPATH, "//a[normalize-space()='Logout'] | //a[contains(.,'Logout')] | //*[@title='Logout']")
     LOGOUT_SECOND            = (By.ID, "logOut")
@@ -779,6 +785,7 @@ def scrape_ubl_statement(
                 time.sleep(1.5)
 
                 range_clicked = driver.execute_script("""
+                    // 1. First try menu item click if open
                     var menu = document.getElementById('movementsSelectCont-menu');
                     if (menu) {
                         var items = menu.querySelectorAll('a, li');
@@ -790,6 +797,17 @@ def scrape_ubl_statement(
                                 return true;
                             }
                         }
+                    }
+                    // 2. Direct select change on movementsSelectCont (exact option value is '?')
+                    var sel = document.getElementById('movementsSelectCont');
+                    if (sel) {
+                        sel.value = '?';
+                        sel.dispatchEvent(new Event('change', {bubbles: true}));
+                        if (window.$) {
+                            try { $(sel).val('?').change(); } catch(e){}
+                            try { $(sel).selectmenu('value', '?'); } catch(e){}
+                        }
+                        return true;
                     }
                     return false;
                 """)
@@ -852,30 +870,55 @@ def scrape_ubl_statement(
         time.sleep(5)
 
         log("[24] Opening Export dropdown...")
-        export_btn = wait.until(EC.presence_of_element_located(EXPORT_DROPDOWN))
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            ActionChains(driver).move_to_element(export_btn).click().perform()
+            export_btn = wait.until(EC.presence_of_element_located(EXPORT_DROPDOWN))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", export_btn)
+            driver.execute_script("""
+                var el = arguments[0];
+                if (el.id === 'exportSpan') {
+                    var p = el.parentElement;
+                    var btn = p ? p.querySelector('a.ui-selectmenu') : null;
+                    if (btn) el = btn;
+                }
+                el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                el.click();
+            """, export_btn)
         except Exception:
             driver.execute_script("""
-                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                arguments[0].click();
-            """, export_btn)
+                var sp = document.getElementById('exportSpan');
+                if (sp) {
+                    var btn = (sp.parentElement && sp.parentElement.querySelector('a.ui-selectmenu')) || sp;
+                    btn.click();
+                }
+            """)
         time.sleep(1.5)
 
         log("[25] Choosing CSV...")
         before_files = {f for f in target_dir.iterdir() if not f.name.endswith(".crdownload")}
-        csv_opt = wait.until(EC.presence_of_element_located(CSV_OPTION))
-        try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            ActionChains(driver).move_to_element(csv_opt).click().perform()
-        except Exception:
-            driver.execute_script("""
-                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                arguments[0].click();
-            """, csv_opt)
+        csv_clicked = driver.execute_script("""
+            var items = document.querySelectorAll('ul[id*="menu"] a, li a, [role="menuitem"]');
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].textContent.trim().toUpperCase() === 'CSV') {
+                    items[i].dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                    items[i].dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                    items[i].click();
+                    return true;
+                }
+            }
+            return false;
+        """)
+        if not csv_clicked:
+            csv_opt = wait.until(EC.presence_of_element_located(CSV_OPTION))
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(driver).move_to_element(csv_opt).click().perform()
+            except Exception:
+                driver.execute_script("""
+                    arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    arguments[0].click();
+                """, csv_opt)
         log("[25] CSV export triggered. Waiting for download...")
 
         downloaded = wait_for_new_download(target_dir, before_files, timeout=60)
