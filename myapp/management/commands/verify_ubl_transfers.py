@@ -155,7 +155,8 @@ class Command(BaseCommand):
                 return
 
         if options["all_month"] and not start_date:
-            today = date.today()
+            from django.utils import timezone
+            today = timezone.localtime(timezone.now()).date()
             start_date = date(today.year, today.month, 1)
             end_date = today
 

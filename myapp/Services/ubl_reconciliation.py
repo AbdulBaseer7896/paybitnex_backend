@@ -250,7 +250,7 @@ def get_reconciliation_window(
       - lag_days=1 -> end_date = Sept 10
       - window_days=3 -> start_date = Sept 8 (Sept 8, 9, 10)
     """
-    ref = reference_date or date.today()
+    ref = reference_date or timezone.localtime(timezone.now()).date()
     end_date = ref - timedelta(days=lag_days)
     start_date = end_date - timedelta(days=window_days - 1)
     return start_date, end_date
