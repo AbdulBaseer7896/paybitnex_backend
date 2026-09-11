@@ -751,19 +751,16 @@ def scrape_ubl_statement(
             except Exception:
                 pass
 
-            # If details pane is still spinning or unpopulated after 12s, check if an account row in snapshot can be clicked
-            elapsed = time.time() - start_dash
-            if elapsed > 12:
-                try:
-                    driver.execute_script("""
-                        var btn = document.getElementById('movementsSelectCont-button');
-                        if (!btn) {
-                            var acct = document.querySelector('.accountRow, .account-item, [id*="account"], #CurrentSavings, a[href*="Current"]');
-                            if (acct) acct.click();
-                        }
-                    """)
-                except Exception:
-                    pass
+            # If any interrupting modal or popup appears (e.g. Customize Your Account), auto-cancel it
+            try:
+                driver.execute_script("""
+                    var cancelBtn = document.querySelector('input[value="Cancel"], button[value="Cancel"], a.ui-dialog-titlebar-close, .dialog-close');
+                    if (cancelBtn) {
+                        cancelBtn.click();
+                    }
+                """)
+            except Exception:
+                pass
 
             time.sleep(2)
 
