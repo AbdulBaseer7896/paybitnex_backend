@@ -53,9 +53,10 @@ DEFAULT_PROXY = "gate.decodo.com:10001:user-spduoaryo1-sessionduration-360-asn-1
 PROXY_STRING = os.environ.get("UBL_PROXY", DEFAULT_PROXY)
 
 
-def create_proxy_auth_extension(proxy_str: str) -> Optional[str]:
-    """Creates a temporary Chrome extension .zip for authenticated HTTP proxy.
-    Returns path to the temporary zip file, or None if disabled.
+def create_proxy_auth_extension(proxy_str: str) -> Optional[Dict[str, Any]]:
+    """Creates a temporary Chrome extension (unpacked directory + zip) for authenticated HTTP proxy.
+    Resolves proxy domain (e.g. gate.decodo.com) to direct IP with fallback to eliminate host DNS errors.
+    Returns dict with zip_path, dir_path, resolved_host, port, original_host or None if disabled.
     """
     if not proxy_str or proxy_str.strip().lower() in ("none", "false", "0", "off", ""):
         return None
@@ -91,6 +92,22 @@ def create_proxy_auth_extension(proxy_str: str) -> Optional[str]:
         else:
             return None
 
+    # Resolve proxy host to direct IP with fallback to eliminate ERR_NAME_NOT_RESOLVED on foreign servers
+    resolved_host = host
+    if host.lower() == "gate.decodo.com":
+        import socket
+        try:
+            resolved_host = socket.gethostbyname("gate.decodo.com")
+        except Exception:
+            # Direct Anycast IP fallback for Decodo gateway if server resolver fails
+            resolved_host = "95.177.122.28"
+    elif host:
+        import socket
+        try:
+            resolved_host = socket.gethostbyname(host)
+        except Exception:
+            resolved_host = host
+
     manifest = """{
     "version": "1.0.0",
     "manifest_version": 2,
@@ -115,7 +132,7 @@ var config = {{
     rules: {{
         singleProxy: {{
             scheme: "http",
-            host: "{host}",
+            host: "{resolved_host}",
             port: parseInt({port})
         }},
         bypassList: ["localhost", "127.0.0.1"]
@@ -142,12 +159,24 @@ chrome.webRequest.onAuthRequired.addListener(
 """
 
     import tempfile, zipfile
-    fd, path = tempfile.mkstemp(suffix=".zip", prefix="ubl_proxy_")
-    os.close(fd)
-    with zipfile.ZipFile(path, "w") as zp:
-        zp.writestr("manifest.json", manifest)
-        zp.writestr("background.js", bg_script)
-    return path
+    ext_dir = tempfile.mkdtemp(prefix="ubl_proxy_dir_")
+    with open(os.path.join(ext_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        f.write(manifest)
+    with open(os.path.join(ext_dir, "background.js"), "w", encoding="utf-8") as f:
+        f.write(bg_script)
+
+    zip_path = ext_dir + ".zip"
+    with zipfile.ZipFile(zip_path, "w") as zp:
+        zp.write(os.path.join(ext_dir, "manifest.json"), "manifest.json")
+        zp.write(os.path.join(ext_dir, "background.js"), "background.js")
+
+    return {
+        "zip_path": zip_path,
+        "dir_path": ext_dir,
+        "resolved_host": resolved_host,
+        "port": port,
+        "original_host": host,
+    }
 
 
 def normalize_date_for_ubl(d_str: str, default_val: str) -> str:
@@ -393,17 +422,26 @@ def scrape_ubl_statement(
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
 
-    proxy_ext_path = None
+    proxy_info = None
     target_proxy = proxy if proxy is not None else PROXY_STRING
     if target_proxy:
-        proxy_ext_path = create_proxy_auth_extension(target_proxy)
-        if proxy_ext_path:
-            p_parts = target_proxy.split(":")
-            host_label = f"{p_parts[0]}:{p_parts[1]}" if len(p_parts) >= 2 else "configured proxy"
-            log(f"[1.1] Routing through proxy: {host_label}")
-            options.add_extension(proxy_ext_path)
+        proxy_info = create_proxy_auth_extension(target_proxy)
+        if proxy_info:
+            r_host = proxy_info["resolved_host"]
+            r_port = proxy_info["port"]
+            orig = proxy_info["original_host"]
+            log(f"[1.1] Routing through proxy: {r_host}:{r_port}" + (f" ({orig})" if orig != r_host else ""))
+            # 1. Directly bind Chrome network stack to proxy IP on launch (prevents local host DNS failures)
+            options.add_argument(f"--proxy-server=http://{r_host}:{r_port}")
+            # 2. Load extension both as unpacked folder and packed zip for cross-platform compatibility
+            options.add_argument(f"--load-extension={proxy_info['dir_path']}")
+            options.add_extension(proxy_info["zip_path"])
+            # 3. Prevent modern Chrome (130+, 150+) from disabling Manifest V2 proxy auth extensions
+            options.add_argument("--disable-features=ExtensionManifestV2Deprecation,ExtensionManifestV2Disabled")
+            options.add_argument("--ignore-certificate-errors")
+            options.add_argument("--allow-running-insecure-content")
 
-    if not proxy_ext_path:
+    if not proxy_info:
         options.add_argument("--disable-extensions")
 
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -571,11 +609,15 @@ def scrape_ubl_statement(
             driver.quit()
         except Exception:
             pass
-        if proxy_ext_path and os.path.exists(proxy_ext_path):
-            try:
-                os.remove(proxy_ext_path)
-            except Exception:
-                pass
+        if proxy_info:
+            import shutil
+            if proxy_info.get("dir_path") and os.path.exists(proxy_info["dir_path"]):
+                shutil.rmtree(proxy_info["dir_path"], ignore_errors=True)
+            if proxy_info.get("zip_path") and os.path.exists(proxy_info["zip_path"]):
+                try:
+                    os.remove(proxy_info["zip_path"])
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
