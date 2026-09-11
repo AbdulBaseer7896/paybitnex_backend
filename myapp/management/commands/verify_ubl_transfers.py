@@ -107,6 +107,12 @@ class Command(BaseCommand):
             help="Custom proxy string (host:port:user:pass or 'none' to disable). Defaults to configured Pakistan residential proxy.",
         )
         parser.add_argument(
+            "--no-proxy",
+            action="store_true",
+            default=False,
+            help="Disable proxy and connect directly to UBL portal without proxy.",
+        )
+        parser.add_argument(
             "--reverify-all",
             action="store_true",
             default=False,
@@ -183,11 +189,12 @@ class Command(BaseCommand):
                 try:
                     from_date_str = start_date.strftime("%d/%m/%Y")
                     to_date_str = end_date.strftime("%d/%m/%Y")
+                    active_proxy_arg = False if options.get("no_proxy") else options.get("proxy")
                     downloaded_temp_path = scrape_ubl_statement(
                         from_date=from_date_str,
                         to_date=to_date_str,
                         log_callback=self.stdout.write,
-                        proxy=options.get("proxy"),
+                        proxy=active_proxy_arg,
                     )
                     statement_file = str(downloaded_temp_path)
                     self.stdout.write(self.style.SUCCESS(f">>> Scraper completed successfully: {downloaded_temp_path.name}\n"))

@@ -17,9 +17,6 @@ import time
 import re
 import imaplib
 import email
-import socket
-import threading
-import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Set, Dict, Any
@@ -48,10 +45,18 @@ OTP_PATTERNS = [
     r"OTP[^\d]{0,40}?(\d{4,8})",
 ]
 
+import socket
+import threading
+import base64
+
 # Default download folder: Bank_statments in paybitnex_backend root
 DEFAULT_DOWNLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "Bank_statments"
 
-# Proxy configuration (e.g. Decodo Pakistan residential proxy)
+# Proxy configuration (Decodo Pakistan residential proxy)
+# Note: asn-XXXXX and sessionduration pins are intentionally omitted.
+# Pinning to a specific ASN or omitting country caused Decodo to route to Singapore / foreign IPs,
+# which triggers UBL/bank security blocks.
+# Adding -country-PK guarantees Decodo assigns a residential IP located inside Pakistan.
 DEFAULT_PROXY = os.environ.get(
     "UBL_PROXY",
     "gate.decodo.com:10001:user-spduoaryo1-country-PK:5gsB8b3LSlx~4sysRp"
@@ -65,8 +70,8 @@ class LocalProxyTunnel:
 
     Properly handles both:
     - HTTP requests: injects Proxy-Authorization header directly
-    - HTTPS CONNECT tunnels: reads the upstream 200 response before piping data
-      so Chrome can complete the SSL handshake correctly without any auth prompts.
+    - HTTPS CONNECT tunnels: reads upstream 200 response before piping data
+      so Chrome can complete the SSL handshake correctly without browser extensions.
     """
     def __init__(self, upstream_host: str, upstream_port: int, user: str, password: str):
         self.upstream_host = upstream_host
@@ -119,7 +124,6 @@ class LocalProxyTunnel:
     def _handle_client(self, client: socket.socket):
         upstream = None
         try:
-            # ── Read the full request headers from Chrome ──────────────
             raw = self._recv_until_headers_end(client)
             if not raw:
                 return
@@ -128,19 +132,14 @@ class LocalProxyTunnel:
             first_line = raw[:first_line_end].decode("latin-1", errors="replace")
             method = first_line.split(" ", 1)[0].upper()
 
-            # ── Connect to upstream proxy ──────────────────────────────
+            # Connect to upstream proxy (gate.decodo.com or IP)
             upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             upstream.settimeout(30)
-            target_host = self.upstream_host
-            try:
-                target_host = socket.gethostbyname(self.upstream_host)
-            except Exception:
-                if "decodo" in self.upstream_host.lower():
-                    target_host = "95.177.122.28"
-            upstream.connect((target_host, self.upstream_port))
+            upstream.connect((self.upstream_host, self.upstream_port))
 
             if method == "CONNECT":
-                target = first_line.split(" ")[1]  # host:port
+                # HTTPS tunnel: forward CONNECT with Proxy-Authorization
+                target = first_line.split(" ")[1]
                 connect_req = (
                     f"CONNECT {target} HTTP/1.1\r\n"
                     f"Host: {target}\r\n"
@@ -173,6 +172,7 @@ class LocalProxyTunnel:
                 t2.join()
 
             else:
+                # HTTP request: inject Proxy-Authorization
                 header_end = raw.find(b"\r\n")
                 injected = raw[:header_end + 2]
                 injected += b"Proxy-Authorization: Basic " + self.auth_b64.encode("ascii") + b"\r\n"
@@ -206,44 +206,57 @@ class LocalProxyTunnel:
 
 def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, Any]]:
     """Parses proxy string into host, port, user, pass dictionary."""
-    if not proxy_str or not proxy_str.strip():
+    if not proxy_str or not str(proxy_str).strip():
         return None
 
-    clean = proxy_str.strip().replace("http://", "").replace("https://", "")
+    clean = str(proxy_str).strip().replace("http://", "").replace("https://", "")
     if "@" in clean:
         auth_part, host_part = clean.split("@", 1)
         user, pwd = auth_part.split(":", 1) if ":" in auth_part else (auth_part, "")
         host, port = host_part.split(":", 1) if ":" in host_part else (host_part, "80")
-        return {"host": host, "port": int(port), "user": user, "pass": pwd}
+        try:
+            return {"host": host, "port": int(port), "user": user, "pass": pwd}
+        except ValueError:
+            return {"host": host, "port": 80, "user": user, "pass": pwd}
 
     parts = clean.split(":")
     if len(parts) == 4:
-        return {"host": parts[0], "port": int(parts[1]), "user": parts[2], "pass": parts[3]}
+        try:
+            return {"host": parts[0], "port": int(parts[1]), "user": parts[2], "pass": parts[3]}
+        except ValueError:
+            return None
     elif len(parts) == 2:
-        return {"host": parts[0], "port": int(parts[1]), "user": None, "pass": None}
+        try:
+            return {"host": parts[0], "port": int(parts[1]), "user": None, "pass": None}
+        except ValueError:
+            return None
 
     return None
 
 
 def strip_proxy_session_pins(proxy_str: str) -> str:
-    """Remove Decodo session-pinning parameters (asn, sessionduration) and ensure Pakistan routing."""
-    import re as _re
+    """Remove Decodo session-pinning parameters (sessionduration, session, asn) from proxy username.
+    Ensures country-PK is retained so Decodo always assigns a residential Pakistani IP.
+    """
     if not proxy_str:
         return proxy_str
     info = parse_proxy_string(proxy_str)
     if not info or not info.get("user"):
         return proxy_str
 
-    clean_user = _re.sub(
+    clean_user = re.sub(
         r"-(sessionduration|session|asn)-[^-]+",
         "",
         info["user"],
-        flags=_re.IGNORECASE
+        flags=re.IGNORECASE
     ).rstrip("-")
 
+    # Ensure -country-PK is preserved or added to prevent foreign routing (like Singapore)
     if "country-" not in clean_user.lower():
         clean_user += "-country-PK"
 
+    if "@" in str(proxy_str):
+        return f"{clean_user}:{info['pass']}@{info['host']}:{info['port']}"
     return f"{info['host']}:{info['port']}:{clean_user}:{info['pass']}"
 
 
@@ -338,9 +351,12 @@ def fetch_new_otp(known_uids):
 # ─────────────────────────────────────────────
 def click_el(driver, el):
     try:
-        el.click()
-    except Exception:
         driver.execute_script("arguments[0].click();", el)
+    except Exception:
+        try:
+            el.click()
+        except Exception:
+            pass
 
 
 def type_into(driver, wait, element_id, text):
@@ -454,9 +470,17 @@ def scrape_ubl_statement(
 
     def log(msg: str):
         if log_callback:
-            log_callback(msg)
+            try:
+                log_callback(str(msg))
+            except UnicodeEncodeError:
+                safe = str(msg).encode("ascii", errors="replace").decode("ascii")
+                log_callback(safe)
         else:
-            print(msg)
+            try:
+                print(str(msg))
+            except UnicodeEncodeError:
+                safe = str(msg).encode("ascii", errors="replace").decode("ascii")
+                print(safe)
 
     target_from = normalize_date_for_ubl(from_date, "01/09/2026")
     target_to   = normalize_date_for_ubl(to_date, "11/09/2026")
@@ -486,41 +510,110 @@ def scrape_ubl_statement(
     options.page_load_strategy = "eager"
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
-
-    proxy_tunnel = None
-    target_proxy = proxy if proxy is not None else PROXY_STRING
-    if target_proxy and target_proxy.strip().lower() not in ("none", "false", "0", "off", ""):
-        cleaned_proxy = strip_proxy_session_pins(target_proxy)
-        proxy_info = parse_proxy_string(cleaned_proxy)
-        if proxy_info and proxy_info.get("user") and proxy_info.get("pass"):
-            log(f"[1.1] Starting local proxy tunnel to {proxy_info['host']}:{proxy_info['port']} (routing via Pakistan)...")
-            proxy_tunnel = LocalProxyTunnel(
-                upstream_host=proxy_info["host"],
-                upstream_port=proxy_info["port"],
-                user=proxy_info["user"],
-                password=proxy_info["pass"],
-            )
-            log(f"[1.1] Local proxy tunnel active on 127.0.0.1:{proxy_tunnel.port}")
-            options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
-        elif proxy_info:
-            options.add_argument(f"--proxy-server=http://{proxy_info['host']}:{proxy_info['port']}")
-
-    options.add_argument("--disable-extensions")
-
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--allow-insecure-localhost")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_experimental_option("prefs", {
+
+    prefs = {
         "download.default_directory": str(target_dir),
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
-    })
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    # ── Proxy Setup via Local Tunnel (Lightweight in-process HTTP/HTTPS forwarder) ──
+    proxy_tunnel = None
+    if proxy is False or (isinstance(proxy, str) and proxy.strip().lower() in ("none", "false", "0", "off")):
+        log("[1.1] No proxy configured — using direct connection.")
+    else:
+        active_proxy = proxy if proxy else PROXY_STRING
+        active_proxy = strip_proxy_session_pins(active_proxy)
+        proxy_info = parse_proxy_string(active_proxy)
+        if proxy_info:
+            if proxy_info.get("user") and proxy_info.get("pass"):
+                log(f"[1.1] Initializing local proxy tunnel to {proxy_info['host']}:{proxy_info['port']} (Pakistani exit)...")
+                try:
+                    proxy_tunnel = LocalProxyTunnel(
+                        upstream_host=proxy_info["host"],
+                        upstream_port=proxy_info["port"],
+                        user=proxy_info["user"],
+                        password=proxy_info["pass"]
+                    )
+                    log(f"[1.1] Local proxy tunnel active on 127.0.0.1:{proxy_tunnel.port}")
+                    options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+                except Exception as pe:
+                    log(f"[PROXY ERROR] Could not start local proxy tunnel: {pe}")
+            else:
+                log(f"[1.1] Configuring direct proxy: {proxy_info['host']}:{proxy_info['port']}...")
+                options.add_argument(f"--proxy-server=http://{proxy_info['host']}:{proxy_info['port']}")
 
     log(f"[2] Launching Chrome ({'headless' if headless else 'visible'})...")
-    driver = webdriver.Chrome(options=options)
+    driver = None
+    try:
+        import undetected_chromedriver as uc_mod
+        uc_options = uc_mod.ChromeOptions()
+        uc_options.page_load_strategy = "eager"
+        if headless:
+            uc_options.add_argument("--headless=new")
+        uc_options.add_argument("--no-sandbox")
+        uc_options.add_argument("--disable-setuid-sandbox")
+        uc_options.add_argument("--disable-dev-shm-usage")
+        uc_options.add_argument("--disable-gpu")
+        uc_options.add_argument("--no-zygote")
+        uc_options.add_argument("--disable-software-rasterizer")
+        uc_options.add_argument("--disable-background-networking")
+        uc_options.add_argument("--ignore-certificate-errors")
+        uc_options.add_argument("--allow-insecure-localhost")
+        uc_options.add_argument("--window-size=1920,1080")
+        uc_options.add_experimental_option("prefs", prefs)
+        if proxy_tunnel:
+            uc_options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+        driver = uc_mod.Chrome(options=uc_options, use_subprocess=False)
+        log("[2] Chrome launched via undetected-chromedriver [OK]")
+    except ImportError:
+        pass
+    except Exception as uc_err:
+        log(f"[2] undetected-chromedriver launch failed ({uc_err}) - falling back to standard selenium.")
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+        driver = None
+
+    if driver is None:
+        try:
+            driver = webdriver.Chrome(options=options)
+            log("[2] Chrome launched via standard selenium [OK]")
+        except Exception as e1:
+            log(f"[SCRAPER] Primary selenium launch failed: {e1}. Retrying with minimal fallback options...")
+            fallback_opts = Options()
+            fallback_opts.page_load_strategy = "eager"
+            if headless:
+                fallback_opts.add_argument("--headless=new")
+            fallback_opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+            fallback_opts.add_argument("--no-sandbox")
+            fallback_opts.add_argument("--disable-setuid-sandbox")
+            fallback_opts.add_argument("--disable-dev-shm-usage")
+            fallback_opts.add_argument("--disable-gpu")
+            fallback_opts.add_argument("--ignore-certificate-errors")
+            fallback_opts.add_argument("--window-size=1920,1080")
+            fallback_opts.add_argument("--disable-blink-features=AutomationControlled")
+            fallback_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            fallback_opts.add_experimental_option("useAutomationExtension", False)
+            if proxy_tunnel:
+                fallback_opts.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+            fallback_opts.add_experimental_option("prefs", prefs)
+            driver = webdriver.Chrome(options=fallback_opts)
+            log("[2] Chrome launched via fallback selenium [OK]")
+
     driver.set_page_load_timeout(60)
     try:
         driver.execute_cdp_cmd(
@@ -530,6 +623,15 @@ def scrape_ubl_statement(
     except Exception:
         pass
     wait = WebDriverWait(driver, 30)
+
+    # Verify Outbound IP
+    try:
+        log("[2.1] Verifying proxy outbound IP...")
+        driver.get("https://api.ipify.org")
+        ip_text = driver.find_element(By.TAG_NAME, "body").text.strip()
+        log(f"[2.1] Verified Outbound IP: {ip_text}")
+    except Exception as ip_err:
+        log(f"[2.1] IP check notice: {ip_err}")
 
     try:
         log("[3] Navigating to UBL login URL...")
@@ -543,6 +645,13 @@ def scrape_ubl_statement(
                 pass
         time.sleep(3)
 
+        page_title = driver.title or ""
+        log(f"[3.1] Page title: '{page_title}' | URL: '{driver.current_url}'")
+        if any(term in page_title.lower() for term in ("access denied", "cloudflare", "403 forbidden", "attention required")):
+            raise RuntimeError(
+                f"WAF / Portal Blocked: '{page_title}'. The UBL portal is restricting access from this IP/Proxy."
+            )
+
         log("[4] Entering Login ID...")
         type_into(driver, wait, "userNameText", USER_ID)
         time.sleep(2)
@@ -552,8 +661,9 @@ def scrape_ubl_statement(
         time.sleep(2)
 
         log("[6] Clicking LOGIN...")
-        click_el(driver, wait.until(EC.element_to_be_clickable((By.ID, "loginButton"))))
-        time.sleep(5)
+        login_btn = wait.until(EC.presence_of_element_located((By.ID, "loginButton")))
+        click_el(driver, login_btn)
+        time.sleep(3)
 
         log("[7] Checking for login errors...")
         err = check_login_error(driver)
@@ -561,21 +671,22 @@ def scrape_ubl_statement(
             raise RuntimeError(f"Login failed: {err}")
 
         log("[8] Waiting for the OTP channel dialog...")
-        email_radio = wait.until(EC.element_to_be_clickable(
+        email_radio = wait.until(EC.presence_of_element_located(
             (By.CSS_SELECTOR, "input[type='radio'][value='EMAIL']")))
-        time.sleep(2)
+        time.sleep(1)
 
         log("[9] Selecting E-mail channel...")
         click_el(driver, email_radio)
         driver.execute_script(
-            "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", email_radio)
-        time.sleep(2)
+            "arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", email_radio)
+        time.sleep(1)
 
         log("[10a] Snapshotting existing UBL emails...")
         known_otp_uids = snapshot_otp_uids()
 
         log("[10] Pressing Select button...")
-        click_el(driver, wait.until(EC.element_to_be_clickable((By.ID, "btn_select"))))
+        select_btn = wait.until(EC.presence_of_element_located((By.ID, "btn_select")))
+        click_el(driver, select_btn)
 
         otp = None
         for i, w in enumerate(OTP_CHECK_WAITS, 1):
@@ -620,12 +731,51 @@ def scrape_ubl_statement(
         time.sleep(WAIT_AFTER_PROCEED)
 
         log("[20] Opening period filter dropdown...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON)))
-        time.sleep(1)
+        period_btn = wait.until(EC.presence_of_element_located(PERIOD_DROPDOWN_BUTTON))
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).move_to_element(period_btn).click().perform()
+        except Exception:
+            driver.execute_script("""
+                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                arguments[0].click();
+            """, period_btn)
+        time.sleep(1.5)
 
         log("[20] Selecting 'Select Range'...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)))
-        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        try:
+            range_el = wait.until(EC.presence_of_element_located(PERIOD_MENU_SELECT_RANGE))
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(driver).move_to_element(range_el).click().perform()
+            except Exception:
+                driver.execute_script("""
+                    arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    arguments[0].click();
+                """, range_el)
+        except Exception as e_range:
+            log(f"[WARN] Clicking menu item direct failed ({e_range}), triggering select change via JS...")
+            driver.execute_script("""
+                var sel = document.getElementById('movementsSelectCont');
+                if (sel) {
+                    for (var i = 0; i < sel.options.length; i++) {
+                        if (sel.options[i].text.toLowerCase().indexOf('range') !== -1) {
+                            sel.selectedIndex = i;
+                            if (window.$) {
+                                try { $(sel).selectmenu('refresh'); } catch(e){}
+                                $(sel).trigger('change');
+                            } else {
+                                sel.dispatchEvent(new Event('change', {bubbles: true}));
+                            }
+                            break;
+                        }
+                    }
+                }
+            """)
+
+        wait.until(EC.presence_of_element_located(DATE_POPUP))
         time.sleep(2)
 
         log(f"[21] Entering From date: {target_from}")
@@ -635,16 +785,39 @@ def scrape_ubl_statement(
         time.sleep(1)
 
         log("[23] Clicking Done...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(DONE_BTN_LOCATOR)))
+        done_btn = wait.until(EC.presence_of_element_located(DONE_BTN_LOCATOR))
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).move_to_element(done_btn).click().perform()
+        except Exception:
+            driver.execute_script("arguments[0].click();", done_btn)
         time.sleep(5)
 
         log("[24] Opening Export dropdown...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(EXPORT_DROPDOWN)))
-        time.sleep(1)
+        export_btn = wait.until(EC.presence_of_element_located(EXPORT_DROPDOWN))
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).move_to_element(export_btn).click().perform()
+        except Exception:
+            driver.execute_script("""
+                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                arguments[0].click();
+            """, export_btn)
+        time.sleep(1.5)
 
         log("[25] Choosing CSV...")
         before_files = {f for f in target_dir.iterdir() if not f.name.endswith(".crdownload")}
-        click_el(driver, wait.until(EC.element_to_be_clickable(CSV_OPTION)))
+        csv_opt = wait.until(EC.presence_of_element_located(CSV_OPTION))
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            ActionChains(driver).move_to_element(csv_opt).click().perform()
+        except Exception:
+            driver.execute_script("""
+                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                arguments[0].click();
+            """, csv_opt)
         log("[25] CSV export triggered. Waiting for download...")
 
         downloaded = wait_for_new_download(target_dir, before_files, timeout=60)
@@ -670,16 +843,23 @@ def scrape_ubl_statement(
 
         return new_path
 
+    except Exception as exc:
+        try:
+            err_shot = target_dir / "ubl_error_snapshot.png"
+            driver.save_screenshot(str(err_shot))
+            log(f"[DEBUG] Saved failure screenshot to: {err_shot}")
+        except Exception:
+            pass
+        raise exc
+
     finally:
         try:
-            driver.quit()
+            if driver:
+                driver.quit()
         except Exception:
             pass
         if proxy_tunnel:
-            try:
-                proxy_tunnel.stop()
-            except Exception:
-                pass
+            proxy_tunnel.stop()
 
 
 if __name__ == "__main__":

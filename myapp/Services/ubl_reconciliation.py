@@ -16,8 +16,8 @@ import glob
 import logging
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
 
 from django.db import transaction
 from django.utils import timezone
@@ -25,7 +25,11 @@ from django.conf import settings
 
 log = logging.getLogger(__name__)
 
-DEFAULT_UBL_STATEMENTS_DIR = str(getattr(settings, "UBL_STATEMENTS_DIR", None) or (Path(__file__).resolve().parent.parent.parent / "Bank_statments"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_UBL_STATEMENTS_DIR = os.environ.get(
+    "UBL_STATEMENTS_DIR",
+    str(PROJECT_ROOT / "Bank_statments")
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,17 +123,26 @@ def amounts_match(system_amt: Decimal, bank_amt: Decimal) -> Tuple[bool, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_latest_statement_file(folder_path: Optional[str] = None) -> Optional[str]:
-    """Finds the most recently created/modified UBL statement CSV file."""
-    search_dir = folder_path or getattr(settings, "UBL_STATEMENTS_DIR", DEFAULT_UBL_STATEMENTS_DIR)
-    if not os.path.exists(search_dir):
-        return None
-    files = glob.glob(os.path.join(search_dir, "UBL_Statement_*.csv"))
-    if not files:
-        files = glob.glob(os.path.join(search_dir, "*.csv"))
-    if not files:
-        return None
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files[0]
+    """Finds the most recently created/modified UBL statement CSV file across standard candidate directories."""
+    candidate_dirs = []
+    if folder_path:
+        candidate_dirs.append(folder_path)
+    if hasattr(settings, "UBL_STATEMENTS_DIR") and getattr(settings, "UBL_STATEMENTS_DIR"):
+        candidate_dirs.append(getattr(settings, "UBL_STATEMENTS_DIR"))
+    candidate_dirs.append(DEFAULT_UBL_STATEMENTS_DIR)
+    candidate_dirs.append(str(PROJECT_ROOT / "Bank_statments"))
+    candidate_dirs.append(r"C:\Users\Abdullah Shahid\Downloads\UBL_scrapper\Bank_statments")
+
+    for search_dir in candidate_dirs:
+        if not search_dir or not os.path.exists(search_dir):
+            continue
+        files = glob.glob(os.path.join(search_dir, "UBL_Statement_*.csv"))
+        if not files:
+            files = glob.glob(os.path.join(search_dir, "*.csv"))
+        if files:
+            files.sort(key=os.path.getmtime, reverse=True)
+            return files[0]
+    return None
 
 
 def parse_ubl_statement(file_path: str) -> List[Dict[str, Any]]:
