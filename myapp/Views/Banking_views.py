@@ -163,6 +163,19 @@ class CustomerBankAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelViewSet
     snapshot_fields = _BANK_SNAPSHOT_FIELDS
     acct_label = "PKR bank account"
 
+    def perform_update(self, serializer):
+        with dbtx.atomic():
+            instance = serializer.save()
+            if serializer.validated_data.get("is_primary"):
+                CustomerBankAccount.objects.filter(
+                    customer=instance.customer,
+                ).exclude(pk=instance.pk).update(is_primary=False)
+
+    def partial_update(self, request, *args, **kwargs):
+        """PATCH endpoint for editing customer bank records."""
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
     @action(detail=True, methods=["post"])
     def make_primary(self, request, pk=None):
         acct = self.get_object()

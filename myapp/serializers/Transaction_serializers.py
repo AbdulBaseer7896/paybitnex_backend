@@ -181,6 +181,7 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
     )
 
     has_pkr_transfer = serializers.SerializerMethodField()
+    transfer_id = serializers.SerializerMethodField()
     transfer_receipt = serializers.SerializerMethodField()
     transfer_receipts = serializers.SerializerMethodField()
     transfer_notes = serializers.SerializerMethodField()
@@ -191,6 +192,12 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
     transfer_date = serializers.SerializerMethodField()
     transfer_recorded_at = serializers.SerializerMethodField()
     transfer_recorded_by_email = serializers.SerializerMethodField()
+    transfer_bank_verified = serializers.SerializerMethodField()
+    transfer_bank_verification_status = serializers.SerializerMethodField()
+    transfer_bank_verification_source = serializers.SerializerMethodField()
+    transfer_bank_verification_notes = serializers.SerializerMethodField()
+    transfer_bank_statement_ref = serializers.SerializerMethodField()
+    transfer_bank_verified_at = serializers.SerializerMethodField()
 
     # Rate spread profit (company internal — show only to admin/accountant)
     rate_spread_profit_pkr = serializers.SerializerMethodField()
@@ -323,6 +330,34 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
         d = t.transfer_date or (t.sent_at.date() if t.sent_at else None)
         return d.isoformat() if d else None
 
+    def get_transfer_id(self, obj):
+        t = self._transfer(obj)
+        return str(t.id) if t else None
+
+    def get_transfer_bank_verified(self, obj):
+        t = self._transfer(obj)
+        return bool(t.bank_verified) if t else False
+
+    def get_transfer_bank_verification_status(self, obj):
+        t = self._transfer(obj)
+        return t.bank_verification_status if t else None
+
+    def get_transfer_bank_verification_source(self, obj):
+        t = self._transfer(obj)
+        return t.bank_verification_source if t else None
+
+    def get_transfer_bank_verification_notes(self, obj):
+        t = self._transfer(obj)
+        return t.bank_verification_notes if t else None
+
+    def get_transfer_bank_statement_ref(self, obj):
+        t = self._transfer(obj)
+        return t.bank_statement_ref if t else None
+
+    def get_transfer_bank_verified_at(self, obj):
+        t = self._transfer(obj)
+        return t.bank_verified_at.isoformat() if t and t.bank_verified_at else None
+
     class Meta:
         model = IncomingPayment
         fields = [
@@ -354,9 +389,13 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "created_at", "updated_at", "completed_at",
             "status_history",
             "has_pkr_transfer",
+            "transfer_id",
             "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
             "transfer_amount_pkr", "transfer_original_amount_pkr", "transfer_deduction_pkr",
             "transfer_date", "transfer_recorded_at", "transfer_recorded_by_email",
+            "transfer_bank_verified", "transfer_bank_verification_status",
+            "transfer_bank_verification_source", "transfer_bank_verification_notes",
+            "transfer_bank_statement_ref", "transfer_bank_verified_at",
         ]
         read_only_fields = [
             "id", "reference", "customer",
@@ -371,9 +410,13 @@ class IncomingPaymentSerializer(serializers.ModelSerializer):
             "customer_confirmed_at", "is_stale", "stale_at", "auto_confirmed",
             "force_completed_by_email", "force_completed_at",
             "has_pkr_transfer",
+            "transfer_id",
             "transfer_receipt", "transfer_receipts", "transfer_notes", "transfer_bank_transaction_id",
             "transfer_amount_pkr", "transfer_original_amount_pkr", "transfer_deduction_pkr",
             "transfer_date", "transfer_recorded_at", "transfer_recorded_by_email",
+            "transfer_bank_verified", "transfer_bank_verification_status",
+            "transfer_bank_verification_source", "transfer_bank_verification_notes",
+            "transfer_bank_statement_ref", "transfer_bank_verified_at",
             "occurred_on",
             "created_at", "updated_at", "verified_at", "completed_at",
         ]
@@ -487,6 +530,9 @@ class OutgoingTransferCreateSerializer(serializers.ModelSerializer):
 
 class OutgoingTransferSerializer(serializers.ModelSerializer):
     sent_by_email = serializers.CharField(source="sent_by.email", read_only=True)
+    bank_verified_by_email = serializers.CharField(
+        source="bank_verified_by.email", read_only=True, default=None,
+    )
     payment_ids = serializers.SerializerMethodField()
     receipts = OutgoingTransferReceiptSerializer(many=True, read_only=True)
 
@@ -509,10 +555,18 @@ class OutgoingTransferSerializer(serializers.ModelSerializer):
             "bank_transaction_id", "transfer_date",
             "receipt", "receipts", "notes",
             "sent_by", "sent_by_email", "sent_at",
+            "bank_verified", "bank_verification_status",
+            "bank_verification_source", "bank_verified_at",
+            "bank_verified_by", "bank_verified_by_email",
+            "bank_verification_notes", "bank_statement_ref",
         ]
         read_only_fields = [
             "id", "reference", "payment_ids", "receipts",
             "sent_by", "sent_by_email", "sent_at",
+            "bank_verified", "bank_verification_status",
+            "bank_verification_source", "bank_verified_at",
+            "bank_verified_by", "bank_verified_by_email",
+            "bank_verification_notes", "bank_statement_ref",
         ]
 
 

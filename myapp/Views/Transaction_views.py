@@ -31,7 +31,7 @@ from myapp.Models.Auth_models import UserRole
 from myapp.Models.Audit_models import AuditLog
 from myapp.Models.Transaction_models import (
     IncomingPayment, OutgoingPKRTransfer, OutgoingPKRTransferReceipt, TransactionStatus,
-    TransactionStatusHistory,
+    TransactionStatusHistory, BankVerificationStatus, BankVerificationSource,
 )
 from myapp.serializers.Transaction_serializers import (
     IncomingPaymentSerializer, IncomingPaymentDashboardSerializer,
@@ -1043,6 +1043,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             )
         return Response(IncomingPaymentSerializer(payment).data)
 
+
     # ---- customer: "I received my PKR" ----
     @action(
         detail=True, methods=["post"],
@@ -1342,6 +1343,123 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
 
         return Response(IncomingPaymentSerializer(payment).data)
 
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="resolve-bank-verification",
+    )
+    def resolve_bank_verification(self, request, pk=None):
+        """
+        Admin manually resolves a flagged bank verification discrepancy to 'verified'.
+        Finds the linked OutgoingPKRTransfer (1-to-1 or bulk covering transfer), updates it,
+        and logs audit trail on both payment and transfer records.
+        """
+        payment = self.get_object()
+        transfer = getattr(payment, "outgoing_transfer", None)
+        if not transfer:
+            try:
+                transfer = payment.covering_transfers.first()
+            except Exception:
+                transfer = None
+        if not transfer:
+            return Response(
+                {"detail": "No outgoing PKR transfer linked to this payment."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        notes = request.data.get("notes", "").strip()
+        user_email = request.user.email or "admin"
+        resolution_note = f"Manually verified by {user_email}: {notes}" if notes else f"Manually verified by {user_email}"
+
+        old_status = transfer.bank_verification_status
+        old_verified = transfer.bank_verified
+        old_source = transfer.bank_verification_source
+        existing_notes = transfer.bank_verification_notes or ""
+
+        now = timezone.now()
+        transfer.bank_verified = True
+        transfer.bank_verification_status = BankVerificationStatus.VERIFIED
+        transfer.bank_verification_source = BankVerificationSource.MANUAL
+        transfer.bank_verified_by = request.user
+        transfer.bank_verified_at = now
+        transfer.bank_verification_notes = (
+            f"{existing_notes}\n[RESOLVED] {resolution_note}".strip()
+            if existing_notes
+            else f"[RESOLVED] {resolution_note}"
+        )
+
+        transfer.save(update_fields=[
+            "bank_verified", "bank_verification_status", "bank_verification_source",
+            "bank_verified_by", "bank_verified_at", "bank_verification_notes",
+        ])
+
+        # Attach updated transfer to payment instance for immediate serialization
+        payment._resolved_transfer = transfer
+
+        # Record audit log on payment
+        AuditLog.record(
+            user=request.user,
+            action=AuditLog.ACTION_UPDATE,
+            target=payment,
+            target_label=payment.reference,
+            description=f"{payment.reference}: Bank statement discrepancy manually approved and marked verified by {user_email}. Remarks: {notes or 'None'}",
+            before={
+                "bank_verification_status": old_status,
+                "bank_verified": old_verified,
+                "bank_verification_source": old_source,
+                "bank_verification_notes": existing_notes,
+            },
+            after={
+                "bank_verification_status": BankVerificationStatus.VERIFIED,
+                "bank_verified": True,
+                "bank_verification_source": BankVerificationSource.MANUAL,
+                "bank_verified_by": user_email,
+                "bank_verified_at": now.isoformat(),
+                "bank_verification_notes": transfer.bank_verification_notes,
+            },
+            metadata={
+                "payment_id": str(payment.id),
+                "payment_reference": payment.reference,
+                "transfer_id": str(transfer.id),
+                "transfer_reference": transfer.reference,
+                "resolution_notes": notes,
+                "manual_approval": True,
+            },
+        )
+
+        # Record audit log on transfer
+        AuditLog.record(
+            user=request.user,
+            action=AuditLog.ACTION_UPDATE,
+            target=transfer,
+            target_label=transfer.reference,
+            description=f"{transfer.reference}: Bank verification discrepancy manually approved and marked verified by {user_email} (linked payment {payment.reference}). Remarks: {notes or 'None'}",
+            before={
+                "bank_verification_status": old_status,
+                "bank_verified": old_verified,
+                "bank_verification_source": old_source,
+                "bank_verification_notes": existing_notes,
+            },
+            after={
+                "bank_verification_status": BankVerificationStatus.VERIFIED,
+                "bank_verified": True,
+                "bank_verification_source": BankVerificationSource.MANUAL,
+                "bank_verified_by": user_email,
+                "bank_verified_at": now.isoformat(),
+                "bank_verification_notes": transfer.bank_verification_notes,
+            },
+            metadata={
+                "payment_id": str(payment.id),
+                "payment_reference": payment.reference,
+                "transfer_id": str(transfer.id),
+                "transfer_reference": transfer.reference,
+                "resolution_notes": notes,
+                "manual_approval": True,
+            },
+        )
+
+        return Response(IncomingPaymentSerializer(payment, context={"request": request}).data)
+
 
 class OutgoingTransferViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin,
@@ -1626,6 +1744,108 @@ class OutgoingTransferViewSet(
             OutgoingTransferSerializer(transfer).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(
+        detail=True, methods=["post"],
+        permission_classes=[IsAuthenticated, IsAdmin],
+        url_path="resolve-bank-verification",
+    )
+    def resolve_bank_verification(self, request, pk=None):
+        """
+        Admin manually resolves a flagged bank verification status to 'verified' on the transfer,
+        and logs audit trails on the transfer and all linked payment records.
+        """
+        transfer = self.get_object()
+        notes = request.data.get("notes", "").strip()
+        user_email = request.user.email or "admin"
+        resolution_note = f"Manually verified by {user_email}: {notes}" if notes else f"Manually verified by {user_email}"
+
+        old_status = transfer.bank_verification_status
+        old_verified = transfer.bank_verified
+        old_source = transfer.bank_verification_source
+        existing_notes = transfer.bank_verification_notes or ""
+
+        now = timezone.now()
+        transfer.bank_verified = True
+        transfer.bank_verification_status = BankVerificationStatus.VERIFIED
+        transfer.bank_verification_source = BankVerificationSource.MANUAL
+        transfer.bank_verified_by = request.user
+        transfer.bank_verified_at = now
+        transfer.bank_verification_notes = (
+            f"{existing_notes}\n[RESOLVED] {resolution_note}".strip()
+            if existing_notes
+            else f"[RESOLVED] {resolution_note}"
+        )
+
+        transfer.save(update_fields=[
+            "bank_verified", "bank_verification_status", "bank_verification_source",
+            "bank_verified_by", "bank_verified_at", "bank_verification_notes",
+        ])
+
+        # Record audit log on transfer
+        AuditLog.record(
+            user=request.user,
+            action=AuditLog.ACTION_UPDATE,
+            target=transfer,
+            target_label=transfer.reference,
+            description=f"{transfer.reference}: Bank verification discrepancy manually approved and marked verified by {user_email}. Remarks: {notes or 'None'}",
+            before={
+                "bank_verification_status": old_status,
+                "bank_verified": old_verified,
+                "bank_verification_source": old_source,
+                "bank_verification_notes": existing_notes,
+            },
+            after={
+                "bank_verification_status": BankVerificationStatus.VERIFIED,
+                "bank_verified": True,
+                "bank_verification_source": BankVerificationSource.MANUAL,
+                "bank_verified_by": user_email,
+                "bank_verified_at": now.isoformat(),
+                "bank_verification_notes": transfer.bank_verification_notes,
+            },
+            metadata={
+                "transfer_id": str(transfer.id),
+                "transfer_reference": transfer.reference,
+                "resolution_notes": notes,
+                "manual_approval": True,
+            },
+        )
+
+        # Also record audit log on any linked payments
+        linked_payments = []
+        if getattr(transfer, "incoming_payment", None):
+            linked_payments.append(transfer.incoming_payment)
+        for p in transfer.payments.all():
+            if p not in linked_payments:
+                linked_payments.append(p)
+
+        for payment in linked_payments:
+            AuditLog.record(
+                user=request.user,
+                action=AuditLog.ACTION_UPDATE,
+                target=payment,
+                target_label=payment.reference,
+                description=f"{payment.reference}: Linked transfer ({transfer.reference}) bank discrepancy manually approved and marked verified by {user_email}. Remarks: {notes or 'None'}",
+                before={
+                    "bank_verification_status": old_status,
+                    "bank_verified": old_verified,
+                    "bank_verification_source": old_source,
+                },
+                after={
+                    "bank_verification_status": BankVerificationStatus.VERIFIED,
+                    "bank_verified": True,
+                    "bank_verification_source": BankVerificationSource.MANUAL,
+                    "bank_verified_by": user_email,
+                },
+                metadata={
+                    "payment_reference": payment.reference,
+                    "transfer_reference": transfer.reference,
+                    "resolution_notes": notes,
+                    "manual_approval": True,
+                },
+            )
+
+        return Response(OutgoingTransferSerializer(transfer, context={"request": request}).data)
 #   GET /transactions/customers-summary/
 #
 # Used by the "User Transactions" page (admin + accountant). Returns one row

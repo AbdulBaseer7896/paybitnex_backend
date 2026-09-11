@@ -4,8 +4,19 @@ Audit log — every sensitive action recorded.
 Populated by AuditMiddleware on write requests, plus explicit
 `AuditLog.record()` calls in services.
 """
+import json
 import uuid
 from django.db import models
+from django.core.serializers.json import DjangoJSONEncoder
+
+
+def _make_json_safe(val):
+    if val is None:
+        return None
+    try:
+        return json.loads(json.dumps(val, cls=DjangoJSONEncoder))
+    except Exception:
+        return str(val)
 
 
 class AuditLog(models.Model):
@@ -80,7 +91,9 @@ class AuditLog(models.Model):
         kwargs = dict(
             user=user, action=action, description=description,
             target_label=target_label or "",
-            before=before, after=after, metadata=metadata,
+            before=_make_json_safe(before),
+            after=_make_json_safe(after),
+            metadata=_make_json_safe(metadata),
             ip_address=ip, user_agent=ua,
         )
         if target is not None:
@@ -97,7 +110,9 @@ class AuditLog(models.Model):
         kwargs = dict(
             user=user, action=action, description=description,
             target_label=target_label or "",
-            before=before, after=after, metadata=metadata,
+            before=_make_json_safe(before),
+            after=_make_json_safe(after),
+            metadata=_make_json_safe(metadata),
             ip_address=ip, user_agent=ua,
         )
         if target is not None:

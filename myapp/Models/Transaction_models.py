@@ -299,6 +299,19 @@ class IncomingPayment(models.Model):
         return (Decimal(str(self.amount)) * spread).quantize(Decimal("0.01"))
 
 
+class BankVerificationStatus(models.TextChoices):
+    UNVERIFIED = "unverified", "Unverified"
+    VERIFIED = "verified", "Verified"
+    DISCREPANCY = "discrepancy", "Flagged / Discrepancy"
+    UNMATCHED = "unmatched", "Unmatched / Not Found"
+
+
+class BankVerificationSource(models.TextChoices):
+    CRON = "cron", "Automated Cronjob"
+    MANUAL = "manual", "Manual Review / Resolved"
+    HISTORICAL_BACKFILL = "historical_backfill", "Historical Backfill"
+
+
 class OutgoingPKRTransfer(models.Model):
     """PKR transfer sent by accountant to customer's PK bank account."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -350,6 +363,38 @@ class OutgoingPKRTransfer(models.Model):
         null=True, blank=True, db_index=True,
         help_text="Date the PKR were transferred to the customer bank account from ours",
     )
+
+    # Bank statement reconciliation fields
+    bank_verified = models.BooleanField(
+        default=False, db_index=True,
+        help_text="True if this outgoing transfer was verified against our bank statement",
+    )
+    bank_verification_status = models.CharField(
+        max_length=30, default="unverified", db_index=True,
+        choices=[
+            ("unverified", "Unverified"),
+            ("verified", "Verified"),
+            ("discrepancy", "Flagged / Discrepancy"),
+            ("unmatched", "Unmatched / Not Found"),
+        ],
+    )
+    bank_verified_at = models.DateTimeField(null=True, blank=True)
+    bank_verified_by = models.ForeignKey(
+        "myapp.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="manually_verified_transfers",
+        help_text="User who manually verified or resolved discrepancy; null if cron/automated",
+    )
+    bank_verification_source = models.CharField(
+        max_length=30, default="cron",
+        choices=[
+            ("cron", "Automated Cronjob"),
+            ("manual", "Manual Review / Resolved"),
+            ("historical_backfill", "Historical Backfill"),
+        ],
+    )
+    bank_verification_notes = models.TextField(blank=True, default="")
+    bank_statement_ref = models.CharField(max_length=150, blank=True, default="")
+    bank_statement_matched_data = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "outgoing_pkr_transfers"

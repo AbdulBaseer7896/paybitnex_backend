@@ -23,15 +23,16 @@ class ForeignBankSerializer(serializers.ModelSerializer):
 def _check_unique_or_blank(model, field, value, instance, user=None):
     """
     If `value` is non-blank, ensure no other row in `model` has this value
-    on `field`. Excludes the user's own existing account when user is provided.
+    on `field`. Excludes the account owner's own existing account.
     """
     if not value:
         return value
     qs = model.objects.filter(**{field: value})
     if instance is not None:
         qs = qs.exclude(pk=instance.pk)
-    if user is not None and getattr(user, "is_authenticated", False):
-        qs = qs.exclude(customer=user)
+    target_user = getattr(instance, "customer", None) or user
+    if target_user is not None and getattr(target_user, "is_authenticated", False):
+        qs = qs.exclude(customer=target_user)
     if qs.exists():
         raise serializers.ValidationError(
             f"This {field.replace('_', ' ')} is already registered to another user."
