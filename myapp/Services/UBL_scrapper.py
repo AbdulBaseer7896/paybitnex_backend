@@ -161,6 +161,10 @@ class LocalProxyTunnel:
                 status_code = status_line.split(" ")[1] if " " in status_line else "000"
 
                 if not status_code.startswith("2"):
+                    err_text = upstream_resp.decode("latin-1", errors="replace")
+                    m = re.search(r"x-error-message:\s*(.+)", err_text, re.IGNORECASE)
+                    if m:
+                        print(f"\n[PROXY ERROR] Upstream gateway rejected connection ({status_code}): {m.group(1).strip()}\n")
                     client.sendall(upstream_resp)
                     return
 
