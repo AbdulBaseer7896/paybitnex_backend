@@ -722,61 +722,119 @@ def scrape_ubl_statement(
 
         log("[15] OTP successfully accepted.")
 
-        # Statement export flow
-        log(f"[17] Waiting {WAIT_AFTER_SUBMIT_BEFORE_PROCEED}s before Proceed...")
-        time.sleep(WAIT_AFTER_SUBMIT_BEFORE_PROCEED)
+        # Statement export flow: Proceed directly to dashboard without idle timeout delays
+        log("[17] Waiting for Proceed button...")
+        try:
+            proceed_el = WebDriverWait(driver, 15).until(EC.presence_of_element_located(PROCEED_LOCATOR))
+            time.sleep(1)
+            log("[18] Clicking Proceed...")
+            click_el(driver, proceed_el)
+        except Exception as proc_ex:
+            log(f"[18] Proceed button notice ({proc_ex}); proceeding directly to dashboard...")
 
-        log("[18] Clicking Proceed...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PROCEED_LOCATOR)))
-        time.sleep(WAIT_AFTER_PROCEED)
+        log("[19] Waiting for dashboard & transactions table to load...")
+        dash_wait = WebDriverWait(driver, 90)
+        start_dash = time.time()
+        period_btn = None
+        while time.time() - start_dash < 90:
+            try:
+                btns = driver.find_elements(*PERIOD_DROPDOWN_BUTTON)
+                if btns and btns[0].is_displayed():
+                    period_btn = btns[0]
+                    break
+            except Exception:
+                pass
+
+            # If details pane is still spinning or unpopulated after 12s, check if an account row in snapshot can be clicked
+            elapsed = time.time() - start_dash
+            if elapsed > 12:
+                try:
+                    driver.execute_script("""
+                        var btn = document.getElementById('movementsSelectCont-button');
+                        if (!btn) {
+                            var acct = document.querySelector('.accountRow, .account-item, [id*="account"], #CurrentSavings, a[href*="Current"]');
+                            if (acct) acct.click();
+                        }
+                    """)
+                except Exception:
+                    pass
+
+            time.sleep(2)
+
+        if not period_btn:
+            period_btn = dash_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+
+        time.sleep(2)
+        log("[19.1] Transactions table and period dropdown loaded successfully.")
 
         log("[20] Opening period filter dropdown...")
-        period_btn = wait.until(EC.presence_of_element_located(PERIOD_DROPDOWN_BUTTON))
-        try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            ActionChains(driver).move_to_element(period_btn).click().perform()
-        except Exception:
-            driver.execute_script("""
-                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                arguments[0].click();
-            """, period_btn)
-        time.sleep(1.5)
 
-        log("[20] Selecting 'Select Range'...")
-        try:
-            range_el = wait.until(EC.presence_of_element_located(PERIOD_MENU_SELECT_RANGE))
+        # Resilient loop to open dropdown and click 'Select Range'
+        picker_opened = False
+        for attempt in range(1, 4):
+            log(f"[20.{attempt}] Opening Date Range Picker (attempt {attempt}/3)...")
             try:
-                from selenium.webdriver.common.action_chains import ActionChains
-                ActionChains(driver).move_to_element(range_el).click().perform()
-            except Exception:
-                driver.execute_script("""
-                    arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                    arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                    arguments[0].click();
-                """, range_el)
-        except Exception as e_range:
-            log(f"[WARN] Clicking menu item direct failed ({e_range}), triggering select change via JS...")
-            driver.execute_script("""
-                var sel = document.getElementById('movementsSelectCont');
-                if (sel) {
-                    for (var i = 0; i < sel.options.length; i++) {
-                        if (sel.options[i].text.toLowerCase().indexOf('range') !== -1) {
-                            sel.selectedIndex = i;
-                            if (window.$) {
-                                try { $(sel).selectmenu('refresh'); } catch(e){}
-                                $(sel).trigger('change');
-                            } else {
-                                sel.dispatchEvent(new Event('change', {bubbles: true}));
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", period_btn)
+                click_el(driver, period_btn)
+                time.sleep(1.5)
+
+                range_clicked = driver.execute_script("""
+                    var menu = document.getElementById('movementsSelectCont-menu');
+                    if (menu) {
+                        var items = menu.querySelectorAll('a, li');
+                        for (var i = 0; i < items.length; i++) {
+                            if (items[i].textContent.indexOf('Range') !== -1) {
+                                items[i].dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                                items[i].dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                                items[i].click();
+                                return true;
                             }
-                            break;
                         }
                     }
-                }
-            """)
+                    return false;
+                """)
 
-        wait.until(EC.presence_of_element_located(DATE_POPUP))
-        time.sleep(2)
+                if not range_clicked:
+                    try:
+                        range_el = driver.find_element(*PERIOD_MENU_SELECT_RANGE)
+                        click_el(driver, range_el)
+                    except Exception:
+                        pass
+
+                time.sleep(2)
+                is_visible = driver.execute_script("""
+                    var p = document.getElementById('casaModalDatePicker');
+                    if (p) {
+                        var st = window.getComputedStyle(p);
+                        return st.display !== 'none' && st.visibility !== 'hidden' && p.offsetHeight > 0;
+                    }
+                    return false;
+                """)
+                if is_visible:
+                    picker_opened = True
+                    break
+
+                # jQuery UI dialog fallback if present
+                driver.execute_script("""
+                    if (window.$ && $('#casaModalDatePicker').length) {
+                        try { $('#casaModalDatePicker').dialog('open'); } catch(e){}
+                    }
+                """)
+                time.sleep(1)
+                is_visible2 = driver.execute_script("""
+                    var p = document.getElementById('casaModalDatePicker');
+                    return p && window.getComputedStyle(p).display !== 'none';
+                """)
+                if is_visible2:
+                    picker_opened = True
+                    break
+
+            except Exception as att_err:
+                log(f"[WARN] Range picker attempt {attempt} notice: {att_err}")
+                time.sleep(2)
+
+        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        time.sleep(1)
 
         log(f"[21] Entering From date: {target_from}")
         fill_date(driver, wait, FROM_DATE_LOCATOR, target_from)
