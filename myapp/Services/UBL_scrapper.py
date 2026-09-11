@@ -74,7 +74,10 @@ class LocalProxyTunnel:
       so Chrome can complete the SSL handshake correctly without browser extensions.
     """
     def __init__(self, upstream_host: str, upstream_port: int, user: str, password: str):
-        self.upstream_host = upstream_host
+        try:
+            self.upstream_host = socket.gethostbyname(upstream_host)
+        except Exception:
+            self.upstream_host = upstream_host
         self.upstream_port = int(upstream_port)
         auth_bytes = f"{user}:{password}".encode("utf-8")
         self.auth_b64 = base64.b64encode(auth_bytes).decode("ascii")
@@ -630,33 +633,53 @@ def scrape_ubl_statement(
         pass
     wait = WebDriverWait(driver, 30)
 
-    # Verify Outbound IP
-    try:
-        log("[2.1] Verifying proxy outbound IP...")
-        driver.get("https://api.ipify.org")
-        ip_text = driver.find_element(By.TAG_NAME, "body").text.strip()
-        log(f"[2.1] Verified Outbound IP: {ip_text}")
-    except Exception as ip_err:
-        log(f"[2.1] IP check notice: {ip_err}")
-
-    try:
-        log("[3] Navigating to UBL login URL...")
+    # Verify Outbound IP via lightweight request if proxy is used
+    if proxy_tunnel:
         try:
-            driver.get(URL)
-        except Exception as load_err:
-            log(f"[WARN] Initial page load wait exceeded ({load_err}); stopping page load and proceeding...")
-            try:
-                driver.execute_script("window.stop();")
-            except Exception:
-                pass
-        time.sleep(3)
+            import urllib.request
+            proxy_handler = urllib.request.ProxyHandler({'http': f'http://127.0.0.1:{proxy_tunnel.port}', 'https': f'http://127.0.0.1:{proxy_tunnel.port}'})
+            opener = urllib.request.build_opener(proxy_handler)
+            req = urllib.request.Request('https://api.ipify.org', headers={'User-Agent': 'curl/7.68.0'})
+            with opener.open(req, timeout=8) as resp:
+                out_ip = resp.read().decode('utf-8').strip()
+                log(f"[2.1] Verified Outbound IP: {out_ip}")
+        except Exception as ip_err:
+            log(f"[2.1] IP check notice: {ip_err}")
 
-        page_title = driver.title or ""
-        log(f"[3.1] Page title: '{page_title}' | URL: '{driver.current_url}'")
-        if any(term in page_title.lower() for term in ("access denied", "cloudflare", "403 forbidden", "attention required")):
-            raise RuntimeError(
-                f"WAF / Portal Blocked: '{page_title}'. The UBL portal is restricting access from this IP/Proxy."
-            )
+    try:
+        # Resilient navigation loop to ensure UBL portal loads
+        login_ready = False
+        for nav_attempt in range(1, 4):
+            log(f"[3.{nav_attempt}] Navigating to UBL login URL (attempt {nav_attempt}/3)...")
+            try:
+                driver.get(URL)
+            except Exception as load_err:
+                log(f"[WARN] Page load exception ({load_err}); stopping load...")
+                try:
+                    driver.execute_script("window.stop();")
+                except Exception:
+                    pass
+            time.sleep(3)
+
+            page_title = driver.title or ""
+            curr_url = driver.current_url or ""
+            log(f"[3.{nav_attempt}] Page title: '{page_title}' | URL: '{curr_url}'")
+            if any(term in page_title.lower() for term in ("access denied", "cloudflare", "403 forbidden", "attention required")):
+                raise RuntimeError(
+                    f"WAF / Portal Blocked: '{page_title}'. The UBL portal is restricting access from this IP/Proxy."
+                )
+
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "userNameText")))
+                login_ready = True
+                break
+            except Exception:
+                log(f"[WARN] Login field not ready on attempt {nav_attempt}; retrying...")
+                time.sleep(2)
+
+        if not login_ready:
+            # Final check before failing
+            wait.until(EC.presence_of_element_located((By.ID, "userNameText")))
 
         log("[4] Entering Login ID...")
         type_into(driver, wait, "userNameText", USER_ID)
