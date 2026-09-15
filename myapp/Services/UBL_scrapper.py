@@ -363,10 +363,14 @@ def fetch_new_otp(known_uids):
 # ─────────────────────────────────────────────
 def click_el(driver, el):
     try:
-        driver.execute_script("arguments[0].click();", el)
+        el.click()
     except Exception:
         try:
-            el.click()
+            driver.execute_script("""
+                arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+                arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+                arguments[0].click();
+            """, el)
         except Exception:
             pass
 
@@ -828,13 +832,14 @@ def _scrape_ubl_single_attempt(
         log("[20] Opening the period filter dropdown...")
         period_btn = wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", period_btn)
+        time.sleep(1)
         click_el(driver, period_btn)
         time.sleep(2)
 
         log("[20] Selecting 'Select Range'...")
         range_clicked = False
         try:
-            range_el = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE))
+            range_el = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE))
             click_el(driver, range_el)
             range_clicked = True
         except Exception:
@@ -843,9 +848,14 @@ def _scrape_ubl_single_attempt(
         if not range_clicked:
             log("[20] Retrying Select Range via DOM event...")
             driver.execute_script("""
+                if (window.$ && $('#movementsSelectCont').length) {
+                    try {
+                        $('#movementsSelectCont').selectmenu('open');
+                    } catch(e) {}
+                }
                 var menu = document.getElementById('movementsSelectCont-menu');
                 if (menu) {
-                    var items = menu.querySelectorAll('a, li');
+                    var items = menu.querySelectorAll('a, li, div');
                     for (var i = 0; i < items.length; i++) {
                         if (items[i].textContent.indexOf('Range') !== -1) {
                             items[i].click();
@@ -858,8 +868,7 @@ def _scrape_ubl_single_attempt(
                     sel.value = '?';
                     sel.dispatchEvent(new Event('change', {bubbles: true}));
                     if (window.$) {
-                        try { $(sel).val('?').change(); } catch(e){}
-                        try { $(sel).selectmenu('value', '?'); } catch(e){}
+                        try { $(sel).val('?').selectmenu('refresh', true).change(); } catch(e){}
                     }
                 }
             """)
@@ -867,7 +876,7 @@ def _scrape_ubl_single_attempt(
 
         log("[20a] Waiting for the date popup...")
         try:
-            WebDriverWait(driver, 20).until(EC.visibility_of_element_located(DATE_POPUP))
+            WebDriverWait(driver, 15).until(EC.visibility_of_element_located(DATE_POPUP))
         except Exception:
             driver.execute_script("""
                 if (window.$ && $('#casaModalDatePicker').length) {
