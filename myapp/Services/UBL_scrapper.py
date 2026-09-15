@@ -36,8 +36,8 @@ EMAIL_PASS = os.environ.get("UBL_EMAIL_PASS", "zvdq vwwt tzue tdnb")
 OTP_SENDER = os.environ.get("UBL_OTP_SENDER", "ubl_digital@ubl.com.pk")
 
 # Timings (seconds)
-WAIT_AFTER_SUBMIT_BEFORE_PROCEED = 30
-WAIT_AFTER_PROCEED               = 45
+WAIT_AFTER_SUBMIT_BEFORE_PROCEED = int(os.environ.get("UBL_WAIT_AFTER_SUBMIT", "30"))
+WAIT_AFTER_PROCEED               = int(os.environ.get("UBL_WAIT_AFTER_PROCEED", "60"))
 OTP_CHECK_WAITS                  = [20, 20, 40]
 
 OTP_PATTERNS = [
@@ -826,15 +826,55 @@ def _scrape_ubl_single_attempt(
         time.sleep(WAIT_AFTER_PROCEED)
 
         log("[20] Opening the period filter dropdown...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON)))
-        time.sleep(1)
+        period_btn = wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", period_btn)
+        click_el(driver, period_btn)
+        time.sleep(2)
 
         log("[20] Selecting 'Select Range'...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)))
+        range_clicked = False
+        try:
+            range_el = WebDriverWait(driver, 15).until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE))
+            click_el(driver, range_el)
+            range_clicked = True
+        except Exception:
+            pass
+
+        if not range_clicked:
+            log("[20] Retrying Select Range via DOM event...")
+            driver.execute_script("""
+                var menu = document.getElementById('movementsSelectCont-menu');
+                if (menu) {
+                    var items = menu.querySelectorAll('a, li');
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].textContent.indexOf('Range') !== -1) {
+                            items[i].click();
+                            break;
+                        }
+                    }
+                }
+                var sel = document.getElementById('movementsSelectCont');
+                if (sel) {
+                    sel.value = '?';
+                    sel.dispatchEvent(new Event('change', {bubbles: true}));
+                    if (window.$) {
+                        try { $(sel).val('?').change(); } catch(e){}
+                        try { $(sel).selectmenu('value', '?'); } catch(e){}
+                    }
+                }
+            """)
         log("[20] 'Select Range' selected.")
 
         log("[20a] Waiting for the date popup...")
-        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        try:
+            WebDriverWait(driver, 20).until(EC.visibility_of_element_located(DATE_POPUP))
+        except Exception:
+            driver.execute_script("""
+                if (window.$ && $('#casaModalDatePicker').length) {
+                    try { $('#casaModalDatePicker').dialog('open'); } catch(e){}
+                }
+            """)
+            WebDriverWait(driver, 15).until(EC.visibility_of_element_located(DATE_POPUP))
         log("[20a] Date popup open.")
         time.sleep(2)
 
