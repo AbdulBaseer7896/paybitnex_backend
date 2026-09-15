@@ -11,6 +11,8 @@ class CurrencySerializer(serializers.ModelSerializer):
 
 
 class SystemSettingSerializer(serializers.ModelSerializer):
+    value = serializers.CharField(allow_blank=True, required=False, default="")
+
     class Meta:
         model = SystemSetting
         fields = ["key", "value", "description", "updated_at"]

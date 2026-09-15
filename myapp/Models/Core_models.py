@@ -210,7 +210,7 @@ class SystemSetting(models.Model):
         require_email_screenshot  -> "true"
     """
     key = models.CharField(max_length=80, primary_key=True)
-    value = models.TextField()
+    value = models.TextField(blank=True, default="")
     description = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(

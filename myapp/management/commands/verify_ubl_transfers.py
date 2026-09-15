@@ -237,13 +237,14 @@ FULL TRACEBACK:
 </html>"""
 
         self.stdout.write(self.style.WARNING(f"\n[ALERT] Sending failure notification email to admin recipients..."))
-        ok = send_system_alert_email(
-            subject=subject,
-            body_text=body_text,
-            body_html=body_html,
-            to=["abdulbasirqazi@gmail.com", "abdullah.shahid1045@gmail.com"],
-            sync=True,
-        )
+        ok =False
+        # ok = send_system_alert_email(
+        #     subject=subject,
+        #     body_text=body_text,
+        #     body_html=body_html,
+        #     to=["abdulbasirqazi@gmail.com", "abdullah.shahid1045@gmail.com"],
+        #     sync=True,
+        # )
         if ok:
             self.stdout.write(self.style.SUCCESS("[ALERT] Failure alert email sent successfully."))
         else:

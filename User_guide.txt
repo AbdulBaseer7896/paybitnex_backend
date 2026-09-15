@@ -310,3 +310,7 @@ LOCAL DEV ON WINDOWS
   Or skip celery entirely and drive the sweeps by hand (no redis needed):
 
     .\venv\Scripts\python.exe manage.py run_payment_sweeps
+
+
+python manage.py verify_ubl_transfers --range 01/09/2026 12/09/2026 --commit
+python manage.py verify_ubl_transfers --no-proxy --commit

@@ -402,8 +402,18 @@ def fill_date(driver, wait, locator, value):
 
 def check_login_error(driver):
     try:
-        text = driver.execute_script(
-            "var e=document.getElementById('loginErrorTxt');return e?e.textContent.trim():'';")
+        text = driver.execute_script("""
+            var ids = ['loginErrorTxt', 'errorMessage', 'lblMsg', 'errorMsg', 'lblError', 'spnError'];
+            for (var i = 0; i < ids.length; i++) {
+                var e = document.getElementById(ids[i]);
+                if (e && e.textContent.trim()) return e.textContent.trim();
+            }
+            var errs = document.querySelectorAll('.error-message, .alert-danger, [data-bind*="errorMessage"]');
+            for (var i = 0; i < errs.length; i++) {
+                if (errs[i].textContent.trim() && errs[i].offsetWidth > 0) return errs[i].textContent.trim();
+            }
+            return '';
+        """)
         if text:
             return text
     except Exception:
@@ -459,10 +469,40 @@ def wait_for_new_download(folder: Path, before: Set[Path], timeout=60) -> Option
     return None
 
 
+def get_fallback_ubl_proxies() -> List[Dict[str, str]]:
+    """Retrieve up to 3 fallback proxies configured in SystemSetting or environment.
+    Strictly filters out empty strings or unset values.
+    """
+    proxies = []
+    try:
+        from myapp.Models.Core_models import SystemSetting
+        for i in range(1, 4):
+            val = (SystemSetting.get(f"ubl_fallback_proxy_{i}", "") or "").strip()
+            if val and val.lower() not in ("none", "false", "0", "off", "null", "undefined", '""', "''"):
+                proxies.append({
+                    "key": f"ubl_fallback_proxy_{i}",
+                    "name": f"Admin Fallback Proxy #{i}",
+                    "proxy": val,
+                })
+    except Exception:
+        pass
+
+    if not proxies:
+        for i in range(1, 4):
+            val = (os.environ.get(f"UBL_FALLBACK_PROXY_{i}", "") or "").strip()
+            if val and val.lower() not in ("none", "false", "0", "off", "null", "undefined", '""', "''"):
+                proxies.append({
+                    "key": f"UBL_FALLBACK_PROXY_{i}",
+                    "name": f"Env Fallback Proxy #{i}",
+                    "proxy": val,
+                })
+    return proxies
+
+
 # ─────────────────────────────────────────────
-#  Core Scraper Function
+#  Core Scraper Single Attempt
 # ─────────────────────────────────────────────
-def scrape_ubl_statement(
+def _scrape_ubl_single_attempt(
     from_date: str = "01/09/2026",
     to_date: str = "11/09/2026",
     download_dir: Optional[Path] = None,
@@ -659,7 +699,12 @@ def scrape_ubl_statement(
                 out_ip = resp.read().decode('utf-8').strip()
                 log(f"[2.1] Verified Outbound IP: {out_ip}")
         except Exception as ip_err:
-            log(f"[2.1] IP check notice: {ip_err}")
+            err_str = str(ip_err)
+            log(f"[2.1] IP check notice: {err_str}")
+            if getattr(proxy_tunnel, "last_proxy_error", None):
+                raise RuntimeError(f"Proxy Authentication / Quota Exceeded ({proxy_tunnel.last_proxy_error})")
+            if "407" in err_str or "Tunnel connection failed" in err_str:
+                raise RuntimeError(f"Proxy Authentication / Quota Exceeded: {err_str}")
 
     try:
         # Resilient navigation loop to ensure UBL portal loads
@@ -674,6 +719,11 @@ def scrape_ubl_statement(
                     driver.execute_script("window.stop();")
                 except Exception:
                     pass
+
+            # Fast-fail if proxy is dead / rejected connection
+            if proxy_tunnel and getattr(proxy_tunnel, "last_proxy_error", None):
+                raise RuntimeError(f"Proxy Gateway Error ({proxy_tunnel.last_proxy_error})")
+
             time.sleep(3)
 
             page_title = driver.title or ""
@@ -689,6 +739,9 @@ def scrape_ubl_statement(
                 login_ready = True
                 break
             except Exception:
+                # Fast fail if proxy error occurred
+                if proxy_tunnel and getattr(proxy_tunnel, "last_proxy_error", None):
+                    raise RuntimeError(f"Proxy Gateway Error ({proxy_tunnel.last_proxy_error})")
                 log(f"[WARN] Login field not ready on attempt {nav_attempt}; retrying...")
                 time.sleep(2)
 
@@ -698,16 +751,16 @@ def scrape_ubl_statement(
 
         log("[4] Entering Login ID...")
         type_into(driver, wait, "userNameText", USER_ID)
-        time.sleep(2)
+        time.sleep(1.5)
 
         log("[5] Entering password...")
         type_into(driver, wait, "passwordText", PASSWORD)
-        time.sleep(2)
+        time.sleep(1.5)
 
         log("[6] Clicking LOGIN...")
-        login_btn = wait.until(EC.presence_of_element_located((By.ID, "loginButton")))
+        login_btn = wait.until(EC.element_to_be_clickable((By.ID, "loginButton")))
         click_el(driver, login_btn)
-        time.sleep(3)
+        time.sleep(5)
 
         log("[7] Checking for login errors...")
         err = check_login_error(driver)
@@ -715,15 +768,16 @@ def scrape_ubl_statement(
             raise RuntimeError(f"Login failed: {err}")
 
         log("[8] Waiting for the OTP channel dialog...")
-        email_radio = wait.until(EC.presence_of_element_located(
+        otp_wait = WebDriverWait(driver, 45)
+        email_radio = otp_wait.until(EC.element_to_be_clickable(
             (By.CSS_SELECTOR, "input[type='radio'][value='EMAIL']")))
-        time.sleep(1)
+        time.sleep(2)
 
         log("[9] Selecting E-mail channel...")
         click_el(driver, email_radio)
         driver.execute_script(
             "arguments[0].checked = true; arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", email_radio)
-        time.sleep(1)
+        time.sleep(2)
 
         log("[10a] Snapshotting existing UBL emails...")
         known_otp_uids = snapshot_otp_uids()
@@ -998,6 +1052,110 @@ def scrape_ubl_statement(
             pass
         if proxy_tunnel:
             proxy_tunnel.stop()
+
+
+# ─────────────────────────────────────────────
+#  Main Entrypoint with Fallback Rotation
+# ─────────────────────────────────────────────
+def scrape_ubl_statement(
+    from_date: str = "01/09/2026",
+    to_date: str = "11/09/2026",
+    download_dir: Optional[Path] = None,
+    headless: bool = True,
+    log_callback=None,
+    proxy: Optional[str] = None,
+) -> Path:
+    """Automates UBL Corporate Portal login, OTP validation via Gmail,
+    date-range export of CSV statement, and returns the Path to the saved file.
+    
+    If proxy fails or encounters quota limits (407), automatically rotates
+    through up to 3 fallback proxies configured in Admin Settings (SystemSetting).
+    """
+    def log(msg: str):
+        if log_callback:
+            try:
+                log_callback(str(msg))
+            except UnicodeEncodeError:
+                safe = str(msg).encode("ascii", errors="replace").decode("ascii")
+                log_callback(safe)
+        else:
+            try:
+                print(str(msg))
+            except UnicodeEncodeError:
+                safe = str(msg).encode("ascii", errors="replace").decode("ascii")
+                print(safe)
+
+    # Case 1: Direct connection (--no-proxy) or specific custom proxy string passed
+    if proxy is False or (isinstance(proxy, str) and proxy.strip().lower() in ("none", "false", "0", "off")):
+        return _scrape_ubl_single_attempt(
+            from_date=from_date,
+            to_date=to_date,
+            download_dir=download_dir,
+            headless=headless,
+            log_callback=log_callback,
+            proxy=False,
+        )
+
+    if proxy and proxy != DEFAULT_PROXY:
+        return _scrape_ubl_single_attempt(
+            from_date=from_date,
+            to_date=to_date,
+            download_dir=download_dir,
+            headless=headless,
+            log_callback=log_callback,
+            proxy=proxy,
+        )
+
+    # Case 2: Attempt with DEFAULT_PROXY
+    log("\n[PROXY STRATEGY] Attempting UBL statement scraping with DEFAULT_PROXY...")
+    try:
+        return _scrape_ubl_single_attempt(
+            from_date=from_date,
+            to_date=to_date,
+            download_dir=download_dir,
+            headless=headless,
+            log_callback=log_callback,
+            proxy=DEFAULT_PROXY,
+        )
+    except Exception as exc:
+        log(f"\n[PROXY FALLBACK] Primary DEFAULT_PROXY attempt failed: {exc}")
+        log("[PROXY FALLBACK] Checking for fallback proxies configured in Admin Settings...")
+
+        fallback_proxies = get_fallback_ubl_proxies()
+        if not fallback_proxies:
+            log("[PROXY FALLBACK] No fallback proxies configured in Admin Settings (SystemSetting ubl_fallback_proxy_1..3 are currently blank).")
+            log("[PROXY FALLBACK] Tip: Configure working fallback proxies in Paidix Admin Settings (Settings > Fallback Proxies) to enable automatic failover.")
+            raise exc
+
+        log(f"[PROXY FALLBACK] Found {len(fallback_proxies)} fallback proxy configuration(s). Starting fallback attempts...")
+        attempt_errors = [f"DEFAULT_PROXY: {exc}"]
+
+        for idx, item in enumerate(fallback_proxies, 1):
+            cand_name = item["name"]
+            cand_proxy = item["proxy"]
+            log(f"\n{'='*70}")
+            log(f"  [PROXY FALLBACK {idx}/{len(fallback_proxies)}] Trying {cand_name}...")
+            log(f"{'='*70}")
+
+            try:
+                result_path = _scrape_ubl_single_attempt(
+                    from_date=from_date,
+                    to_date=to_date,
+                    download_dir=download_dir,
+                    headless=headless,
+                    log_callback=log_callback,
+                    proxy=cand_proxy,
+                )
+                log(f"\n{'='*70}")
+                log(f"  [PROXY FALLBACK SUCCESS] UBL scraper succeeded using {cand_name}!")
+                log(f"{'='*70}\n")
+                return result_path
+            except Exception as cand_err:
+                log(f"[PROXY FALLBACK NOTICE] {cand_name} failed: {cand_err}")
+                attempt_errors.append(f"{cand_name}: {cand_err}")
+
+        final_err = f"All proxies failed ({len(fallback_proxies) + 1} attempts):\n" + "\n".join(f" - {e}" for e in attempt_errors)
+        raise RuntimeError(final_err) from exc
 
 
 if __name__ == "__main__":
