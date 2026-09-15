@@ -550,13 +550,7 @@ def _scrape_ubl_single_attempt(
     TO_DATE_LOCATOR          = (By.XPATH, "//div[@id='casaModalDatePicker']//*[normalize-space()='To']/following::input[1]")
     DONE_BTN_LOCATOR         = (By.XPATH, "//div[@id='casaModalDatePicker']//input[@value='Done'] | //div[@id='casaModalDatePicker']//button[normalize-space()='Done'] | //div[@id='casaModalDatePicker']//a[normalize-space()='Done']")
     PROCEED_LOCATOR          = (By.XPATH, "//input[@value='Proceed'] | //button[normalize-space()='Proceed'] | //a[normalize-space()='Proceed']")
-    EXPORT_DROPDOWN          = (
-        By.XPATH,
-        "//span[@id='exportSpan']/following::a[contains(@class,'ui-selectmenu')][1] | "
-        "//span[@id='exportSpan']/parent::*//a[contains(@class,'ui-selectmenu')] | "
-        "//*[contains(@class,'ui-selectmenu-status') and normalize-space()='Please Select']/ancestor::a[1] | "
-        "//*[@id='exportSpan']"
-    )
+    EXPORT_DROPDOWN          = (By.XPATH, "//*[contains(@class,'ui-selectmenu-status') and normalize-space()='Please Select']/ancestor::a[1]")
     CSV_OPTION               = (By.XPATH, "//ul[contains(@id,'menu')]//a[normalize-space()='CSV'] | //li//a[normalize-space()='CSV']")
     LOGOUT_DASHBOARD         = (By.XPATH, "//a[normalize-space()='Logout'] | //a[contains(.,'Logout')] | //*[@title='Logout']")
     LOGOUT_SECOND            = (By.ID, "logOut")
@@ -820,128 +814,29 @@ def _scrape_ubl_single_attempt(
 
         log("[15] OTP successfully accepted.")
 
-        # Statement export flow: Proceed directly to dashboard without idle timeout delays
-        log("[17] Waiting for Proceed button...")
-        try:
-            proceed_el = WebDriverWait(driver, 15).until(EC.presence_of_element_located(PROCEED_LOCATOR))
-            time.sleep(1)
-            log("[18] Clicking Proceed...")
-            click_el(driver, proceed_el)
-        except Exception as proc_ex:
-            log(f"[18] Proceed button notice ({proc_ex}); proceeding directly to dashboard...")
+        # Statement export flow: Exact proven delays for proxy / high-latency connections
+        log(f"[17] Waiting {WAIT_AFTER_SUBMIT_BEFORE_PROCEED}s before Proceed...")
+        time.sleep(WAIT_AFTER_SUBMIT_BEFORE_PROCEED)
 
-        log("[19] Waiting for dashboard & transactions table to load...")
-        dash_wait = WebDriverWait(driver, 90)
-        start_dash = time.time()
-        period_btn = None
-        while time.time() - start_dash < 90:
-            try:
-                btns = driver.find_elements(*PERIOD_DROPDOWN_BUTTON)
-                if btns and btns[0].is_displayed():
-                    period_btn = btns[0]
-                    break
-            except Exception:
-                pass
+        log("[18] Clicking Proceed...")
+        click_el(driver, wait.until(EC.element_to_be_clickable(PROCEED_LOCATOR)))
+        log("[18] Proceed clicked.")
 
-            # If any interrupting modal or popup appears (e.g. Customize Your Account), auto-cancel it
-            try:
-                driver.execute_script("""
-                    var cancelBtn = document.querySelector('input[value="Cancel"], button[value="Cancel"], a.ui-dialog-titlebar-close, .dialog-close');
-                    if (cancelBtn) {
-                        cancelBtn.click();
-                    }
-                """)
-            except Exception:
-                pass
+        log(f"[19] Waiting {WAIT_AFTER_PROCEED}s for the accounts page...")
+        time.sleep(WAIT_AFTER_PROCEED)
 
-            time.sleep(2)
-
-        if not period_btn:
-            period_btn = dash_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
-
-        time.sleep(2)
-        log("[19.1] Transactions table and period dropdown loaded successfully.")
-
-        log("[20] Opening period filter dropdown...")
-
-        # Resilient loop to open dropdown and click 'Select Range'
-        picker_opened = False
-        for attempt in range(1, 4):
-            log(f"[20.{attempt}] Opening Date Range Picker (attempt {attempt}/3)...")
-            try:
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", period_btn)
-                click_el(driver, period_btn)
-                time.sleep(1.5)
-
-                range_clicked = driver.execute_script("""
-                    // 1. First try menu item click if open
-                    var menu = document.getElementById('movementsSelectCont-menu');
-                    if (menu) {
-                        var items = menu.querySelectorAll('a, li');
-                        for (var i = 0; i < items.length; i++) {
-                            if (items[i].textContent.indexOf('Range') !== -1) {
-                                items[i].dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                                items[i].dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                                items[i].click();
-                                return true;
-                            }
-                        }
-                    }
-                    // 2. Direct select change on movementsSelectCont (exact option value is '?')
-                    var sel = document.getElementById('movementsSelectCont');
-                    if (sel) {
-                        sel.value = '?';
-                        sel.dispatchEvent(new Event('change', {bubbles: true}));
-                        if (window.$) {
-                            try { $(sel).val('?').change(); } catch(e){}
-                            try { $(sel).selectmenu('value', '?'); } catch(e){}
-                        }
-                        return true;
-                    }
-                    return false;
-                """)
-
-                if not range_clicked:
-                    try:
-                        range_el = driver.find_element(*PERIOD_MENU_SELECT_RANGE)
-                        click_el(driver, range_el)
-                    except Exception:
-                        pass
-
-                time.sleep(2)
-                is_visible = driver.execute_script("""
-                    var p = document.getElementById('casaModalDatePicker');
-                    if (p) {
-                        var st = window.getComputedStyle(p);
-                        return st.display !== 'none' && st.visibility !== 'hidden' && p.offsetHeight > 0;
-                    }
-                    return false;
-                """)
-                if is_visible:
-                    picker_opened = True
-                    break
-
-                # jQuery UI dialog fallback if present
-                driver.execute_script("""
-                    if (window.$ && $('#casaModalDatePicker').length) {
-                        try { $('#casaModalDatePicker').dialog('open'); } catch(e){}
-                    }
-                """)
-                time.sleep(1)
-                is_visible2 = driver.execute_script("""
-                    var p = document.getElementById('casaModalDatePicker');
-                    return p && window.getComputedStyle(p).display !== 'none';
-                """)
-                if is_visible2:
-                    picker_opened = True
-                    break
-
-            except Exception as att_err:
-                log(f"[WARN] Range picker attempt {attempt} notice: {att_err}")
-                time.sleep(2)
-
-        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        log("[20] Opening the period filter dropdown...")
+        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON)))
         time.sleep(1)
+
+        log("[20] Selecting 'Select Range'...")
+        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)))
+        log("[20] 'Select Range' selected.")
+
+        log("[20a] Waiting for the date popup...")
+        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        log("[20a] Date popup open.")
+        time.sleep(2)
 
         log(f"[21] Entering From date: {target_from}")
         fill_date(driver, wait, FROM_DATE_LOCATOR, target_from)
@@ -950,65 +845,18 @@ def _scrape_ubl_single_attempt(
         time.sleep(1)
 
         log("[23] Clicking Done...")
-        done_btn = wait.until(EC.presence_of_element_located(DONE_BTN_LOCATOR))
-        try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            ActionChains(driver).move_to_element(done_btn).click().perform()
-        except Exception:
-            driver.execute_script("arguments[0].click();", done_btn)
+        click_el(driver, wait.until(EC.element_to_be_clickable(DONE_BTN_LOCATOR)))
+        log("[23] Done clicked.")
         time.sleep(5)
 
-        log("[24] Opening Export dropdown...")
-        try:
-            export_btn = wait.until(EC.presence_of_element_located(EXPORT_DROPDOWN))
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", export_btn)
-            driver.execute_script("""
-                var el = arguments[0];
-                if (el.id === 'exportSpan') {
-                    var p = el.parentElement;
-                    var btn = p ? p.querySelector('a.ui-selectmenu') : null;
-                    if (btn) el = btn;
-                }
-                el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                el.click();
-            """, export_btn)
-        except Exception:
-            driver.execute_script("""
-                var sp = document.getElementById('exportSpan');
-                if (sp) {
-                    var btn = (sp.parentElement && sp.parentElement.querySelector('a.ui-selectmenu')) || sp;
-                    btn.click();
-                }
-            """)
-        time.sleep(1.5)
+        log("[24] Opening Export dropdown ('Please Select')...")
+        click_el(driver, wait.until(EC.element_to_be_clickable(EXPORT_DROPDOWN)))
+        time.sleep(1)
 
         log("[25] Choosing CSV...")
         before_files = {f for f in target_dir.iterdir() if not f.name.endswith(".crdownload")}
-        csv_clicked = driver.execute_script("""
-            var items = document.querySelectorAll('ul[id*="menu"] a, li a, [role="menuitem"]');
-            for (var i = 0; i < items.length; i++) {
-                if (items[i].textContent.trim().toUpperCase() === 'CSV') {
-                    items[i].dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                    items[i].dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                    items[i].click();
-                    return true;
-                }
-            }
-            return false;
-        """)
-        if not csv_clicked:
-            csv_opt = wait.until(EC.presence_of_element_located(CSV_OPTION))
-            try:
-                from selenium.webdriver.common.action_chains import ActionChains
-                ActionChains(driver).move_to_element(csv_opt).click().perform()
-            except Exception:
-                driver.execute_script("""
-                    arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                    arguments[0].dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
-                    arguments[0].click();
-                """, csv_opt)
-        log("[25] CSV export triggered. Waiting for download...")
+        click_el(driver, wait.until(EC.element_to_be_clickable(CSV_OPTION)))
+        log("[25] CSV clicked. Waiting for download...")
 
         downloaded = wait_for_new_download(target_dir, before_files, timeout=60)
         if not downloaded:
