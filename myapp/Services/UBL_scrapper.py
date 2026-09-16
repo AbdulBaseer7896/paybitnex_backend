@@ -371,6 +371,11 @@ class LocalSocks5Tunnel:
             client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
 
             # ── Step 8: pipe traffic bidirectionally ──────────────────────────
+            # Remove timeouts for the pipe phase so long-lived AJAX requests
+            # don't get killed if they take longer than 60s to return data.
+            client.settimeout(None)
+            upstream.settimeout(None)
+            
             t1 = threading.Thread(target=self._pipe, args=(client, upstream), daemon=True)
             t2 = threading.Thread(target=self._pipe, args=(upstream, client), daemon=True)
             t1.start(); t2.start()
@@ -924,8 +929,10 @@ def _scrape_ubl_single_attempt(
                     import socks as _socks
                     import socket as _sock_mod
                     s = _socks.socksocket()
-                    s.set_proxy(_socks.SOCKS5, "127.0.0.1", proxy_tunnel.port)
-                    s.settimeout(8)
+                    # Use rdns=True so DNS resolution for ipify happens via proxy,
+                    # preventing ERR_NAME_NOT_RESOLVED on prod.
+                    s.set_proxy(_socks.SOCKS5, "127.0.0.1", proxy_tunnel.port, rdns=True)
+                    s.settimeout(15)
                     s.connect(("api.ipify.org", 80))
                     s.sendall(b"GET / HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n")
                     resp_data = b""
@@ -1015,7 +1022,7 @@ def _scrape_ubl_single_attempt(
         log("[6] Clicking LOGIN...")
         login_btn = wait.until(EC.element_to_be_clickable((By.ID, "loginButton")))
         click_el(driver, login_btn)
-        time.sleep(5)
+        time.sleep(10)   # SOCKS5 proxy adds latency on the redirect
 
         log("[7] Checking for login errors...")
         err = check_login_error(driver)
@@ -1023,7 +1030,7 @@ def _scrape_ubl_single_attempt(
             raise RuntimeError(f"Login failed: {err}")
 
         log("[8] Waiting for the OTP channel dialog...")
-        otp_wait = WebDriverWait(driver, 45)
+        otp_wait = WebDriverWait(driver, 90)   # slow SOCKS5/proxy connections need more time
         email_radio = otp_wait.until(EC.element_to_be_clickable(
             (By.CSS_SELECTOR, "input[type='radio'][value='EMAIL']")))
         time.sleep(2)
