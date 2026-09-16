@@ -37,7 +37,7 @@ OTP_SENDER = os.environ.get("UBL_OTP_SENDER", "ubl_digital@ubl.com.pk")
 
 # Timings (seconds)
 WAIT_AFTER_SUBMIT_BEFORE_PROCEED = int(os.environ.get("UBL_WAIT_AFTER_SUBMIT", "30"))
-WAIT_AFTER_PROCEED               = int(os.environ.get("UBL_WAIT_AFTER_PROCEED", "60"))
+WAIT_AFTER_PROCEED               = int(os.environ.get("UBL_WAIT_AFTER_PROCEED", "75")) 
 OTP_CHECK_WAITS                  = [20, 20, 40]
 
 OTP_PATTERNS = [
@@ -248,7 +248,11 @@ def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, Any]]:
 
 def strip_proxy_session_pins(proxy_str: str) -> str:
     """Remove Decodo session-pinning parameters (sessionduration, session, asn) from proxy username.
-    Ensures country-PK is retained so Decodo always assigns a residential Pakistani IP.
+    Preserves static IP pins (-ip-x.x.x.x) and country pins unchanged.
+    Only appends -country-PK as a fallback when no IP pin AND no country pin is present.
+
+    Note: -ip-<addr> and -country-<code> are mutually exclusive in Decodo ISP proxies.
+    A static IP-pinned username must NOT have -country- appended or Decodo will reject it.
     """
     if not proxy_str:
         return proxy_str
@@ -263,8 +267,12 @@ def strip_proxy_session_pins(proxy_str: str) -> str:
         flags=re.IGNORECASE
     ).rstrip("-")
 
-    # Ensure -country-PK is preserved or added to prevent foreign routing (like Singapore)
-    if "country-" not in clean_user.lower():
+    # Only add -country-PK when there is no static IP pin and no existing country pin.
+    # IP-pinned proxies (e.g. user-xxx-ip-1.2.3.4) are already locked to a specific
+    # exit node — appending -country-PK would produce a conflicting/invalid username.
+    has_ip_pin      = re.search(r"-ip-\d+\.\d+\.\d+\.\d+", clean_user, re.IGNORECASE)
+    has_country_pin = "country-" in clean_user.lower()
+    if not has_ip_pin and not has_country_pin:
         clean_user += "-country-PK"
 
     if "@" in str(proxy_str):
@@ -822,16 +830,36 @@ def _scrape_ubl_single_attempt(
         log(f"[19] Waiting {WAIT_AFTER_PROCEED}s for the accounts page...")
         time.sleep(WAIT_AFTER_PROCEED)
 
+        # The accounts page loads account data and the period filter dropdown
+        # via AJAX after Proceed. On slow proxy connections (India -> proxy -> UBL)
+        # these AJAX calls can take 90-120s. We must NOT call window.stop() here —
+        # doing so kills the pending AJAX requests and the dropdown never renders.
+        # Just use a generous wait and let the browser finish naturally.
+        slow_wait = WebDriverWait(driver, 120)
+
         log("[20] Opening the period filter dropdown...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON)))
+        try:
+            dropdown_btn = slow_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+        except Exception:
+            # The page appears stuck (spinner still running). Refresh the page —
+            # this often clears stalled AJAX on slow/proxied connections.
+            log("[20] Dropdown not ready after 120s — refreshing the page and retrying...")
+            try:
+                driver.refresh()
+            except Exception:
+                pass
+            time.sleep(10)
+            # After refresh the session is still alive; wait again for the dropdown.
+            dropdown_btn = slow_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+        click_el(driver, dropdown_btn)
         time.sleep(1)
 
         log("[20] Selecting 'Select Range'...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)))
+        click_el(driver, slow_wait.until(EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)))
         log("[20] 'Select Range' selected.")
 
         log("[20a] Waiting for the date popup...")
-        wait.until(EC.visibility_of_element_located(DATE_POPUP))
+        slow_wait.until(EC.visibility_of_element_located(DATE_POPUP))
         log("[20a] Date popup open.")
         time.sleep(2)
 
