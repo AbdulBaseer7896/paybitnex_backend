@@ -216,30 +216,230 @@ class LocalProxyTunnel:
             pass
 
 
+class LocalSocks5Tunnel:
+    """Lightweight in-process SOCKS5 proxy forwarder with RFC-1929 username/password auth.
+
+    Listens on 127.0.0.1 without authentication so Chrome can connect with
+    --proxy-server=socks5://127.0.0.1:<port> (no credentials needed locally).
+    Authenticates with the upstream SOCKS5 server using user/password on each
+    connection. Pipes bidirectional traffic after the SOCKS5 handshake.
+
+    Required because Chrome headless on Linux cannot handle SOCKS5 auth prompts.
+    """
+
+    def __init__(self, upstream_host: str, upstream_port: int, user: str, password: str):
+        try:
+            self.upstream_host = socket.gethostbyname(upstream_host)
+        except Exception:
+            self.upstream_host = upstream_host
+        self.upstream_port = int(upstream_port)
+        self.user     = user.encode("utf-8")
+        self.password = password.encode("utf-8")
+        self.last_proxy_error = None
+
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind(("127.0.0.1", 0))
+        self.port = self.server.getsockname()[1]
+        self.server.listen(200)
+        self.running = True
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                client, _ = self.server.accept()
+                threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+            except Exception:
+                break
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("Connection closed unexpectedly")
+            buf += chunk
+        return buf
+
+    @staticmethod
+    def _pipe(src: socket.socket, dst: socket.socket):
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                dst.sendall(data)
+        except Exception:
+            pass
+
+    def _handle_client(self, client: socket.socket):
+        upstream = None
+        try:
+            client.settimeout(60)
+
+            # ── Step 1: greet Chrome — offer no-auth ──────────────────────────
+            ver_nmeth = self._recv_exact(client, 2)
+            if ver_nmeth[0] != 5:
+                return
+            nmethods = ver_nmeth[1]
+            self._recv_exact(client, nmethods)    # consume method list
+            client.sendall(b"\x05\x00")            # VER=5, METHOD=0 (no auth)
+
+            # ── Step 2: read CONNECT request from Chrome ───────────────────────
+            header = self._recv_exact(client, 4)
+            if header[0] != 5 or header[1] != 1:   # must be VER=5, CMD=CONNECT
+                client.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+
+            atyp = header[3]
+            if atyp == 0x01:        # IPv4
+                raw_addr = self._recv_exact(client, 4)
+                dst_addr = ".".join(str(b) for b in raw_addr)
+            elif atyp == 0x03:      # domain name
+                dlen = self._recv_exact(client, 1)[0]
+                dst_addr = self._recv_exact(client, dlen).decode("utf-8", errors="replace")
+            elif atyp == 0x04:      # IPv6
+                import ipaddress
+                raw_addr = self._recv_exact(client, 16)
+                dst_addr = str(ipaddress.IPv6Address(raw_addr))
+            else:
+                client.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+            port_bytes = self._recv_exact(client, 2)
+            dst_port   = (port_bytes[0] << 8) | port_bytes[1]  # noqa: F841
+
+            # ── Step 3: connect to upstream SOCKS5 server ─────────────────────
+            upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            upstream.settimeout(30)
+            upstream.connect((self.upstream_host, self.upstream_port))
+            upstream.settimeout(60)
+
+            # ── Step 4: RFC-1929 user/pass auth with upstream ─────────────────
+            upstream.sendall(b"\x05\x01\x02")   # request user/pass auth
+            srv_choice = self._recv_exact(upstream, 2)
+            if srv_choice[1] == 0x02:
+                auth_pkt = (
+                    b"\x01"
+                    + bytes([len(self.user)])     + self.user
+                    + bytes([len(self.password)]) + self.password
+                )
+                upstream.sendall(auth_pkt)
+                auth_resp = self._recv_exact(upstream, 2)
+                if auth_resp[1] != 0x00:
+                    self.last_proxy_error = "SOCKS5 upstream auth rejected (wrong credentials?)"
+                    client.sendall(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")
+                    return
+            elif srv_choice[1] == 0xFF:
+                self.last_proxy_error = "SOCKS5 upstream rejected all auth methods"
+                client.sendall(b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+            # else 0x00 = no-auth accepted, continue
+
+            # ── Step 5: forward CONNECT to upstream ───────────────────────────
+            if atyp == 0x03:
+                addr_enc = dst_addr.encode("utf-8")
+                connect_req = b"\x05\x01\x00\x03" + bytes([len(addr_enc)]) + addr_enc + port_bytes
+            elif atyp == 0x01:
+                connect_req = b"\x05\x01\x00\x01" + bytes(int(p) for p in dst_addr.split(".")) + port_bytes
+            else:
+                addr_enc = dst_addr.encode("utf-8")
+                connect_req = b"\x05\x01\x00\x03" + bytes([len(addr_enc)]) + addr_enc + port_bytes
+            upstream.sendall(connect_req)
+
+            # ── Step 6: read upstream connection reply ────────────────────────
+            rep_hdr = self._recv_exact(upstream, 4)
+            if rep_hdr[1] != 0x00:
+                err_codes = {1: "General SOCKS failure", 2: "Connection not allowed",
+                             3: "Network unreachable", 4: "Host unreachable",
+                             5: "Connection refused", 6: "TTL expired"}
+                self.last_proxy_error = err_codes.get(rep_hdr[1], f"SOCKS5 error {rep_hdr[1]:#x}")
+                client.sendall(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
+                return
+            # consume bound address
+            rep_atyp = rep_hdr[3]
+            if rep_atyp == 0x01:
+                self._recv_exact(upstream, 6)
+            elif rep_atyp == 0x03:
+                self._recv_exact(upstream, self._recv_exact(upstream, 1)[0] + 2)
+            elif rep_atyp == 0x04:
+                self._recv_exact(upstream, 18)
+
+            # ── Step 7: tell Chrome we're connected ───────────────────────────
+            client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+
+            # ── Step 8: pipe traffic bidirectionally ──────────────────────────
+            t1 = threading.Thread(target=self._pipe, args=(client, upstream), daemon=True)
+            t2 = threading.Thread(target=self._pipe, args=(upstream, client), daemon=True)
+            t1.start(); t2.start()
+            t1.join();  t2.join()
+
+        except Exception:
+            pass
+        finally:
+            for s in (client, upstream):
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+    def stop(self):
+        self.running = False
+        try:
+            self.server.close()
+        except Exception:
+            pass
+
+
 def parse_proxy_string(proxy_str: str) -> Optional[Dict[str, Any]]:
-    """Parses proxy string into host, port, user, pass dictionary."""
+    """Parses proxy string into host, port, user, pass, type dictionary.
+    Supports formats:
+      host:port:user:pass             (HTTP proxy, default)
+      user:pass@host:port             (HTTP proxy, @-style)
+      socks5://host:port:user:pass    (SOCKS5 with auth)
+      socks5://user:pass@host:port    (SOCKS5 with auth, @-style)
+      socks5://host:port              (SOCKS5 no auth)
+    """
     if not proxy_str or not str(proxy_str).strip():
         return None
 
-    clean = str(proxy_str).strip().replace("http://", "").replace("https://", "")
-    if "@" in clean:
-        auth_part, host_part = clean.split("@", 1)
-        user, pwd = auth_part.split(":", 1) if ":" in auth_part else (auth_part, "")
-        host, port = host_part.split(":", 1) if ":" in host_part else (host_part, "80")
-        try:
-            return {"host": host, "port": int(port), "user": user, "pass": pwd}
-        except ValueError:
-            return {"host": host, "port": 80, "user": user, "pass": pwd}
+    raw = str(proxy_str).strip()
 
-    parts = clean.split(":")
+    # Detect proxy type from scheme prefix
+    proxy_type = "http"
+    for prefix in ("socks5h://", "socks5://", "socks4a://", "socks4://",
+                   "https://", "http://"):
+        if raw.lower().startswith(prefix):
+            if "socks5" in prefix:
+                proxy_type = "socks5"
+            elif "socks4" in prefix:
+                proxy_type = "socks4"
+            raw = raw[len(prefix):]
+            break
+
+    # Parse user:pass@host:port
+    if "@" in raw:
+        auth_part, host_part = raw.split("@", 1)
+        user, pwd = auth_part.split(":", 1) if ":" in auth_part else (auth_part, "")
+        host, port = host_part.split(":", 1) if ":" in host_part else (host_part, "1080" if proxy_type == "socks5" else "80")
+        try:
+            return {"host": host, "port": int(port), "user": user, "pass": pwd, "type": proxy_type}
+        except ValueError:
+            return {"host": host, "port": 1080 if proxy_type == "socks5" else 80, "user": user, "pass": pwd, "type": proxy_type}
+
+    # Parse host:port:user:pass  or  host:port
+    parts = raw.split(":")
     if len(parts) == 4:
         try:
-            return {"host": parts[0], "port": int(parts[1]), "user": parts[2], "pass": parts[3]}
+            return {"host": parts[0], "port": int(parts[1]), "user": parts[2], "pass": parts[3], "type": proxy_type}
         except ValueError:
             return None
     elif len(parts) == 2:
         try:
-            return {"host": parts[0], "port": int(parts[1]), "user": None, "pass": None}
+            return {"host": parts[0], "port": int(parts[1]), "user": None, "pass": None, "type": proxy_type}
         except ValueError:
             return None
 
@@ -250,14 +450,21 @@ def strip_proxy_session_pins(proxy_str: str) -> str:
     """Remove Decodo session-pinning parameters (sessionduration, session, asn) from proxy username.
     Preserves static IP pins (-ip-x.x.x.x) and country pins unchanged.
     Only appends -country-PK as a fallback when no IP pin AND no country pin is present.
+    SOCKS5 proxies are returned unchanged (session-pin logic only applies to Decodo HTTP proxies).
 
     Note: -ip-<addr> and -country-<code> are mutually exclusive in Decodo ISP proxies.
     A static IP-pinned username must NOT have -country- appended or Decodo will reject it.
     """
     if not proxy_str:
         return proxy_str
+    # SOCKS5 proxies have nothing to do with Decodo session pinning — leave them alone.
+    raw = str(proxy_str).strip().lower()
+    if raw.startswith(("socks5://", "socks5h://", "socks4://", "socks4a://")):
+        return proxy_str
     info = parse_proxy_string(proxy_str)
     if not info or not info.get("user"):
+        return proxy_str
+    if info.get("type") == "socks5":
         return proxy_str
 
     clean_user = re.sub(
@@ -600,22 +807,38 @@ def _scrape_ubl_single_attempt(
         active_proxy = strip_proxy_session_pins(active_proxy)
         proxy_info = parse_proxy_string(active_proxy)
         if proxy_info:
+            is_socks5 = proxy_info.get("type") == "socks5"
             if proxy_info.get("user") and proxy_info.get("pass"):
-                log(f"[1.1] Initializing local proxy tunnel to {proxy_info['host']}:{proxy_info['port']} (Pakistani exit)...")
-                try:
-                    proxy_tunnel = LocalProxyTunnel(
-                        upstream_host=proxy_info["host"],
-                        upstream_port=proxy_info["port"],
-                        user=proxy_info["user"],
-                        password=proxy_info["pass"]
-                    )
-                    log(f"[1.1] Local proxy tunnel active on 127.0.0.1:{proxy_tunnel.port}")
-                    options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
-                except Exception as pe:
-                    log(f"[PROXY ERROR] Could not start local proxy tunnel: {pe}")
+                if is_socks5:
+                    log(f"[1.1] Initializing local SOCKS5 tunnel to {proxy_info['host']}:{proxy_info['port']}...")
+                    try:
+                        proxy_tunnel = LocalSocks5Tunnel(
+                            upstream_host=proxy_info["host"],
+                            upstream_port=proxy_info["port"],
+                            user=proxy_info["user"],
+                            password=proxy_info["pass"]
+                        )
+                        log(f"[1.1] Local SOCKS5 tunnel active on 127.0.0.1:{proxy_tunnel.port}")
+                        options.add_argument(f"--proxy-server=socks5://127.0.0.1:{proxy_tunnel.port}")
+                    except Exception as pe:
+                        log(f"[PROXY ERROR] Could not start local SOCKS5 tunnel: {pe}")
+                else:
+                    log(f"[1.1] Initializing local HTTP proxy tunnel to {proxy_info['host']}:{proxy_info['port']}...")
+                    try:
+                        proxy_tunnel = LocalProxyTunnel(
+                            upstream_host=proxy_info["host"],
+                            upstream_port=proxy_info["port"],
+                            user=proxy_info["user"],
+                            password=proxy_info["pass"]
+                        )
+                        log(f"[1.1] Local HTTP proxy tunnel active on 127.0.0.1:{proxy_tunnel.port}")
+                        options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+                    except Exception as pe:
+                        log(f"[PROXY ERROR] Could not start local HTTP proxy tunnel: {pe}")
             else:
-                log(f"[1.1] Configuring direct proxy: {proxy_info['host']}:{proxy_info['port']}...")
-                options.add_argument(f"--proxy-server=http://{proxy_info['host']}:{proxy_info['port']}")
+                scheme = "socks5" if is_socks5 else "http"
+                log(f"[1.1] Configuring direct {scheme.upper()} proxy: {proxy_info['host']}:{proxy_info['port']}...")
+                options.add_argument(f"--proxy-server={scheme}://{proxy_info['host']}:{proxy_info['port']}")
 
     log(f"[2] Launching Chrome ({'headless' if headless else 'visible'})...")
     driver = None
@@ -637,7 +860,8 @@ def _scrape_ubl_single_attempt(
         uc_options.add_argument("--window-size=1920,1080")
         uc_options.add_experimental_option("prefs", prefs)
         if proxy_tunnel:
-            uc_options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+            tunnel_scheme = "socks5" if isinstance(proxy_tunnel, LocalSocks5Tunnel) else "http"
+            uc_options.add_argument(f"--proxy-server={tunnel_scheme}://127.0.0.1:{proxy_tunnel.port}")
         driver = uc_mod.Chrome(options=uc_options, use_subprocess=False)
         log("[2] Chrome launched via undetected-chromedriver [OK]")
     except ImportError:
@@ -672,7 +896,8 @@ def _scrape_ubl_single_attempt(
             fallback_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             fallback_opts.add_experimental_option("useAutomationExtension", False)
             if proxy_tunnel:
-                fallback_opts.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_tunnel.port}")
+                tunnel_scheme = "socks5" if isinstance(proxy_tunnel, LocalSocks5Tunnel) else "http"
+                fallback_opts.add_argument(f"--proxy-server={tunnel_scheme}://127.0.0.1:{proxy_tunnel.port}")
             fallback_opts.add_experimental_option("prefs", prefs)
             driver = webdriver.Chrome(options=fallback_opts)
             log("[2] Chrome launched via fallback selenium [OK]")
@@ -691,12 +916,43 @@ def _scrape_ubl_single_attempt(
     if proxy_tunnel:
         try:
             import urllib.request
-            proxy_handler = urllib.request.ProxyHandler({'http': f'http://127.0.0.1:{proxy_tunnel.port}', 'https': f'http://127.0.0.1:{proxy_tunnel.port}'})
-            opener = urllib.request.build_opener(proxy_handler)
-            req = urllib.request.Request('https://api.ipify.org', headers={'User-Agent': 'curl/7.68.0'})
-            with opener.open(req, timeout=8) as resp:
-                out_ip = resp.read().decode('utf-8').strip()
-                log(f"[2.1] Verified Outbound IP: {out_ip}")
+            local_url = f"127.0.0.1:{proxy_tunnel.port}"
+            if isinstance(proxy_tunnel, LocalSocks5Tunnel):
+                # urllib doesn't speak SOCKS5 natively; use the socks module if available,
+                # otherwise skip the IP check (Chrome will still route through the tunnel).
+                try:
+                    import socks as _socks
+                    import socket as _sock_mod
+                    s = _socks.socksocket()
+                    s.set_proxy(_socks.SOCKS5, "127.0.0.1", proxy_tunnel.port)
+                    s.settimeout(8)
+                    s.connect(("api.ipify.org", 80))
+                    s.sendall(b"GET / HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n")
+                    resp_data = b""
+                    while True:
+                        chunk = s.recv(1024)
+                        if not chunk:
+                            break
+                        resp_data += chunk
+                    s.close()
+                    out_ip = resp_data.decode("utf-8", errors="ignore").split("\r\n\r\n", 1)[-1].strip()
+                    log(f"[2.1] Verified Outbound IP (SOCKS5): {out_ip}")
+                except ImportError:
+                    log("[2.1] SOCKS5 IP check skipped (PySocks not installed — pip install PySocks).")
+                except Exception as socks_err:
+                    log(f"[2.1] SOCKS5 IP check notice: {socks_err}")
+                    if getattr(proxy_tunnel, "last_proxy_error", None):
+                        raise RuntimeError(f"SOCKS5 Proxy Error ({proxy_tunnel.last_proxy_error})")
+            else:
+                proxy_handler = urllib.request.ProxyHandler({
+                    'http':  f'http://{local_url}',
+                    'https': f'http://{local_url}',
+                })
+                opener = urllib.request.build_opener(proxy_handler)
+                req = urllib.request.Request('https://api.ipify.org', headers={'User-Agent': 'curl/7.68.0'})
+                with opener.open(req, timeout=8) as resp:
+                    out_ip = resp.read().decode('utf-8').strip()
+                    log(f"[2.1] Verified Outbound IP: {out_ip}")
         except Exception as ip_err:
             err_str = str(ip_err)
             log(f"[2.1] IP check notice: {err_str}")
