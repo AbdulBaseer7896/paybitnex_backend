@@ -837,45 +837,54 @@ def _scrape_ubl_single_attempt(
         # Just use a generous wait and let the browser finish naturally.
         slow_wait = WebDriverWait(driver, 120)
 
-        log("[20] Opening the period filter dropdown...")
-        try:
-            dropdown_btn = slow_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
-            click_el(driver, dropdown_btn)
-        except Exception:
-            # Selenium couldn't click the button within 120s. Before giving up, check
-            # whether the element actually exists in the DOM. If it does, a loading
-            # overlay may be blocking Selenium's clickability check — try a JS click.
-            # If it does NOT exist, the account data AJAX never completed (likely the
-            # proxy exit IP is geo-restricted or too slow for UBL's account API).
-            # NOTE: do NOT call driver.refresh() here — UBL's portal treats a page
-            # refresh as a new session request and redirects back to the login page.
-            log("[20] Dropdown not clickable after 120s — checking DOM and trying JS click...")
-            in_dom = False
+        # Wait for the period-filter dropdown to become interactive.
+        # On high-latency proxy connections (India -> proxy -> UBL) the jQuery UI
+        # selectmenu is created in the DOM early but its .click() handler isn't
+        # bound until the details-panel AJAX completes. A single long wait isn't
+        # reliable — instead we click, confirm the menu opened, and retry if not.
+        log("[20] Opening the period filter dropdown (with retry loop)...")
+        dropdown_opened = False
+        MAX_DROPDOWN_ATTEMPTS = 10           # retry up to 10x (≈ 10 × 25s = ~250s max)
+        DROPDOWN_RETRY_GAP    = 25           # seconds to wait between attempts
+
+        for attempt in range(1, MAX_DROPDOWN_ATTEMPTS + 1):
+            log(f"[20] Dropdown click attempt {attempt}/{MAX_DROPDOWN_ATTEMPTS}...")
+            # Try Selenium click first (respects aria-disabled / CSS display)
             try:
-                in_dom = bool(driver.execute_script(
-                    "return !!document.getElementById('movementsSelectCont-button');"
-                ))
+                short_w = WebDriverWait(driver, 15)
+                btn = short_w.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+                click_el(driver, btn)
             except Exception:
-                pass
-            log(f"[20] Element present in DOM: {in_dom}")
-            if not in_dom:
-                raise RuntimeError(
-                    "Period filter dropdown (#movementsSelectCont-button) not found in DOM "
-                    "after 120s wait. The account data AJAX never completed — the proxy exit "
-                    "IP may be geo-restricted for UBL account API calls. "
-                    "ACTION: switch to a Pakistani residential proxy IP (e.g. isp.decodo.com "
-                    "port 10001 with a -country-PK or -ip-<PK-IP> username)."
-                )
-            # Element is in DOM but not 'clickable' per Selenium — JS click as last resort.
+                # Fall back to raw JS click (fires the event even through overlays)
+                try:
+                    driver.execute_script(
+                        "var b=document.getElementById('movementsSelectCont-button');"
+                        "if(b) b.click();"
+                    )
+                except Exception:
+                    pass
+
+            # Verify the dropdown menu actually opened (quick check — 5s)
             try:
-                driver.execute_script(
-                    "document.getElementById('movementsSelectCont-button').click();"
+                WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable(PERIOD_MENU_SELECT_RANGE)
                 )
-            except Exception as js_err:
-                raise RuntimeError(
-                    f"JS direct click also failed on period dropdown: {js_err}"
-                ) from js_err
-            time.sleep(2)
+                dropdown_opened = True
+                log(f"[20] Dropdown opened successfully on attempt {attempt}.")
+                break
+            except Exception:
+                if attempt < MAX_DROPDOWN_ATTEMPTS:
+                    log(f"[20] Menu did not open — waiting {DROPDOWN_RETRY_GAP}s before retry...")
+                    time.sleep(DROPDOWN_RETRY_GAP)
+
+        if not dropdown_opened:
+            raise RuntimeError(
+                f"Period filter dropdown menu never opened after {MAX_DROPDOWN_ATTEMPTS} attempts "
+                f"(~{MAX_DROPDOWN_ATTEMPTS * (15 + 5 + DROPDOWN_RETRY_GAP)}s total). "
+                "The jQuery UI click handler may not be binding — the details-panel AJAX is "
+                "likely still in flight. Try increasing WAIT_AFTER_PROCEED or switching to a "
+                "lower-latency proxy (e.g. a Pakistani residential IP)."
+            )
         time.sleep(1)
 
         log("[20] Selecting 'Select Range'...")
@@ -888,18 +897,18 @@ def _scrape_ubl_single_attempt(
         time.sleep(2)
 
         log(f"[21] Entering From date: {target_from}")
-        fill_date(driver, wait, FROM_DATE_LOCATOR, target_from)
+        fill_date(driver, slow_wait, FROM_DATE_LOCATOR, target_from)
         log(f"[22] Entering To date: {target_to}")
-        fill_date(driver, wait, TO_DATE_LOCATOR, target_to)
+        fill_date(driver, slow_wait, TO_DATE_LOCATOR, target_to)
         time.sleep(1)
 
         log("[23] Clicking Done...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(DONE_BTN_LOCATOR)))
+        click_el(driver, slow_wait.until(EC.element_to_be_clickable(DONE_BTN_LOCATOR)))
         log("[23] Done clicked.")
         time.sleep(5)
 
         log("[24] Opening Export dropdown ('Please Select')...")
-        click_el(driver, wait.until(EC.element_to_be_clickable(EXPORT_DROPDOWN)))
+        click_el(driver, slow_wait.until(EC.element_to_be_clickable(EXPORT_DROPDOWN)))
         time.sleep(1)
 
         log("[25] Choosing CSV...")
