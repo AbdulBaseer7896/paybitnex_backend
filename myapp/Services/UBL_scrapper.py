@@ -840,18 +840,42 @@ def _scrape_ubl_single_attempt(
         log("[20] Opening the period filter dropdown...")
         try:
             dropdown_btn = slow_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
+            click_el(driver, dropdown_btn)
         except Exception:
-            # The page appears stuck (spinner still running). Refresh the page —
-            # this often clears stalled AJAX on slow/proxied connections.
-            log("[20] Dropdown not ready after 120s — refreshing the page and retrying...")
+            # Selenium couldn't click the button within 120s. Before giving up, check
+            # whether the element actually exists in the DOM. If it does, a loading
+            # overlay may be blocking Selenium's clickability check — try a JS click.
+            # If it does NOT exist, the account data AJAX never completed (likely the
+            # proxy exit IP is geo-restricted or too slow for UBL's account API).
+            # NOTE: do NOT call driver.refresh() here — UBL's portal treats a page
+            # refresh as a new session request and redirects back to the login page.
+            log("[20] Dropdown not clickable after 120s — checking DOM and trying JS click...")
+            in_dom = False
             try:
-                driver.refresh()
+                in_dom = bool(driver.execute_script(
+                    "return !!document.getElementById('movementsSelectCont-button');"
+                ))
             except Exception:
                 pass
-            time.sleep(10)
-            # After refresh the session is still alive; wait again for the dropdown.
-            dropdown_btn = slow_wait.until(EC.element_to_be_clickable(PERIOD_DROPDOWN_BUTTON))
-        click_el(driver, dropdown_btn)
+            log(f"[20] Element present in DOM: {in_dom}")
+            if not in_dom:
+                raise RuntimeError(
+                    "Period filter dropdown (#movementsSelectCont-button) not found in DOM "
+                    "after 120s wait. The account data AJAX never completed — the proxy exit "
+                    "IP may be geo-restricted for UBL account API calls. "
+                    "ACTION: switch to a Pakistani residential proxy IP (e.g. isp.decodo.com "
+                    "port 10001 with a -country-PK or -ip-<PK-IP> username)."
+                )
+            # Element is in DOM but not 'clickable' per Selenium — JS click as last resort.
+            try:
+                driver.execute_script(
+                    "document.getElementById('movementsSelectCont-button').click();"
+                )
+            except Exception as js_err:
+                raise RuntimeError(
+                    f"JS direct click also failed on period dropdown: {js_err}"
+                ) from js_err
+            time.sleep(2)
         time.sleep(1)
 
         log("[20] Selecting 'Select Range'...")
