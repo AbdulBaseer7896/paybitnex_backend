@@ -1,21 +1,21 @@
-root@PayBitnex:~/paybitnex_backend/scripts# cat backup.sh
 #!/bin/bash
 set -a
 # Source the .env file
-[ -f /root/paybitnex_backend/.env ] && . /root/paybitnex_backend/.env
+[ -f /opt/paybitnex_backend/.env ] && . /opt/paybitnex_backend/.env
 set +a
 
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-BACKUP_DIR="/root/paybitnex_backend/backups"
+BACKUP_DIR="/opt/paybitnex_backend/backups"
 FILE="$BACKUP_DIR/django_db_$TIMESTAMP.dump"
 
-export PGPASSWORD="postgres"
+mkdir -p "$BACKUP_DIR"  
+
+export PGPASSWORD="${DB_PASSWORD:-postgres}"
 
 echo "[$TIMESTAMP] Starting backup..."
-pg_dump -h localhost -U postgres -F c django_db > "$FILE"
+pg_dump -h "${DB_HOST:-localhost}" -U "${DB_USER:-postgres}" -F c "${DB_NAME:-django_db}" > "$FILE"
 
 echo "[$TIMESTAMP] Syncing to S3..."
-# CHANGED: Using AWS_STORAGE_BUCKET_NAME to match your .env
 rclone copy "$FILE" :s3:"$AWS_STORAGE_BUCKET_NAME"/backups \
   --s3-provider=AWS \
   --s3-access-key-id="$AWS_ACCESS_KEY_ID" \

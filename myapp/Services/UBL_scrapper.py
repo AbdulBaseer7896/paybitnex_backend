@@ -1334,6 +1334,7 @@ if __name__ == "__main__":
     parser.add_argument("--to-date", type=str, default="11/09/2026", help="To date (DD/MM/YYYY)")
     parser.add_argument("--download-dir", type=str, default=None, help="Folder to save statement CSV")
     parser.add_argument("--visible", action="store_true", default=False, help="Run browser visibly")
+    parser.add_argument("--no-proxy", action="store_true", default=False, help="Run without any proxies (direct connection)")
     args = parser.parse_args()
 
     saved_file = scrape_ubl_statement(
@@ -1341,5 +1342,6 @@ if __name__ == "__main__":
         to_date=args.to_date,
         download_dir=Path(args.download_dir) if args.download_dir else None,
         headless=not args.visible,
+        proxy="none" if args.no_proxy else None,
     )
     print(f"\nCompleted! Downloaded file: {saved_file}")

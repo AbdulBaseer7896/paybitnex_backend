@@ -1,16 +1,18 @@
 #!/bin/bash
 set -e
 
-# Load environment variables
-[ -f /root/paybitnex_backend/.env ] && . /root/paybitnex_backend/.env
+# Load environment variables from /opt/paybitnex_backend/.env
+[ -f /opt/paybitnex_backend/.env ] && . /opt/paybitnex_backend/.env
 
 # Configuration mapping
 S3_BUCKET="$AWS_STORAGE_BUCKET_NAME"
 POSTGRES_USER=${POSTGRES_USER:-postgres}
-POSTGRES_DB="django_db"
-BACKUP_DIR="/root/paybitnex_backend/backups"
+POSTGRES_DB="${DB_NAME:-django_db}"
+BACKUP_DIR="/opt/paybitnex_backend/backups"
 
-# Connection string for rclone (matches your backup.sh setup)
+mkdir -p "$BACKUP_DIR"
+
+# Connection string for rclone (matches backup.sh setup)
 REMOTE_BASE=":s3:$S3_BUCKET/backups"
 RCLONE_FLAGS="--s3-provider=AWS --s3-access-key-id=$AWS_ACCESS_KEY_ID --s3-secret-access-key=$AWS_SECRET_ACCESS_KEY --s3-region=$AWS_REGION"
 
@@ -34,7 +36,7 @@ case $CHOICE in
         fi
 
         echo "------------------------------------------"
-        echo "$FILES" | sed 's|.*/||' # Show only filenames for clarity
+        echo "$FILES" | sed 's|.*/||'
         echo "------------------------------------------"
 
         read -p "Enter the FILENAME to restore: " FILENAME
@@ -43,7 +45,6 @@ case $CHOICE in
 
     2)
         echo "Fetching 10 latest CLOUD backups..."
-        # Using the connection string method
         FILES=$(rclone lsf $REMOTE_BASE $RCLONE_FLAGS | tail -n 10 || true)
 
         if [ -z "$FILES" ]; then
@@ -86,9 +87,9 @@ read -p "Type 'yes' to confirm: " CONFIRM
 if [ "$CONFIRM" = "yes" ]; then
     echo "Restoring... please wait."
 
-    export PGPASSWORD=$PGPASSWORD
+    export PGPASSWORD="${DB_PASSWORD:-postgres}"
     pg_restore \
-        -h localhost \
+        -h "${DB_HOST:-localhost}" \
         -U "$POSTGRES_USER" \
         -d "$POSTGRES_DB" \
         --clean \
@@ -99,4 +100,3 @@ if [ "$CONFIRM" = "yes" ]; then
 else
     echo "Aborted."
 fi
-root@PayBitnex:~/paybitnex_backend/scripts#
