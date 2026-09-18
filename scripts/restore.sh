@@ -82,7 +82,7 @@ echo "TARGET DATABASE: $POSTGRES_DB"
 echo "WARNING: This will overwrite ALL current data."
 echo "------------------------------------------"
 
-read -p "Type 'yes' to confirm: " CONFIRM
+read -p "Type 'yes' to confirm: " CONFIRM   
 
 if [ "$CONFIRM" = "yes" ]; then
     echo "Restoring... please wait."

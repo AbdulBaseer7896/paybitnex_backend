@@ -1,11 +1,12 @@
 """
-Django management command to reconcile OutgoingPKRTransfer records against UBL bank statements.
+Django management command to reconcile OutgoingPKRTransfer records against UBL bank statements,
+and automatically persist all statement records into BankStatementRecord with BankSyncJob audit logs.
 
 Usage:
   # 1. Standard 3-day window dry-run (default: safe, no DB changes)
   python manage.py verify_ubl_transfers
 
-  # 2. Dry-run across all of September 2026
+  # 2. Dry-run across all of current month
   python manage.py verify_ubl_transfers --all-month
 
   # 3. Commit verification results to database
@@ -19,6 +20,8 @@ import os
 from datetime import datetime, date
 from decimal import Decimal
 from django.core.management.base import BaseCommand
+from django.utils import timezone
+
 from myapp.Services.ubl_reconciliation import (
     reconcile_ubl_transfers,
     get_reconciliation_window,
@@ -26,11 +29,13 @@ from myapp.Services.ubl_reconciliation import (
     get_latest_statement_file,
 )
 from myapp.Services.UBL_scrapper import scrape_ubl_statement
+from myapp.Services.ubl_statement_sync import ingest_ubl_statement_file
+from myapp.Models.BankAudit_models import BankSyncJob
 from myapp.Utils.email_tasks import send_system_alert_email
 
 
 class Command(BaseCommand):
-    help = "Reconciles outgoing PKR transfers against UBL bank statement exports."
+    help = "Reconciles outgoing PKR transfers against UBL bank statement exports and records statement transactions."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -118,7 +123,7 @@ class Command(BaseCommand):
             "--reverify-all",
             action="store_true",
             default=False,
-            help="Re-verify all transfers in the window, including already verified ones. By default, already verified transfers are protected and skipped.",
+            help="Re-verify all transfers in the window, including already verified ones.",
         )
 
     def _send_failure_alert(self, exc, stage="Execution", start_date=None, end_date=None):
@@ -155,7 +160,7 @@ class Command(BaseCommand):
             subject = f"[ALERT] UBL Payment Verification Failed ({stage}): {type(exc).__name__}"
             action_notice = (
                 "ACTION REQUIRED: The automated UBL reconciliation job encountered an error during execution. "
-                "Please inspect the server logs at /root/paybitnex_backend/Bank_statments/cron_ubl.log."
+                "Please inspect the server logs at /opt/paybitnex_backend/Bank_statments/cron_ubl.log."
             )
 
         body_text = f"""=======================================================
@@ -167,7 +172,7 @@ Status:      FAILED
 Time (PKT):  {now_pkt.strftime('%Y-%m-%d %I:%M:%S %p')}
 Time (UTC):  {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}
 Date Range:  {start_date or 'N/A'} to {end_date or 'N/A'}
-Server:      PayBitnex VPS (root@PayBitnex)
+Server:      PayBitnex Server
 
 {action_notice}
 
@@ -222,7 +227,7 @@ FULL TRACEBACK:
         <tr><td class="label">Time (PKT):</td><td>{now_pkt.strftime('%Y-%m-%d %I:%M:%S %p')}</td></tr>
         <tr><td class="label">Time (UTC):</td><td>{now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}</td></tr>
         <tr><td class="label">Date Range:</td><td>{start_date or 'N/A'} to {end_date or 'N/A'}</td></tr>
-        <tr><td class="label">Server:</td><td>PayBitnex VPS (root@PayBitnex)</td></tr>
+        <tr><td class="label">Server:</td><td>PayBitnex Server</td></tr>
       </table>
       <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #334155;">Error Output:</div>
       <div class="error-code">{err_msg}
@@ -264,7 +269,6 @@ FULL TRACEBACK:
                     continue
             raise ValueError(f"Unable to parse date '{d_str}'. Supported formats: DD.MM.YYYY, YYYY-MM-DD, DD/MM/YYYY, etc.")
 
-        # Parse date arguments
         start_date = None
         end_date = None
         if options.get("range"):
@@ -285,7 +289,6 @@ FULL TRACEBACK:
                 return
 
         if options["all_month"] and not start_date:
-            from django.utils import timezone
             today = timezone.localtime(timezone.now()).date()
             start_date = date(today.year, today.month, 1)
             end_date = today
@@ -320,7 +323,8 @@ FULL TRACEBACK:
             if statement_file:
                 self.stdout.write(f"Statement Source: Explicit file ({statement_file})")
             elif options.get("local"):
-                self.stdout.write("Statement Source: Using latest local statement in Bank_statments folder (--local)")
+                statement_file = get_latest_statement_file()
+                self.stdout.write(f"Statement Source: Using latest local statement in Bank_statments folder (--local): {statement_file}")
             else:
                 self.stdout.write(self.style.MIGRATE_HEADING("\n>>> Running automated UBL portal scraper..."))
                 try:
@@ -339,6 +343,27 @@ FULL TRACEBACK:
                     self.stderr.write(self.style.ERROR(f"\n[FATAL] UBL scraper execution failed: {e}"))
                     self._send_failure_alert(e, stage="UBL Portal Scraping", start_date=start_date, end_date=end_date)
                     return
+
+        # Bank statement ingestion into BankStatementRecord & BankSyncJob
+        if statement_file and os.path.exists(statement_file) and not is_undo:
+            sync_source = "cron" if not options.get("local") and not options.get("file") else "cli"
+            sync_job = BankSyncJob.objects.create(source=sync_source, status="running")
+            try:
+                ingest_res = ingest_ubl_statement_file(statement_file, sync_job=sync_job)
+                sync_job.status = "completed"
+                sync_job.completed_at = timezone.now()
+                sync_job.save(update_fields=["status", "completed_at"])
+                self.stdout.write(self.style.SUCCESS(
+                    f"\n>>> Bank Statement Sync: {ingest_res['newly_inserted']} new records saved "
+                    f"(+{ingest_res['credits_inserted']} credits, +{ingest_res['debits_inserted']} debits, "
+                    f"{ingest_res['skipped_duplicates']} duplicates skipped)."
+                ))
+            except Exception as ie:
+                sync_job.status = "failed"
+                sync_job.completed_at = timezone.now()
+                sync_job.error_message = str(ie)
+                sync_job.save(update_fields=["status", "completed_at", "error_message"])
+                self.stderr.write(self.style.WARNING(f"[WARN] Statement records ingestion failed: {ie}"))
 
         try:
             res = reconcile_ubl_transfers(
@@ -397,7 +422,6 @@ FULL TRACEBACK:
 
             return cust_name, linked_str
 
-        # Print Details
         if res["golden_matches"]:
             self.stdout.write(self.style.SUCCESS(f"\n[OK] VERIFIED / GOLDEN MATCHES ({len(res['golden_matches'])}):"))
             for m in res["golden_matches"]:
@@ -449,7 +473,6 @@ FULL TRACEBACK:
                 )
             )
 
-        # Cleanup temporary statement file if scraped and not explicitly kept
         if downloaded_temp_path and os.path.exists(downloaded_temp_path):
             if not options.get("keep_statement"):
                 try:

@@ -5,39 +5,13 @@ This is SEPARATE from the action-log `AuditLog` in `Audit_models.py`.
 Here we reconcile the company's recorded money movement (customer
 `IncomingPayment` rows + company `InternalTransaction` rows) against the
 statement files (CSV / Excel) the banks hand us.
-
-Workflow:
-  1. Admin picks a bank (cashapp / amex / us_bank / generic) and a date
-     range, then uploads that bank's statement file.
-  2. The backend parses the file using the per-bank column mapping,
-     normalises every row into (external_id, amount, date, raw), and
-     reconciles it against our own records for the same window.
-  3. The result splits every transaction into one of four buckets:
-        - matched              (id + amount agree)
-        - amount_mismatch      (same id, different amount)
-        - only_in_statement    (in the bank file, not in our DB)
-        - only_in_system       (in our DB, not in the bank file)
-  4. The admin can SAVE the run. A saved run freezes the full result
-     JSON and keeps the original uploaded statement file so it can be
-     re-downloaded later from the audit history.
-
-Only the SAVED runs persist. Ad-hoc "preview" runs are computed and
-returned to the browser but never written to the DB.
 """
 import uuid
-
 from django.db import models
 
 
 class BankAudit(models.Model):
-    """A saved bank-reconciliation run.
-
-    Holds the frozen result JSON + summary counters. The original
-    uploaded statement lives on the related `BankAuditFile` row so it
-    can be downloaded from the history later.
-    """
-
-    # Bank identifiers — mirror the statement formats we can parse.
+    """A saved bank-reconciliation run."""
     BANK_CASHAPP = "cashapp"
     BANK_AMEX = "amex"
     BANK_USBANK = "us_bank"
@@ -50,22 +24,14 @@ class BankAudit(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-
-    # Human-friendly label the admin gives the saved audit, e.g.
-    # "Cash App — May 2026".
     title = models.CharField(max_length=200)
-
     bank = models.CharField(
         max_length=20, choices=BANK_CHOICES, db_index=True,
         help_text="Which bank's statement format was reconciled.",
     )
-
-    # The window the audit covered. Stored so the history shows it
-    # without having to re-read the result JSON.
     period_start = models.DateField(null=True, blank=True)
     period_end = models.DateField(null=True, blank=True)
 
-    # Summary counters — denormalised from `result` for fast list views.
     total_statement = models.PositiveIntegerField(default=0)
     total_system = models.PositiveIntegerField(default=0)
     matched_count = models.PositiveIntegerField(default=0)
@@ -73,16 +39,7 @@ class BankAudit(models.Model):
     only_in_statement_count = models.PositiveIntegerField(default=0)
     only_in_system_count = models.PositiveIntegerField(default=0)
 
-    # The full frozen reconciliation result. Shape:
-    #   {
-    #     "summary": {...},
-    #     "matched": [...],
-    #     "amount_mismatch": [...],
-    #     "only_in_statement": [...],
-    #     "only_in_system": [...],
-    #   }
     result = models.JSONField(default=dict, blank=True)
-
     notes = models.TextField(blank=True, default="")
 
     created_by = models.ForeignKey(
@@ -104,12 +61,7 @@ class BankAudit(models.Model):
 
 
 class BankAuditFile(models.Model):
-    """The original statement file uploaded for a saved audit.
-
-    Kept so the admin can re-download exactly what was reconciled.
-    One file per saved audit (the admin uploads a single statement per
-    run), but modelled as a FK so we can attach more later if needed.
-    """
+    """The original statement file uploaded for a saved audit."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     audit = models.ForeignKey(
         BankAudit, on_delete=models.CASCADE, related_name="files",
@@ -118,7 +70,6 @@ class BankAuditFile(models.Model):
     original_name = models.CharField(max_length=255, blank=True, default="")
     content_type = models.CharField(max_length=120, blank=True, default="")
     size_bytes = models.PositiveIntegerField(default=0)
-
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -127,3 +78,77 @@ class BankAuditFile(models.Model):
 
     def __str__(self):
         return self.original_name or str(self.file)
+
+
+class BankStatementRecord(models.Model):
+    """Normalized bank statement line item parsed from bank statement CSV/Excel exports."""
+    DIRECTION_CHOICES = [
+        ("C", "Credit (Inflow)"),
+        ("D", "Debit (Outflow)"),
+    ]
+
+    account_number = models.CharField(max_length=64, db_index=True)
+    channel_ref = models.CharField(max_length=128, blank=True, db_index=True)
+    cr_dr = models.CharField(max_length=10, db_index=True)  # 'C' or 'D'
+    tran_type = models.CharField(max_length=64, blank=True, db_index=True)
+
+    amount = models.DecimalField(max_digits=16, decimal_places=2, db_index=True)
+    currency = models.CharField(max_length=10, default="PKR")
+    equiv_amount = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    equiv_currency = models.CharField(max_length=10, blank=True)
+
+    running_balance = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    running_balance_currency = models.CharField(max_length=10, blank=True)
+
+    tran_date = models.DateField(null=True, blank=True, db_index=True)
+    post_date = models.DateField(null=True, blank=True, db_index=True)
+    tran_ref = models.CharField(max_length=128, blank=True, db_index=True)
+
+    tran_desc = models.TextField(blank=True)
+    tran_desc2 = models.TextField(blank=True)
+    tran_desc3 = models.TextField(blank=True)
+    tran_desc4 = models.TextField(blank=True)
+
+    raw_data = models.JSONField(default=dict, blank=True)
+    unique_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    synced_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "bank_statement_records"
+        ordering = ["-tran_date", "-id"]
+        indexes = [
+            models.Index(fields=["tran_date", "cr_dr"]),
+            models.Index(fields=["account_number", "tran_date"]),
+        ]
+
+    def __str__(self):
+        direction = "+" if self.cr_dr == "C" else "-"
+        return f"{self.tran_date} | {direction}{self.currency} {self.amount} | {self.tran_ref or self.tran_desc[:30]}"
+
+
+class BankSyncJob(models.Model):
+    """Audit log for automated and manual bank statement sync runs."""
+    STATUS_CHOICES = [
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    ]
+
+    source = models.CharField(max_length=50, default="cron")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="running", db_index=True)
+    started_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    newly_inserted = models.IntegerField(default=0)
+    skipped_duplicates = models.IntegerField(default=0)
+    credits_inserted = models.IntegerField(default=0)
+    debits_inserted = models.IntegerField(default=0)
+
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "bank_sync_jobs"
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"BankSyncJob #{self.id} ({self.source}) - {self.status} at {self.started_at}"

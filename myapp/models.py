@@ -8,7 +8,7 @@ from myapp.Models.Banking_models import (
     PakistaniBank,
     ForeignBank,
     CustomerBankAccount,
-    CustomerMerchantAccount,   # kept for legacy admin / historical data; not used by new flows
+    CustomerMerchantAccount,
 )
 from myapp.Models.Transaction_models import (
     IncomingPayment,
@@ -37,7 +37,7 @@ from myapp.Models.InternalTx_models import (
 from myapp.Models.Dispatch_models import (
     DispatchCompany, DispatchDriver, Dispatch, DispatchStatus,
 )
-from myapp.Models.BankAudit_models import BankAudit, BankAuditFile
+from myapp.Models.BankAudit_models import BankAudit, BankAuditFile, BankStatementRecord, BankSyncJob
 
 __all__ = [
     "User", "UserRole",
@@ -63,5 +63,5 @@ __all__ = [
     # Dispatch module
     "DispatchCompany", "DispatchDriver", "Dispatch", "DispatchStatus",
     # Bank reconciliation audit module
-    "BankAudit", "BankAuditFile",
+    "BankAudit", "BankAuditFile", "BankStatementRecord", "BankSyncJob",
 ]

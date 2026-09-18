@@ -1,7 +1,7 @@
 """Serializers for the bank-reconciliation audit module."""
 from rest_framework import serializers
 
-from myapp.Models.BankAudit_models import BankAudit, BankAuditFile
+from myapp.Models.BankAudit_models import BankAudit, BankAuditFile, BankStatementRecord, BankSyncJob
 
 
 class BankAuditFileSerializer(serializers.ModelSerializer):
@@ -67,3 +67,37 @@ class BankAuditDetailSerializer(BankAuditListSerializer):
     class Meta(BankAuditListSerializer.Meta):
         fields = BankAuditListSerializer.Meta.fields + ["result", "notes", "files"]
         read_only_fields = fields
+
+
+class BankStatementRecordSerializer(serializers.ModelSerializer):
+    """Serializer for individual parsed bank statement records."""
+    class Meta:
+        model = BankStatementRecord
+        fields = [
+            "id", "account_number", "channel_ref", "cr_dr", "tran_type",
+            "amount", "currency", "equiv_amount", "equiv_currency",
+            "running_balance", "running_balance_currency",
+            "tran_date", "post_date", "tran_ref",
+            "tran_desc", "tran_desc2", "tran_desc3", "tran_desc4",
+            "synced_at",
+        ]
+        read_only_fields = fields
+
+
+class BankSyncJobSerializer(serializers.ModelSerializer):
+    """Serializer for bank sync job audit records."""
+    duration_seconds = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BankSyncJob
+        fields = [
+            "id", "source", "status", "started_at", "completed_at",
+            "duration_seconds", "newly_inserted", "skipped_duplicates",
+            "credits_inserted", "debits_inserted", "error_message",
+        ]
+        read_only_fields = fields
+
+    def get_duration_seconds(self, obj):
+        if obj.started_at and obj.completed_at:
+            return round((obj.completed_at - obj.started_at).total_seconds(), 1)
+        return None

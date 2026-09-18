@@ -2,23 +2,21 @@
 Bank-reconciliation audit views (admin only).
 
 Endpoints (mounted under /api/v1/bank-audit/):
-
   POST   run/                 → run an ad-hoc reconciliation (no save).
-                                multipart: bank, file, [start], [end].
-                                Returns the full result JSON.
-
   GET    audits/              → list saved audits (history).
-  POST   audits/              → save an audit: multipart bank, file,
-                                title, [start], [end], [notes].
-                                Re-runs the reconciliation server-side
-                                (so the frozen result is trustworthy)
-                                and stores the statement file.
-  GET    audits/<id>/         → saved-audit detail (full result + files).
-  DELETE audits/<id>/         → delete a saved audit (+ its file).
+  POST   audits/              → save an audit.
+  GET    audits/<id>/         → saved-audit detail.
+  DELETE audits/<id>/         → delete a saved audit.
   GET    audits/<id>/download/ → download the stored statement file.
+
+UBL Bank Statement Ingestion & Sync Audit (Admin Only):
+  GET    ubl-records/         → list & filter parsed UBL statement records with live totals.
+  GET    sync-jobs/           → list bank statement scraper/sync execution audit logs.
 """
 from datetime import datetime
+from decimal import Decimal
 
+from django.db.models import Q, Sum, Count
 from django.http import FileResponse, Http404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -28,9 +26,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from myapp.Models.Audit_models import AuditLog
-from myapp.Models.BankAudit_models import BankAudit, BankAuditFile
+from myapp.Models.BankAudit_models import BankAudit, BankAuditFile, BankStatementRecord, BankSyncJob
 from myapp.serializers.BankAudit_serializers import (
     BankAuditListSerializer, BankAuditDetailSerializer,
+    BankStatementRecordSerializer, BankSyncJobSerializer,
 )
 from myapp.Utils.bank_audit import run_audit
 from myapp.Utils.permissions import IsAdmin
@@ -46,7 +45,7 @@ def _parse_date_param(value):
     value = str(value).strip()
     if not value:
         return None
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(value, fmt).date()
         except ValueError:
@@ -91,7 +90,7 @@ class BankAuditRunView(APIView):
         except ValueError as e:
             return Response({"detail": str(e)},
                             status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:  # pragma: no cover — surface parse crashes cleanly
+        except Exception as e:
             return Response(
                 {"detail": f"Could not process the file: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -147,8 +146,6 @@ class BankAuditViewSet(viewsets.ModelViewSet):
         end = _parse_date_param(request.data.get("end"))
         notes = (request.data.get("notes") or "").strip()
 
-        # Re-run the reconciliation server-side so the saved result is
-        # authoritative (never trust a client-supplied result blob).
         try:
             result = run_audit(
                 bank, upload, filename=getattr(upload, "name", ""),
@@ -157,7 +154,7 @@ class BankAuditViewSet(viewsets.ModelViewSet):
         except ValueError as e:
             return Response({"detail": str(e)},
                             status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             return Response(
                 {"detail": f"Could not process the file: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -180,7 +177,6 @@ class BankAuditViewSet(viewsets.ModelViewSet):
             created_by=request.user,
         )
 
-        # The file pointer was consumed by run_audit; reset before saving.
         try:
             upload.seek(0)
         except Exception:
@@ -197,8 +193,7 @@ class BankAuditViewSet(viewsets.ModelViewSet):
         AuditLog.record(
             user=request.user, action=AuditLog.ACTION_CREATE,
             target=audit, target_label=audit.title,
-            description=f"Saved bank audit: {audit.title} "
-                        f"({audit.get_bank_display()})",
+            description=f"Saved bank audit: {audit.title} ({audit.get_bank_display()})",
             metadata={
                 "bank": bank,
                 "matched": summary.get("matched", 0),
@@ -215,7 +210,6 @@ class BankAuditViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         label = instance.title
         ip, ua = _client_meta(self.request)
-        # Best-effort: delete the stored statement blobs too.
         for f in instance.files.all():
             try:
                 f.file.delete(save=False)
@@ -245,3 +239,92 @@ class BankAuditViewSet(viewsets.ModelViewSet):
             filename=f.original_name or "statement.csv",
         )
         return resp
+
+
+class BankStatementRecordListView(APIView):
+    """List and filter UBL bank statement records (Strictly Admin Only)."""
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        qs = BankStatementRecord.objects.all()
+
+        date_from = _parse_date_param(request.query_params.get("date_from"))
+        date_to = _parse_date_param(request.query_params.get("date_to"))
+        if date_from:
+            qs = qs.filter(tran_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(tran_date__lte=date_to)
+
+        cr_dr = (request.query_params.get("cr_dr") or "").strip().upper()
+        if cr_dr in ("C", "D"):
+            qs = qs.filter(cr_dr=cr_dr)
+        elif "CREDIT" in cr_dr:
+            qs = qs.filter(cr_dr__in=["C", "CR"])
+        elif "DEBIT" in cr_dr:
+            qs = qs.filter(cr_dr__in=["D", "DR"])
+
+        account_number = (request.query_params.get("account_number") or "").strip()
+        if account_number:
+            qs = qs.filter(account_number__icontains=account_number)
+
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(tran_ref__icontains=q) |
+                Q(channel_ref__icontains=q) |
+                Q(tran_desc__icontains=q) |
+                Q(tran_desc2__icontains=q) |
+                Q(tran_type__icontains=q)
+            )
+
+        # Compute summary metrics over the filtered set
+        credits_qs = qs.filter(cr_dr__in=["C", "CR"])
+        debits_qs = qs.filter(cr_dr__in=["D", "DR"])
+
+        credit_sum = credits_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
+        debit_sum = debits_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
+        credit_count = credits_qs.count()
+        debit_count = debits_qs.count()
+        total_count = qs.count()
+
+        summary = {
+            "total_count": total_count,
+            "credit_count": credit_count,
+            "debit_count": debit_count,
+            "total_credit_amount": str(credit_sum),
+            "total_debit_amount": str(debit_sum),
+            "net_flow": str(credit_sum - debit_sum),
+        }
+
+        # Pagination
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = min(200, max(10, int(request.query_params.get("page_size", 50))))
+        except (TypeError, ValueError):
+            page_size = 50
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_records = list(qs[start_idx:end_idx])
+
+        ser = BankStatementRecordSerializer(page_records, many=True)
+        return Response({
+            "summary": summary,
+            "results": ser.data,
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+        })
+
+
+class BankSyncJobListView(APIView):
+    """List recent bank statement sync/scraper jobs (Strictly Admin Only)."""
+    permission_classes = [IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        qs = BankSyncJob.objects.all()[:50]
+        ser = BankSyncJobSerializer(qs, many=True)
+        return Response(ser.data)
