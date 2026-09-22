@@ -214,11 +214,12 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         )
         .all()
     )
-    filterset_fields = ["status", "currency", "customer"]
+    filterset_fields = ["status", "currency", "customer", "amount"]
     search_fields = [
         "reference", "external_transaction_id",
-        "sender_name", "sender_company",
-        "customer__full_name", "customer__email",
+        "customer__full_name", "customer__profile__full_name",
+        "customer__email",
+        "amount_str", "net_pkr_str",
     ]
     # `tx_date` is an annotation added in get_queryset — the *business* /
     # transaction date (occurred_on, falling back to the entry date for
@@ -259,14 +260,16 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         # entry date for legacy rows that predate the field. Filtering AND
         # ordering both use this so "the date" always means the transaction
         # date, with `created_at` kept purely as the submitted-at reference.
-        from django.db.models.functions import Coalesce, TruncDate
-        from django.db.models import DateField
+        from django.db.models.functions import Coalesce, TruncDate, Cast
+        from django.db.models import DateField, CharField
         qs = self.queryset.annotate(
             tx_date=Coalesce(
                 "occurred_on",
                 TruncDate("created_at"),
                 output_field=DateField(),
             ),
+            amount_str=Cast("amount", output_field=CharField()),
+            net_pkr_str=Cast("net_pkr", output_field=CharField()),
         )
         if self._is_dashboard_list():
             # The dashboard serializer is relation-free. Drop the expensive
@@ -324,6 +327,22 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             qs = qs.exclude(stale_q)
 
         return self._apply_date_filter(qs)
+
+    def filter_queryset(self, queryset):
+        qs = super().filter_queryset(queryset)
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            from decimal import Decimal, InvalidOperation
+            from django.db.models import Q
+            clean = search.lstrip("$€£¥").replace(",", "").strip()
+            try:
+                val = Decimal(clean)
+                qs = qs | queryset.filter(
+                    Q(amount=val) | Q(net_pkr=val) | Q(amount_str__icontains=clean) | Q(net_pkr_str__icontains=clean)
+                )
+            except (InvalidOperation, ValueError):
+                pass
+        return qs
 
     def _apply_date_filter(self, qs):
         """Apply ?date_from / ?date_to query params if present.
@@ -543,17 +562,30 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
         cur = request.query_params.get("currency")
         if cur:
             qs = qs.filter(currency_id=cur)
-        # Search across reference / external id / sender / customer email
-        search = request.query_params.get("search")
+        # Search across reference / external id / customer name / customer email / amount
+        search = (request.query_params.get("search") or "").strip()
         if search:
             from django.db.models import Q
-            qs = qs.filter(
+            from django.db.models.functions import Cast
+            from django.db.models import CharField
+            clean_search = search.lstrip("$€£¥").replace(",", "").strip()
+            from decimal import Decimal, InvalidOperation
+            amount_q = Q(amount_str__icontains=search) | Q(net_pkr_str__icontains=search)
+            try:
+                val = Decimal(clean_search)
+                amount_q = amount_q | Q(amount=val) | Q(net_pkr=val) | Q(amount_str__icontains=clean_search) | Q(net_pkr_str__icontains=clean_search)
+            except (InvalidOperation, ValueError):
+                pass
+            qs = qs.annotate(
+                amount_str=Cast("amount", output_field=CharField()),
+                net_pkr_str=Cast("net_pkr", output_field=CharField()),
+            ).filter(
                 Q(reference__icontains=search)
                 | Q(external_transaction_id__icontains=search)
-                | Q(sender_name__icontains=search)
-                | Q(sender_company__icontains=search)
                 | Q(customer__full_name__icontains=search)
+                | Q(customer__profile__full_name__icontains=search)
                 | Q(customer__email__icontains=search)
+                | amount_q
             )
         # Date range — inclusive of both bounds, calendar-day semantics.
         # Filters on the TRANSACTION date (occurred_on, falling back to
