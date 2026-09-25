@@ -144,6 +144,8 @@ def grant_portal(request, pk=None):
             phone=(create_spec.get("phone") or "").strip(),
             role=UserRole.CUSTOMER,
             is_active=True,
+            email_verified=True,
+            verification_deadline=None,
             created_by=request.user,
         )
         target._plain_password = temp_password

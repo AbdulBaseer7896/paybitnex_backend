@@ -249,8 +249,11 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         role = validated_data.get("role", UserRole.CUSTOMER)
         if role in (UserRole.ADMIN, UserRole.ACCOUNTANT, "admin", "accountant"):
             validated_data.setdefault("is_active", True)
-            validated_data.setdefault("email_verified", True)
-            validated_data.setdefault("verification_deadline", None)
+        # Staff-created accounts skip email verification for every role —
+        # the admin vouches for the address, so the customer shouldn't be
+        # hit with an OTP gate or deactivated by enforce_email_verification.
+        validated_data["email_verified"] = True
+        validated_data["verification_deadline"] = None
 
         user = User(**validated_data)
         user.set_password(password)
