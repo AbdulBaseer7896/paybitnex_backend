@@ -20,26 +20,28 @@ class CustomerProfile(models.Model):
     )
 
     # Personal
-    full_name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=20)
+    full_name = models.CharField(max_length=150, blank=True, default="")
+    phone = models.CharField(max_length=20, blank=True, default="")
     cnic_number = models.CharField(
-        max_length=15, validators=[CNIC_VALIDATOR], unique=True,
+        max_length=15, validators=[CNIC_VALIDATOR], unique=True, null=True, blank=True,
     )
-    cnic_front = models.ImageField(upload_to="cnic/front/")
-    cnic_back = models.ImageField(upload_to="cnic/back/")
+    cnic_front = models.ImageField(upload_to="cnic/front/", null=True, blank=True)
+    cnic_back = models.ImageField(upload_to="cnic/back/", null=True, blank=True)
     selfie = models.ImageField(upload_to="cnic/selfie/", null=True, blank=True)
 
     # Address (optional, useful for KYC)
-    address = models.TextField(blank=True)
-    city = models.CharField(max_length=80, blank=True)
+    address = models.TextField(blank=True, default="")
+    city = models.CharField(max_length=80, blank=True, default="")
 
     # KYC status — accountant/admin can approve
+    KYC_DRAFT = "draft"
     KYC_PENDING = "pending"
     KYC_APPROVED = "approved"
     KYC_REJECTED = "rejected"
     KYC_OBJECTIONS = "objections"   # admin raised fixable issues
     KYC_RESUBMITTED = "resubmitted" # customer fixed and returned for re-review
     KYC_CHOICES = [
+        (KYC_DRAFT, "Draft"),
         (KYC_PENDING, "Pending Review"),
         (KYC_APPROVED, "Approved"),
         (KYC_REJECTED, "Rejected"),
@@ -47,7 +49,7 @@ class CustomerProfile(models.Model):
         (KYC_RESUBMITTED, "Resubmitted for Review"),
     ]
     kyc_status = models.CharField(
-        max_length=20, choices=KYC_CHOICES, default=KYC_PENDING, db_index=True,
+        max_length=20, choices=KYC_CHOICES, default=KYC_DRAFT, db_index=True,
     )
     kyc_reviewed_by = models.ForeignKey(
         "myapp.User", on_delete=models.SET_NULL, null=True, blank=True,

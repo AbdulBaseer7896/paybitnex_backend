@@ -3,6 +3,7 @@ OTP-based signup, and OTP-based password reset."""
 # pyrefly: ignore [missing-import]
 from adrf.views import APIView as AsyncAPIView
 from rest_framework import status, serializers
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -374,53 +375,141 @@ class ForgotPaymentsPinView(APIView):
         })
 
 
-class _OnboardingStepSerializer(serializers.Serializer):
-    """Validate the step number — clamped to 0..3 since onboarding has 4 steps."""
-    step = serializers.IntegerField(min_value=0, max_value=3)
+def _serialize_onboarding_data(request, user, profile=None):
+    def _abs(val):
+        if not val:
+            return None
+        if hasattr(val, "url"):
+            val = val.url
+        if request and not (val.startswith("http://") or val.startswith("https://")):
+            return request.build_absolute_uri(val)
+        return val
+
+    primary_bank = None
+    try:
+        from myapp.Models.Banking_models import CustomerBankAccount
+        primary_bank = CustomerBankAccount.objects.filter(customer=user, is_primary=True).first()
+    except Exception:
+        pass
+
+    return {
+        "full_name": (profile.full_name if profile and profile.full_name else (user.full_name or None)),
+        "phone": (profile.phone if profile and profile.phone else (user.phone or None)),
+        "address": (profile.address if profile and profile.address else None),
+        "city": (profile.city if profile and profile.city else None),
+        "cnic_number": (profile.cnic_number if profile and profile.cnic_number else None),
+        "cnic_front": _abs(profile.cnic_front) if profile and profile.cnic_front else None,
+        "cnic_back": _abs(profile.cnic_back) if profile and profile.cnic_back else None,
+        "selfie": _abs(profile.selfie) if profile and profile.selfie else None,
+        "pk_bank": primary_bank.bank_id if primary_bank else None,
+        "pk_holder": primary_bank.holder_name if primary_bank else None,
+        "pk_account": primary_bank.account_number if primary_bank else None,
+        "pk_iban": primary_bank.iban if primary_bank else None,
+    }
 
 
 class OnboardingStepView(AsyncAPIView):
     """
-    PATCH /auth/onboarding-step/   {step: int}
+    GET /auth/onboarding-step/
+    PATCH /auth/onboarding-step/   {step?: int, ...fields}
 
-    Records the last completed onboarding step on the user. The
-    frontend onboarding wizard calls this after every step transition
-    so that, if the user closes the tab and comes back later, we can
-    resume from where they left off instead of restarting at step 1.
-
-    The `goto` flag in the GET response tells the frontend which step
-    to render. Once `is_profile_complete` flips to true, this becomes
-    a no-op — completed users hit /app instead of /onboarding.
+    Records onboarding step progress and draft profile on the user
+    and CustomerProfile. Returns the step and all previously submitted data
+    (including file URLs) so the frontend wizard can resume seamlessly across sessions.
     """
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     async def get(self, request):
-        # `goto` is the step the frontend should render next.
-        # Returning it explicitly (rather than just the raw stored
-        # value) keeps the contract clear: the server tells the
-        # client where to start, the client doesn't have to interpret.
         user = request.user
+        from myapp.Models.Profile_models import CustomerProfile
+        profile = await CustomerProfile.objects.filter(user=user).afirst()
+        data = _serialize_onboarding_data(request, user, profile)
         return Response({
             "onboarding_step": user.onboarding_step,
             "goto": user.onboarding_step,
             "is_profile_complete": user.is_profile_complete,
+            "data": data,
         })
 
     async def patch(self, request):
-        s = _OnboardingStepSerializer(data=request.data)
-        await async_is_valid(s, raise_exception=True)
-        new_step = s.validated_data["step"]
         user = request.user
-        # Never let the step go backwards — if the user already got to
-        # step 3 and refreshes mid-step-2, we don't want to clobber
-        # their progress. Frontend only PATCHes forward anyway, but
-        # this guards against clock-skew / out-of-order requests.
-        if new_step > (user.onboarding_step or 0):
-            user.onboarding_step = new_step
-            await user.asave(update_fields=["onboarding_step", "updated_at"])
+        from myapp.Models.Profile_models import CustomerProfile
+
+        raw_step = request.data.get("step")
+        if raw_step is None:
+            raw_step = request.data.get("onboarding_step")
+        if raw_step is None:
+            raw_step = request.data.get("goto")
+
+        if raw_step is not None:
+            try:
+                new_step = int(raw_step)
+                if 0 <= new_step <= 4:
+                    if new_step > (user.onboarding_step or 0):
+                        user.onboarding_step = new_step
+                        await user.asave(update_fields=["onboarding_step", "updated_at"])
+            except (ValueError, TypeError):
+                pass
+
+        profile, _ = await CustomerProfile.objects.aget_or_create(
+            user=user,
+            defaults={
+                "full_name": user.full_name or "",
+                "phone": user.phone or "",
+                "kyc_status": CustomerProfile.KYC_DRAFT,
+            },
+        )
+        updated_fields = ["updated_at"]
+
+        # Text fields
+        for field in ("full_name", "phone", "address", "city"):
+            if field in request.data:
+                val = (request.data.get(field) or "").strip()
+                setattr(profile, field, val)
+                updated_fields.append(field)
+
+        if "cnic_number" in request.data:
+            cnic = (request.data.get("cnic_number") or "").strip() or None
+            # A CNIC already owned by another profile would raise an
+            # IntegrityError and drop the image uploads in this same save.
+            # Skip it here — the final profile submit reports the conflict.
+            taken = cnic and await CustomerProfile.objects.filter(
+                cnic_number=cnic,
+            ).exclude(user=user).aexists()
+            if not taken:
+                profile.cnic_number = cnic
+                updated_fields.append("cnic_number")
+
+        # Files (cnic_front, cnic_back, selfie)
+        files = request.FILES
+        for img_field in ("cnic_front", "cnic_back", "selfie"):
+            if img_field in files and files[img_field]:
+                setattr(profile, img_field, files[img_field])
+                updated_fields.append(img_field)
+
+        await profile.asave(update_fields=list(set(updated_fields)))
+
+        # Also sync user.full_name and user.phone if changed
+        user_sync = []
+        if "full_name" in request.data:
+            clean_name = (request.data.get("full_name") or "").strip()
+            if clean_name and clean_name != user.full_name:
+                user.full_name = clean_name
+                user_sync.append("full_name")
+        if "phone" in request.data:
+            clean_phone = (request.data.get("phone") or "").strip()
+            if clean_phone and clean_phone != user.phone:
+                user.phone = clean_phone
+                user_sync.append("phone")
+        if user_sync:
+            await user.asave(update_fields=user_sync)
+
+        data = _serialize_onboarding_data(request, user, profile)
         return Response({
             "onboarding_step": user.onboarding_step,
             "goto": user.onboarding_step,
+            "data": data,
         })
 
 

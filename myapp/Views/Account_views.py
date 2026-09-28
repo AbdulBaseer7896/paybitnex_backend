@@ -74,7 +74,7 @@ class UserAdminViewSet(viewsets.ModelViewSet):
     # UserSerializer.is_vendor doesn't fire one extra SELECT per user row.
     queryset = (
         User.objects.all()
-        .select_related("vendor_profile")
+        .select_related("vendor_profile", "profile")
         .prefetch_related(
             "bank_accounts__bank",
             "merchant_accounts__bank",
@@ -436,6 +436,10 @@ class CustomerProfileView(AsyncAPIView):
             update_fields=["is_profile_complete", "full_name", "phone",
                            "onboarding_step"],
         )
+
+        if profile.kyc_status == CustomerProfile.KYC_DRAFT:
+            profile.kyc_status = CustomerProfile.KYC_PENDING
+            await profile.asave(update_fields=["kyc_status", "updated_at"])
 
         # KYC gates payment submission entirely (see Transaction_views.create),
         # so an unreviewed profile silently blocks the customer from doing
@@ -922,6 +926,10 @@ class CustomerOnboardingListView(ListAPIView):
         p = self.request.query_params
         # Accept either `kyc_status` or the shorter `kyc` from older UIs.
         kyc_val = p.get("kyc_status") or p.get("kyc")
+        # Drafts are half-finished onboarding wizards (maybe no CNIC or
+        # photos yet) — nothing to review, so keep them out unless asked.
+        if kyc_val != CustomerProfile.KYC_DRAFT:
+            qs = qs.exclude(kyc_status=CustomerProfile.KYC_DRAFT)
         if kyc_val and kyc_val != "all":
             # "pending" is a meta-bucket that also covers resubmitted profiles
             # — both need admin attention. The dedicated "resubmitted" tab is

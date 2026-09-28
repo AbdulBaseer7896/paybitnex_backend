@@ -81,10 +81,10 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
         extra_kwargs = {
-            "cnic_front": {"write_only": True, "required": True},
-            "cnic_back":  {"write_only": True, "required": True},
-            "selfie":     {"write_only": True, "required": True,
-                           "allow_null": False},
+            "cnic_front": {"write_only": True, "required": False},
+            "cnic_back":  {"write_only": True, "required": False},
+            "selfie":     {"write_only": True, "required": False,
+                           "allow_null": True},
         }
 
     def validate_full_name(self, value):
@@ -92,6 +92,8 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         return clean_and_validate_full_name(value, required=True)
 
     def validate_cnic_number(self, value):
+        if not value:
+            return value
         qs = CustomerProfile.objects.filter(cnic_number=value)
         if self.instance is not None:
             qs = qs.exclude(pk=self.instance.pk)
@@ -140,6 +142,15 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Profile is locked after KYC approval and cannot be edited."
             )
+
+        is_partial = getattr(self, "partial", False)
+        if not is_partial:
+            has_front = attrs.get("cnic_front") or (self.instance and self.instance.cnic_front)
+            has_back = attrs.get("cnic_back") or (self.instance and self.instance.cnic_back)
+            if not has_front:
+                raise serializers.ValidationError({"cnic_front": "This field is required."})
+            if not has_back:
+                raise serializers.ValidationError({"cnic_back": "This field is required."})
         return attrs
 
     def get_cnic_front_url(self, obj):

@@ -36,13 +36,17 @@ class UserSerializer(serializers.ModelSerializer):
     vendor_name = serializers.SerializerMethodField()
     bank_accounts = serializers.SerializerMethodField()
     merchant_accounts = serializers.SerializerMethodField()
+    # KYC state from the CustomerProfile (None when no profile exists yet).
+    # `is_profile_complete` only says the wizard was finished — it stays
+    # true after a rejection, so the UI needs the real review status.
+    kyc_status = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "email", "full_name", "role", "phone",
             "is_active", "email_verified", "verification_deadline",
-            "is_profile_complete", "onboarding_step",
+            "is_profile_complete", "onboarding_step", "kyc_status",
             "profile_picture_url",
             "payments_pin_set",
             "is_vendor", "vendor_name",
@@ -54,8 +58,18 @@ class UserSerializer(serializers.ModelSerializer):
             "email_verified", "verification_deadline",
             "profile_picture_url", "payments_pin_set",
             "is_vendor", "vendor_name",
-            "bank_accounts", "merchant_accounts",
+            "bank_accounts", "merchant_accounts", "kyc_status",
         ]
+
+    def get_kyc_status(self, obj):
+        # Broad except: no profile raises RelatedObjectDoesNotExist, and an
+        # un-joined lookup from an async view (MeView) raises
+        # SynchronousOnlyOperation — MeView fills kyc_status itself anyway.
+        try:
+            p = obj.profile
+        except Exception:
+            return None
+        return p.kyc_status if p else None
 
     def get_payments_pin_set(self, obj):
         return bool(getattr(obj, "payments_pin_hash", ""))
@@ -203,6 +217,33 @@ class CustomerAccountDetailSerializer(serializers.ModelSerializer):
         return p.full_name if p else ""
 
 
+def normalize_phone(value):
+    """Coerce typed phone formats to E.164 — the format the onboarding
+    PhoneInput produces and validates. Mirrors normalizePhone() in the
+    frontend's PhoneInput.jsx; keep the two in sync.
+
+      "0300 1234567" / "923001234567" / "3001234567" → "+923001234567"
+      "00923001234567"                               → "+923001234567"
+
+    Anything unrecognised is returned trimmed, untouched.
+    """
+    raw = (value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return ""
+    if raw.startswith("+"):
+        return f"+{digits}"
+    if digits.startswith("00"):
+        return f"+{digits[2:]}"
+    if len(digits) == 12 and digits.startswith("92"):
+        return f"+{digits}"
+    if len(digits) == 11 and digits.startswith("03"):
+        return f"+92{digits[1:]}"
+    if len(digits) == 10 and digits.startswith("3"):
+        return f"+92{digits}"
+    return raw
+
+
 def clean_and_validate_full_name(value, required=True):
     """Ensure full_name is non-empty, non-whitespace, and not 'undefined'/'null'."""
     val = (str(value) if value is not None else "").strip()
@@ -227,6 +268,9 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
 
     def validate_full_name(self, value):
         return clean_and_validate_full_name(value, required=True)
+
+    def validate_phone(self, value):
+        return normalize_phone(value)
 
     def validate_role(self, value):
         if value not in UserRole.values:
@@ -279,6 +323,9 @@ class AdminUpdateUserSerializer(serializers.ModelSerializer):
 
     def validate_full_name(self, value):
         return clean_and_validate_full_name(value, required=False)
+
+    def validate_phone(self, value):
+        return normalize_phone(value)
 
     def validate_role(self, value):
         if value not in UserRole.values:
