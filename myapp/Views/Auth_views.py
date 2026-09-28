@@ -1,5 +1,7 @@
 """Auth views: JWT login, refresh, logout, whoami, change password,
 OTP-based signup, and OTP-based password reset."""
+import logging
+
 # pyrefly: ignore [missing-import]
 from adrf.views import APIView as AsyncAPIView
 from rest_framework import status, serializers
@@ -24,6 +26,8 @@ from myapp.Models.EmailOTP_models import EmailOTP, OTPPurpose
 from myapp.Utils.async_helpers import async_is_valid
 from myapp.Utils.email_tasks import send_email_async
 from myapp.Utils.staff_alerts import notify_staff
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -436,6 +440,17 @@ class OnboardingStepView(AsyncAPIView):
         user = request.user
         from myapp.Models.Profile_models import CustomerProfile
 
+        # Diagnostics for uploads that arrive without their files (seen on
+        # Safari): what the browser actually sent, never the values.
+        # Field -> value length (not the value), to tell "missing" from "empty".
+        logger.info(
+            "onboarding-step PATCH user=%s ctype=%s len=%s fields=%s files=%s",
+            user.pk, request.content_type, request.META.get("CONTENT_LENGTH"),
+            {k: len(str(v)) for k, v in request.data.items()
+             if k not in request.FILES},
+            {k: (f.size, f.content_type) for k, f in request.FILES.items()},
+        )
+
         raw_step = request.data.get("step")
         if raw_step is None:
             raw_step = request.data.get("onboarding_step")
@@ -484,7 +499,9 @@ class OnboardingStepView(AsyncAPIView):
         # Files (cnic_front, cnic_back, selfie)
         files = request.FILES
         for img_field in ("cnic_front", "cnic_back", "selfie"):
-            if img_field in files and files[img_field]:
+            # Skip zero-byte uploads so a broken client blob can't replace
+            # a good image already on the draft.
+            if img_field in files and files[img_field] and files[img_field].size:
                 setattr(profile, img_field, files[img_field])
                 updated_fields.append(img_field)
 
