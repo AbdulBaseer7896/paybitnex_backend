@@ -94,6 +94,7 @@ class BankSyncJobSerializer(serializers.ModelSerializer):
             "id", "source", "status", "started_at", "completed_at",
             "duration_seconds", "newly_inserted", "skipped_duplicates",
             "credits_inserted", "debits_inserted", "error_message",
+            "options", "logs", "result",
         ]
         read_only_fields = fields
 

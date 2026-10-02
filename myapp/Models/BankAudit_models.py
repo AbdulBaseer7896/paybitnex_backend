@@ -145,6 +145,9 @@ class BankSyncJob(models.Model):
     debits_inserted = models.IntegerField(default=0)
 
     error_message = models.TextField(blank=True)
+    options = models.JSONField(default=dict, blank=True)
+    logs = models.JSONField(default=list, blank=True)
+    result = models.JSONField(default=dict, blank=True)
 
     class Meta:
         db_table = "bank_sync_jobs"
