@@ -378,7 +378,20 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         "source_usa_bank", "source_credit_card",
         "dest_usa_bank", "dest_vendor", "dest_pk_bank",
     ]
-    search_fields = ["reference", "description"]
+    # search_fields = ["reference", "description"]
+    search_fields = [
+        "reference",
+        "description",
+        # Vendor the USD went to / came back from — this is the fix:
+        # typing "Imdad" or "Imdad Akram" now matches on the vendor name.
+        "dest_vendor__name",
+        "pkr_converter_vendor__name",
+        # Bank / account labels so people can search the way they talk
+        # ("Chase", "HBL Operations") instead of by reference number.
+        "dest_usa_bank__label",
+        "dest_pk_bank__label",
+        "source_usa_bank__label",
+    ]
     ordering_fields = ["occurred_on", "created_at", "amount", "fee_amount"]
     ordering = ["-occurred_on", "-created_at"]
 
