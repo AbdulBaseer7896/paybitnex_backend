@@ -26,6 +26,7 @@ from myapp.Models.EmailOTP_models import EmailOTP, OTPPurpose
 from myapp.Utils.async_helpers import async_is_valid
 from myapp.Utils.email_tasks import send_email_async
 from myapp.Utils.staff_alerts import notify_staff
+from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
 
@@ -1010,3 +1011,88 @@ class ChangeEmailVerifyEndpoint(APIView):
         )
         return Response({"detail": "Email updated and verified successfully."}, status=status.HTTP_200_OK)
 
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Admin → impersonate a customer/accountant (support / debugging)
+# ─────────────────────────────────────────────────────────────────────
+class ImpersonateView(AsyncAPIView):
+    """
+    POST /auth/impersonate/<user_id>/
+
+    Admin-only. Returns a fresh JWT pair + the target user's `/me`
+    payload, so the admin can look at that user's portal WITHOUT
+    logging themselves out. The admin's own refresh token stays
+    valid on the client (stashed under a separate localStorage key
+    by the frontend) and is restored on "Back to admin".
+
+    Safety rules enforced here:
+      * Caller must be admin.
+      * Cannot impersonate another admin.
+      * Cannot impersonate yourself.
+    """
+    permission_classes = [IsAuthenticated]
+
+    async def post(self, request, user_id):
+        # Caller must be an admin
+        if getattr(request.user, "role", None) != "admin":
+            return Response(
+                {"detail": "Only admins can impersonate users."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Resolve target (works for int OR uuid PKs)
+        try:
+            target = await User.objects.aget(pk=user_id)
+        except (User.DoesNotExist, ValueError, Exception):
+            return Response(
+                {"detail": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if target.pk == request.user.pk:
+            return Response(
+                {"detail": "You cannot impersonate yourself."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if getattr(target, "role", None) == "admin":
+            return Response(
+                {"detail": "Cannot impersonate another admin."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # RefreshToken.for_user() writes a row to OutstandingToken
+        # (a SYNC ORM call) — calling it straight from an async view
+        # raises SynchronousOnlyOperation. Offload to a worker thread.
+        refresh = await sync_to_async(RefreshToken.for_user)(target)
+        user_payload = await _build_me_response(target)
+
+        # Audit — plain "log in" action with a description that says
+        # exactly who did it to whom, so the trail is unambiguous.
+        try:
+            await AuditLog.arecord(
+                user=request.user,
+                action=AuditLog.ACTION_LOGIN,
+                target=target,
+                description=(
+                    f"Admin impersonation: {request.user.email} "
+                    f"logged in as {target.email}"
+                ),
+                metadata={
+                    "impersonation": True,
+                    "admin_id": str(request.user.pk),
+                    "target_id": str(target.pk),
+                },
+            )
+        except Exception:
+            # Never block the impersonation because audit logging failed.
+            pass
+
+        return Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "user": user_payload,
+            },
+            status=status.HTTP_200_OK,
+        )

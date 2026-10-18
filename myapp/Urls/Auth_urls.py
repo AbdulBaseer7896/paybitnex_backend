@@ -8,6 +8,7 @@ from myapp.Views.Auth_views import (
     PaymentsPinView, PaymentsPinVerifyView, ForgotPaymentsPinView,
     VerifyEmailEndpoint, ResendVerificationEndpoint, ChangeEmailPreLoginEndpoint,
     ChangeEmailVerifyEndpoint,
+    ImpersonateView,
 )
 
 urlpatterns = [
@@ -42,4 +43,7 @@ urlpatterns = [
          name="auth-forgot-request-otp"),
     path("forgot-password/reset/", ForgotPasswordResetView.as_view(),
          name="auth-forgot-reset"),
+    path("me/", MeView.as_view(), name="auth-me"),
+    path("impersonate/<str:user_id>/", ImpersonateView.as_view(),
+         name="auth-impersonate"),
 ]
