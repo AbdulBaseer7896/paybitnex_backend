@@ -1,5 +1,5 @@
 """Serializers for the internal-transactions module."""
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
 
@@ -114,6 +114,21 @@ class VendorPKRPaymentSerializer(serializers.ModelSerializer):
             "is_auto_generated", "is_void", "voided_at", "void_reason",
             "created_by", "created_by_name", "created_at", "updated_at",
         ]
+
+    def to_internal_value(self, data):
+        # Quantize float noise (e.g. 3601.2500000000027 -> 3601.25) before DRF DecimalField precision validation
+        if hasattr(data, "copy"):
+            data = data.copy()
+        elif isinstance(data, dict):
+            data = dict(data)
+        for field in ("usd_sent", "pkr_received"):
+            val = data.get(field)
+            if val not in (None, ""):
+                try:
+                    data[field] = str(Decimal(str(val)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                except Exception:
+                    pass
+        return super().to_internal_value(data)
 
     def validate_vendor(self, value):
         # Recording a PKR payment against someone IS the evidence that they
