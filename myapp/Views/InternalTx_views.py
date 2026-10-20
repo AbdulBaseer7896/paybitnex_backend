@@ -1164,3 +1164,398 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
             "by_destination": by_destination,
             "by_method": by_method,
         })
+
+    @action(detail=False, methods=["get"], url_path="dollar-flow/transactions")
+    def dollar_flow_transactions(self, request):
+        """Returns pre-formatted, server-side paginated transactions contributing to dollar-flow.
+
+        Strictly admin-only: returns 401 if unauthenticated or non-admin.
+        Supports filtering by:
+          - date_from, date_to
+          - slice ('rate', 'destination', 'all')
+          - value (when slice == 'rate')
+          - key (when slice == 'destination')
+          - kind ('all', 'bank', 'card', 'vendor')
+          - search (reference, flow, source, destination)
+          - sort_by ('-occurred_on', 'occurred_on', '-usd', 'usd', '-rate', 'rate', '-pkr', 'pkr')
+          - page, page_size (server-side pagination)
+        """
+        import math
+        if not request.user.is_authenticated or getattr(request.user, "role", "") != "admin":
+            return Response(
+                {"detail": "Authentication credentials were not provided or not authorized. Admin access required."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        slice_type = request.query_params.get("slice", "").strip()
+        target_value = request.query_params.get("value", "").strip()
+        target_key = request.query_params.get("key", "").strip()
+        kind_filter = request.query_params.get("kind", "").strip().lower()
+        search_query = request.query_params.get("search", "").strip().lower()
+        sort_by = request.query_params.get("sort_by", "-occurred_on").strip()
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (ValueError, TypeError):
+            page = 1
+
+        try:
+            page_size = min(100, max(5, int(request.query_params.get("page_size", 25))))
+        except (ValueError, TypeError):
+            page_size = 25
+
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        if date_from:
+            qs = qs.filter(occurred_on__gte=date_from)
+        if date_to:
+            qs = qs.filter(occurred_on__lte=date_to)
+
+        def q2(value):
+            if value is None:
+                return Decimal("0.00")
+            return Decimal(str(value)).quantize(Decimal("0.01"))
+
+        def fmt_usd(amount):
+            try:
+                a = Decimal(str(amount or 0))
+                return f"${a:,.2f}"
+            except Exception:
+                return "$0.00"
+
+        def fmt_pkr(amount):
+            try:
+                a = Decimal(str(amount or 0))
+                return f"PKR {a:,.2f}"
+            except Exception:
+                return "PKR 0.00"
+
+        def fmt_date(d):
+            if not d:
+                return ""
+            try:
+                return d.strftime("%b %d, %Y")
+            except Exception:
+                return str(d)
+
+        # ── Collect available rates and destinations for filter dropdowns ──
+        available_rates_set = set()
+        available_destinations_map = {}
+
+        bank_txs = qs.filter(
+            destination_type=InternalTxDestination.PK_BANK,
+            pk_conversion_rate__isnull=False,
+        ).select_related("source_usa_bank", "dest_pk_bank")
+
+        card_txs = qs.filter(
+            source_type=InternalTxSource.CREDIT_CARD,
+            card_dollar_rate__isnull=False,
+        ).select_related("source_credit_card", "dest_vendor")
+
+        all_dest_txs = qs.select_related(
+            "dest_vendor", "dest_usa_bank", "dest_pk_bank",
+            "source_usa_bank", "source_credit_card"
+        )
+
+        settlements = VendorPKRPayment.objects.filter(is_void=False).select_related("vendor", "pk_bank_account")
+        if date_from:
+            settlements = settlements.filter(occurred_on__gte=date_from)
+        if date_to:
+            settlements = settlements.filter(occurred_on__lte=date_to)
+
+        for b in bank_txs:
+            if b.pk_conversion_rate:
+                available_rates_set.add(f"{q2(b.pk_conversion_rate):.2f}")
+        for c in card_txs:
+            if c.card_dollar_rate:
+                available_rates_set.add(f"{q2(c.card_dollar_rate):.2f}")
+        for s in settlements:
+            if s.exchange_rate:
+                available_rates_set.add(f"{q2(s.exchange_rate):.2f}")
+
+        for tx in all_dest_txs:
+            d_key = f"{tx.destination_type}:{tx.dest_vendor_id or tx.dest_usa_bank_id or tx.dest_pk_bank_id}"
+            d_label = tx.destination_label() or tx.get_destination_type_display()
+            if d_key not in available_destinations_map:
+                available_destinations_map[d_key] = d_label
+
+        all_items = []
+
+        if slice_type == "rate" and target_value:
+            tgt_rate = q2(target_value)
+
+            for tx in bank_txs:
+                if q2(tx.pk_conversion_rate) == tgt_rate:
+                    amt = Decimal(str(tx.amount or 0))
+                    pkr = Decimal(str(tx.pk_amount_pkr or 0))
+                    fee = Decimal(str(tx.fee_amount or 0))
+                    all_items.append({
+                        "id": str(tx.id),
+                        "occurred_on": str(tx.occurred_on),
+                        "occurred_on_formatted": fmt_date(tx.occurred_on),
+                        "kind": "bank",
+                        "kind_badge": "USA → PK Transfer",
+                        "source_label": tx.source_label() or "USA Bank",
+                        "dest_label": tx.destination_label() or "PK Bank",
+                        "flow_label": f"{tx.source_label() or 'USA Bank'} → {tx.destination_label() or 'PK Bank'}",
+                        "usd_amount_raw": str(amt),
+                        "usd_formatted": fmt_usd(amt),
+                        "rate_raw": str(tx.pk_conversion_rate),
+                        "rate_formatted": f"{q2(tx.pk_conversion_rate):.2f} PKR",
+                        "pkr_amount_raw": str(pkr),
+                        "pkr_formatted": fmt_pkr(pkr),
+                        "fee_formatted": fmt_usd(fee) if fee > 0 else "-",
+                        "reference": tx.reference or "-",
+                        "edit_url": f"/admin/internal-transactions?search={tx.reference or ''}",
+                    })
+
+            for tx in card_txs:
+                if q2(tx.card_dollar_rate) == tgt_rate:
+                    amt = Decimal(str(tx.amount or 0))
+                    fee = Decimal(str(tx.fee_amount or 0))
+                    base_usd = amt + fee
+                    pkr = Decimal(str(tx.card_profit_pkr or 0))
+                    all_items.append({
+                        "id": str(tx.id),
+                        "occurred_on": str(tx.occurred_on),
+                        "occurred_on_formatted": fmt_date(tx.occurred_on),
+                        "kind": "card",
+                        "kind_badge": "Card Spend",
+                        "source_label": tx.source_label() or "Credit Card",
+                        "dest_label": tx.destination_label() or "Vendor",
+                        "flow_label": f"{tx.source_label() or 'Credit Card'} → {tx.destination_label() or 'Vendor'}",
+                        "usd_amount_raw": str(base_usd),
+                        "usd_formatted": fmt_usd(base_usd),
+                        "rate_raw": str(tx.card_dollar_rate),
+                        "rate_formatted": f"{q2(tx.card_dollar_rate):.2f} PKR",
+                        "pkr_amount_raw": str(pkr),
+                        "pkr_formatted": fmt_pkr(pkr),
+                        "fee_formatted": fmt_usd(fee) if fee > 0 else "-",
+                        "reference": tx.reference or "-",
+                        "edit_url": f"/admin/card-transactions?search={tx.reference or ''}",
+                    })
+
+            for s in settlements:
+                if q2(s.exchange_rate) == tgt_rate:
+                    usd = Decimal(str(s.usd_sent or 0))
+                    pkr = Decimal(str(s.pkr_received or 0))
+                    all_items.append({
+                        "id": str(s.id),
+                        "occurred_on": str(s.occurred_on),
+                        "occurred_on_formatted": fmt_date(s.occurred_on),
+                        "kind": "vendor",
+                        "kind_badge": "Vendor Settlement",
+                        "source_label": s.vendor.name if s.vendor else "Vendor",
+                        "dest_label": s.pk_bank_account.label if s.pk_bank_account else "PK Account",
+                        "flow_label": f"{s.vendor.name if s.vendor else 'Vendor'} → {s.pk_bank_account.label if s.pk_bank_account else 'PK Account'}",
+                        "usd_amount_raw": str(usd),
+                        "usd_formatted": fmt_usd(usd),
+                        "rate_raw": str(s.exchange_rate),
+                        "rate_formatted": f"{q2(s.exchange_rate):.2f} PKR",
+                        "pkr_amount_raw": str(pkr),
+                        "pkr_formatted": fmt_pkr(pkr),
+                        "fee_formatted": "-",
+                        "reference": s.bank_transaction_id or s.confirmation_code or "-",
+                        "edit_url": "/accountant/vendor-pkr-payments",
+                    })
+
+            title = f"Rate {tgt_rate:.2f} PKR / USD"
+            subtitle = f"Transactions settled at rate {tgt_rate:.2f}"
+
+        elif slice_type == "destination" and target_key:
+            dest_parts = target_key.split(":", 1)
+            d_type = dest_parts[0]
+            d_id = dest_parts[1] if len(dest_parts) > 1 else ""
+
+            tx_qs = all_dest_txs
+            if d_type == "vendor":
+                tx_qs = tx_qs.filter(destination_type=InternalTxDestination.VENDOR, dest_vendor_id=d_id)
+            elif d_type == "usa_bank":
+                tx_qs = tx_qs.filter(destination_type=InternalTxDestination.USA_BANK, dest_usa_bank_id=d_id)
+            elif d_type == "pk_bank":
+                tx_qs = tx_qs.filter(destination_type=InternalTxDestination.PK_BANK, dest_pk_bank_id=d_id)
+
+            for tx in tx_qs:
+                amt = Decimal(str(tx.amount or 0))
+                fee = Decimal(str(tx.fee_amount or 0))
+                is_card = tx.source_type == InternalTxSource.CREDIT_CARD
+                rate = tx.card_dollar_rate if is_card else tx.pk_conversion_rate
+                pkr = tx.card_profit_pkr if is_card else tx.pk_amount_pkr
+                all_items.append({
+                    "id": str(tx.id),
+                    "occurred_on": str(tx.occurred_on),
+                    "occurred_on_formatted": fmt_date(tx.occurred_on),
+                    "kind": "card" if is_card else "bank",
+                    "kind_badge": "Card Spend" if is_card else "Bank Transfer",
+                    "source_label": tx.source_label() or ("Credit Card" if is_card else "USA Bank"),
+                    "dest_label": tx.destination_label() or d_type.replace("_", " ").title(),
+                    "flow_label": f"{tx.source_label() or 'Source'} → {tx.destination_label() or 'Dest'}",
+                    "usd_amount_raw": str(amt),
+                    "usd_formatted": fmt_usd(amt),
+                    "rate_raw": str(rate) if rate else None,
+                    "rate_formatted": f"{q2(rate):.2f} PKR" if rate else "-",
+                    "pkr_amount_raw": str(pkr) if pkr else None,
+                    "pkr_formatted": fmt_pkr(pkr) if pkr else "-",
+                    "fee_formatted": fmt_usd(fee) if fee > 0 else "-",
+                    "reference": tx.reference or "-",
+                    "edit_url": f"/admin/card-transactions?search={tx.reference or ''}" if is_card else f"/admin/internal-transactions?search={tx.reference or ''}",
+                })
+
+            dest_name = available_destinations_map.get(target_key, d_type.replace("_", " ").title())
+            title = dest_name
+            subtitle = f"Outbound USD transfers sent to {dest_name}"
+
+        else:
+            slice_type = "all"
+            title = "All Dollar Flow Transactions"
+            subtitle = "All outbound bank transfers, card spends, and vendor settlements"
+
+            for tx in bank_txs:
+                amt = Decimal(str(tx.amount or 0))
+                pkr = Decimal(str(tx.pk_amount_pkr or 0))
+                fee = Decimal(str(tx.fee_amount or 0))
+                all_items.append({
+                    "id": str(tx.id),
+                    "occurred_on": str(tx.occurred_on),
+                    "occurred_on_formatted": fmt_date(tx.occurred_on),
+                    "kind": "bank",
+                    "kind_badge": "USA → PK Transfer",
+                    "source_label": tx.source_label() or "USA Bank",
+                    "dest_label": tx.destination_label() or "PK Bank",
+                    "flow_label": f"{tx.source_label() or 'USA Bank'} → {tx.destination_label() or 'PK Bank'}",
+                    "usd_amount_raw": str(amt),
+                    "usd_formatted": fmt_usd(amt),
+                    "rate_raw": str(tx.pk_conversion_rate) if tx.pk_conversion_rate else None,
+                    "rate_formatted": f"{q2(tx.pk_conversion_rate):.2f} PKR" if tx.pk_conversion_rate else "-",
+                    "pkr_amount_raw": str(pkr),
+                    "pkr_formatted": fmt_pkr(pkr),
+                    "fee_formatted": fmt_usd(fee) if fee > 0 else "-",
+                    "reference": tx.reference or "-",
+                    "edit_url": f"/admin/internal-transactions?search={tx.reference or ''}",
+                })
+
+            for tx in card_txs:
+                amt = Decimal(str(tx.amount or 0))
+                fee = Decimal(str(tx.fee_amount or 0))
+                base_usd = amt + fee
+                pkr = Decimal(str(tx.card_profit_pkr or 0))
+                all_items.append({
+                    "id": str(tx.id),
+                    "occurred_on": str(tx.occurred_on),
+                    "occurred_on_formatted": fmt_date(tx.occurred_on),
+                    "kind": "card",
+                    "kind_badge": "Card Spend",
+                    "source_label": tx.source_label() or "Credit Card",
+                    "dest_label": tx.destination_label() or "Vendor",
+                    "flow_label": f"{tx.source_label() or 'Credit Card'} → {tx.destination_label() or 'Vendor'}",
+                    "usd_amount_raw": str(base_usd),
+                    "usd_formatted": fmt_usd(base_usd),
+                    "rate_raw": str(tx.card_dollar_rate) if tx.card_dollar_rate else None,
+                    "rate_formatted": f"{q2(tx.card_dollar_rate):.2f} PKR" if tx.card_dollar_rate else "-",
+                    "pkr_amount_raw": str(pkr),
+                    "pkr_formatted": fmt_pkr(pkr),
+                    "fee_formatted": fmt_usd(fee) if fee > 0 else "-",
+                    "reference": tx.reference or "-",
+                    "edit_url": f"/admin/card-transactions?search={tx.reference or ''}",
+                })
+
+            for s in settlements:
+                usd = Decimal(str(s.usd_sent or 0))
+                pkr = Decimal(str(s.pkr_received or 0))
+                all_items.append({
+                    "id": str(s.id),
+                    "occurred_on": str(s.occurred_on),
+                    "occurred_on_formatted": fmt_date(s.occurred_on),
+                    "kind": "vendor",
+                    "kind_badge": "Vendor Settlement",
+                    "source_label": s.vendor.name if s.vendor else "Vendor",
+                    "dest_label": s.pk_bank_account.label if s.pk_bank_account else "PK Account",
+                    "flow_label": f"{s.vendor.name if s.vendor else 'Vendor'} → {s.pk_bank_account.label if s.pk_bank_account else 'PK Account'}",
+                    "usd_amount_raw": str(usd),
+                    "usd_formatted": fmt_usd(usd),
+                    "rate_raw": str(s.exchange_rate) if s.exchange_rate else None,
+                    "rate_formatted": f"{q2(s.exchange_rate):.2f} PKR" if s.exchange_rate else "-",
+                    "pkr_amount_raw": str(pkr),
+                    "pkr_formatted": fmt_pkr(pkr),
+                    "fee_formatted": "-",
+                    "reference": s.bank_transaction_id or s.confirmation_code or "-",
+                    "edit_url": "/accountant/vendor-pkr-payments",
+                })
+
+        filtered_items = all_items
+        if kind_filter and kind_filter != "all":
+            filtered_items = [it for it in filtered_items if it.get("kind") == kind_filter]
+
+        if search_query:
+            filtered_items = [
+                it for it in filtered_items
+                if search_query in it.get("reference", "").lower()
+                or search_query in it.get("flow_label", "").lower()
+                or search_query in it.get("source_label", "").lower()
+                or search_query in it.get("dest_label", "").lower()
+            ]
+
+        if sort_by == "occurred_on":
+            filtered_items.sort(key=lambda x: x["occurred_on"])
+        elif sort_by == "-usd":
+            filtered_items.sort(key=lambda x: Decimal(x["usd_amount_raw"]), reverse=True)
+        elif sort_by == "usd":
+            filtered_items.sort(key=lambda x: Decimal(x["usd_amount_raw"]))
+        elif sort_by == "-rate":
+            filtered_items.sort(key=lambda x: Decimal(x["rate_raw"] or 0), reverse=True)
+        elif sort_by == "rate":
+            filtered_items.sort(key=lambda x: Decimal(x["rate_raw"] or 0))
+        elif sort_by == "-pkr":
+            filtered_items.sort(key=lambda x: Decimal(x["pkr_amount_raw"] or 0), reverse=True)
+        elif sort_by == "pkr":
+            filtered_items.sort(key=lambda x: Decimal(x["pkr_amount_raw"] or 0))
+        else:
+            filtered_items.sort(key=lambda x: (x["occurred_on"], Decimal(x["usd_amount_raw"])), reverse=True)
+
+        total_count = len(filtered_items)
+        tot_usd = sum((Decimal(i["usd_amount_raw"]) for i in filtered_items), Decimal("0"))
+        tot_pkr = sum((Decimal(i["pkr_amount_raw"] or 0) for i in filtered_items), Decimal("0"))
+        blended = (tot_pkr / tot_usd).quantize(Decimal("0.01")) if tot_usd > 0 and tot_pkr > 0 else None
+
+        total_pages = math.ceil(total_count / page_size) if total_count > 0 else 1
+        if page > total_pages and total_pages > 0:
+            page = total_pages
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_results = filtered_items[start:end]
+
+        return Response({
+            "filter_info": {
+                "slice": slice_type,
+                "value": target_value,
+                "key": target_key,
+                "title": title,
+                "subtitle": subtitle,
+            },
+            "summary": {
+                "total_usd_formatted": fmt_usd(tot_usd),
+                "total_pkr_formatted": fmt_pkr(tot_pkr) if tot_pkr > 0 else None,
+                "total_usd_raw": str(tot_usd),
+                "total_pkr_raw": str(tot_pkr),
+                "blended_rate_formatted": f"{blended:.2f} PKR" if blended else None,
+                "count": total_count,
+            },
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1,
+            },
+            "options": {
+                "available_rates": sorted(list(available_rates_set), key=lambda r: Decimal(r), reverse=True),
+                "available_destinations": [
+                    {"key": k, "label": v}
+                    for k, v in sorted(available_destinations_map.items(), key=lambda kv: kv[1])
+                ],
+            },
+            "results": page_results,
+        })
+
