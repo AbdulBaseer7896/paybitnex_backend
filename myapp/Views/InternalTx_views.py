@@ -392,7 +392,7 @@ class InternalTransactionViewSet(viewsets.ModelViewSet):
         "dest_pk_bank__label",
         "source_usa_bank__label",
     ]
-    ordering_fields = ["occurred_on", "created_at", "amount", "fee_amount"]
+    ordering_fields = ["occurred_on", "created_at", "updated_at", "amount", "fee_amount"]
     ordering = ["-occurred_on", "-created_at"]
 
     def get_permissions(self):
