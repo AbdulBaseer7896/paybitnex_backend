@@ -29,6 +29,7 @@ from rest_framework.response import Response
 
 from myapp.Models.Auth_models import UserRole
 from myapp.Models.Audit_models import AuditLog
+from myapp.Models.BankEmail_models import BankAlertStatus
 from myapp.Models.Transaction_models import (
     IncomingPayment, OutgoingPKRTransfer, OutgoingPKRTransferReceipt, TransactionStatus,
     TransactionStatusHistory, BankVerificationStatus, BankVerificationSource,
@@ -178,8 +179,6 @@ def _notify_admins_payment_confirmed(payment, confirmed_by=""):
     )
 
 
-# ---------- viewsets ----------
-
 class IncomingPaymentViewSet(viewsets.ModelViewSet):
     """
     Mixed-role viewset.
@@ -195,6 +194,7 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             "handled_by", "verified_by",
             "force_completed_by",
             "outgoing_transfer",
+            "linked_bank_email",
         )
         .prefetch_related(
             "status_history__changed_by",
@@ -765,6 +765,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 payment, from_status="", to_status=TransactionStatus.SUBMITTED,
                 user=request.user, note="Submitted by customer",
             )
+            
+            # NEW: Match this payment against existing UNMATCHED bank emails
+            from myapp.Services.email_matcher import match_payment_to_unmatched_emails
+            from django.db import transaction as dbtx_inner
+            payment_id = payment.id
+            dbtx_inner.on_commit(lambda: match_payment_to_unmatched_emails(IncomingPayment.objects.get(pk=payment_id)))
+
             # After commit: the alert links straight to the review screen,
             # which would 404 if the row weren't visible yet.
             dbtx.on_commit(lambda: _notify_admins_new_payment(payment))
@@ -836,6 +843,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 note=f"Submitted on behalf of {customer.email} by {request.user.email}",
             )
             staff_email = request.user.email
+            
+            # NEW: Match this payment against existing UNMATCHED bank emails
+            from myapp.Services.email_matcher import match_payment_to_unmatched_emails
+            from django.db import transaction as dbtx_inner
+            payment_id = payment.id
+            dbtx_inner.on_commit(lambda: match_payment_to_unmatched_emails(IncomingPayment.objects.get(pk=payment_id)))
+
             dbtx.on_commit(
                 lambda: _notify_admins_new_payment(
                     payment, submitted_by=staff_email,
@@ -1034,13 +1048,12 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
     )
     def unverify_documents(self, request, pk=None):
         """
-        Reverse a verification. Flips `verified_at` back to null and rolls the
-        status back to UNDER_REVIEW (unless already past PKR_SENT, in which
-        case we refuse). Used by the admin/accountant when they clicked
-        "Verify" in error.
+        Reverse a verification. Flips `verified_at` back to null, resets `auto_verified`
+        to False, unlinks any attached bank alert email, and rolls the status back to
+        SUBMITTED (unless already past PKR_SENT, in which case we refuse).
         """
         payment = self.get_object()
-        if payment.verified_at is None:
+        if payment.verified_at is None and not payment.auto_verified:
             return Response(
                 {"detail": "Payment is not currently verified."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1057,10 +1070,24 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
             payment.verified_at = None
             payment.verified_by = None
             payment.verified_note = ""
-            payment.status = TransactionStatus.UNDER_REVIEW
+            payment.auto_verified = False
+
+            if payment.linked_bank_email:
+                email_rec = payment.linked_bank_email
+                email_rec.status = BankAlertStatus.UNMATCHED
+                email_rec.matched_payment = None
+                email_rec.matched_by = None
+                email_rec.matched_at = None
+                email_rec.save(update_fields=[
+                    "status", "matched_payment", "matched_by", "matched_at", "updated_at",
+                ])
+                payment.linked_bank_email = None
+
+            payment.status = TransactionStatus.SUBMITTED
             payment.handled_by = request.user
             payment.save(update_fields=[
                 "verified_at", "verified_by", "verified_note",
+                "auto_verified", "linked_bank_email",
                 "status", "handled_by", "updated_at",
             ])
             if before_status != payment.status:
@@ -1492,7 +1519,21 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
 
         return Response(IncomingPaymentSerializer(payment, context={"request": request}).data)
 
-
+    # ---- show the bank email that auto-verified this payment ----
+    @action(
+        detail=True, methods=["get"],
+        permission_classes=[IsAuthenticated, IsAdminOrAccountant],
+        url_path="linked-email",
+    )
+    def linked_email(self, request, pk=None):
+        payment = self.get_object()
+        if not payment.linked_bank_email_id:
+            return Response(
+                {"detail": "No bank email linked to this payment."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        from myapp.serializers.BankEmail_serializers import BankAlertEmailSerializer
+        return Response(BankAlertEmailSerializer(payment.linked_bank_email).data)
 class OutgoingTransferViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin,
     mixins.CreateModelMixin, viewsets.GenericViewSet,

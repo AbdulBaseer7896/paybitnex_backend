@@ -22,12 +22,14 @@ from myapp.Utils.report_tasks import generate_daily_report
 from myapp.Utils.stale_payment_tasks import (
     auto_confirm_stale_payments, flag_stale_payments,
 )
+from myapp.Utils.bank_email_tasks import poll_bank_emails
 
 __all__ = [
     "auto_confirm_stale_payments",
     "cleanup_expired_otps",
     "fetch_live_rates",
     "flag_stale_payments",
+    "poll_bank_emails",
     "generate_daily_report",
     "send_daily_ops_digest",
     "send_overdue_invoice_reminders",

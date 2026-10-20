@@ -6,15 +6,15 @@ from myapp.Views.Transaction_views import (
     IncomingPaymentViewSet, OutgoingTransferViewSet,
     customers_with_tx_counts,
 )
+from myapp.Views.BankEmail_views import BankAlertEmailViewSet
 from myapp.Views.Invoice_views import single_invoice_pdf, bulk_invoice_pdf
 
 router = DefaultRouter()
 router.register(r"payments", IncomingPaymentViewSet, basename="payments")
 router.register(r"transfers", OutgoingTransferViewSet, basename="transfers")
+router.register(r"bank-emails", BankAlertEmailViewSet, basename="bank-emails")
 
 urlpatterns = [
-    # Invoice endpoints — registered BEFORE the router so the explicit
-    # paths take precedence over any viewset detail match.
     path(
         "payments/invoice-bulk.pdf", bulk_invoice_pdf,
         name="payments-invoice-bulk",

@@ -38,6 +38,7 @@ from myapp.Models.Dispatch_models import (
     DispatchCompany, DispatchDriver, Dispatch, DispatchStatus,
 )
 from myapp.Models.BankAudit_models import BankAudit, BankAuditFile, BankStatementRecord, BankSyncJob
+from myapp.Models.BankEmail_models import BankAlertEmail, BankAlertStatus
 
 __all__ = [
     "User", "UserRole",
@@ -64,4 +65,6 @@ __all__ = [
     "DispatchCompany", "DispatchDriver", "Dispatch", "DispatchStatus",
     # Bank reconciliation audit module
     "BankAudit", "BankAuditFile", "BankStatementRecord", "BankSyncJob",
+    # Bank alert email module
+    "BankAlertEmail", "BankAlertStatus",
 ]
