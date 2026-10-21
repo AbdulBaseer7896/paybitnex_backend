@@ -100,6 +100,15 @@ class IncomingPayment(models.Model):
         related_name="verified_payments",
     )
     verified_at = models.DateTimeField(null=True, blank=True)
+    
+    # Auto-verification by bank-email ingestion (see BankEmail_models.py).
+    # `auto_verified` distinguishes system-matched from accountant-clicked;
+    # `linked_bank_email` points at the specific receipt that triggered it.
+    auto_verified = models.BooleanField(default=False, db_index=True)
+    linked_bank_email = models.ForeignKey(
+        "myapp.BankAlertEmail", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="primary_verified_payment",
+    )
 
     # Accountant-applied fields
     exchange_rate = models.DecimalField(

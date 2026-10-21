@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
 import dj_database_url
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -353,6 +354,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "myapp.Utils.report_tasks.generate_daily_report",
         "schedule": crontab(hour="0", minute="5"),
     },
+    # Bank email ingestion — every 60s, per product spec.
+    "poll-bank-emails-every-minute": {
+        "task": "myapp.Utils.bank_email_tasks.poll_bank_emails",
+        "schedule": crontab(minute = "0", hour="*/4"),
+    },
     # Flag PKR-sent payments that have been awaiting customer confirmation
     # beyond SystemSetting `stale_payment_minutes`, surfacing them in the
     # "Awaiting customer confirmation" queue. Every 30 minutes so minute-level
@@ -388,6 +394,33 @@ CELERY_BEAT_SCHEDULE = {
         "task": "myapp.Utils.digest_tasks.send_daily_ops_digest",
         "schedule": crontab(hour="8", minute="0"),
     },
+}
+
+
+
+# # ── Bank-email ingestion config ────────────────────────────────────────
+# BANK_EMAIL_IMAP = {
+#     "host":         config("BANK_EMAIL_HOST", default="imap.gmail.com"),
+#     "port":         config("BANK_EMAIL_PORT", default=993, cast=int),
+#     "user":         config("BANK_EMAIL_USER", default=""),
+#     "password":     config("BANK_EMAIL_PASS", default=""),
+#     "folder":       config("BANK_EMAIL_FOLDER", default="INBOX"),
+#     "mark_as_seen": config("BANK_EMAIL_MARK_SEEN", default=True, cast=bool),
+#     "sender_whitelist": [
+#         # "bankofamerica.com", "chase.com", "usbank.com",
+#         # "zellepay.com", "squareup.com", "cash.app", "airwallex.com",
+#     ],
+# }
+
+BANK_EMAIL_IMAP = {
+    "host":         config("BANK_EMAIL_HOST", default="imap.gmail.com"),
+    "port":         config("BANK_EMAIL_PORT", default=993, cast=int),
+    "user":         config("BANK_EMAIL_USER", default=""),
+    "password":     config("BANK_EMAIL_PASS", default=""),
+    "folder":       config("BANK_EMAIL_FOLDER", default="INBOX"),
+    "mark_as_seen": config("BANK_EMAIL_MARK_SEEN", default=True, cast=bool),
+    "max_per_run":  config("BANK_EMAIL_MAX_PER_RUN", default=50, cast=int),
+    "sender_whitelist": config("BANK_EMAIL_SENDER_WHITELIST", default="", cast=Csv()),
 }
 
 EXCHANGE_RATE_API_KEY = config("EXCHANGE_RATE_API_KEY", default="")
