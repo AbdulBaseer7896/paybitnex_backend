@@ -88,17 +88,26 @@ def _find_candidates(email_rec: BankAlertEmail):
         return amt_hits
 
     # 3) Sender-name tiebreaker — only kicks in when >1 amount match.
-    email_name = _normalise_name(email_rec.extracted_sender_name)
+    raw_email_sender = (email_rec.extracted_sender_name or "").lower()
+    email_name = _normalise_name(raw_email_sender)
     if not email_name:
         return amt_hits
 
+    email_tokens = set(w for w in raw_email_sender.split() if len(w) >= 3)
+
     scored = []
     for p in amt_hits:
-        p_name = _normalise_name(p.sender_name or "")
+        raw_p_sender = (p.sender_name or "").lower()
+        p_name = _normalise_name(raw_p_sender)
         if not p_name:
             continue
         # Substring either way — "John Doe" vs "JOHN DOE" both match.
         if email_name in p_name or p_name in email_name:
+            scored.append(p)
+            continue
+        # Token overlap for names with suffixes/LLC/slight variations (e.g. "Bonita Callahan" vs "Bonita Caushan LLC")
+        p_tokens = set(w for w in raw_p_sender.split() if len(w) >= 3)
+        if email_tokens and p_tokens and (email_tokens & p_tokens):
             scored.append(p)
     return scored or amt_hits
 
