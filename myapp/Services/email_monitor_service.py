@@ -138,9 +138,10 @@ def process_email(raw_bytes: bytes) -> BankAlertEmail | None:
     whitelist = settings.BANK_EMAIL_IMAP.get("sender_whitelist") or []
     
     if whitelist:
-        # Check if the sender's domain matches any in our list
+        # Check if the sender's domain matches any in our list (exact or subdomain)
         sender_lower = sender.lower()
-        if not any(sender_lower.endswith(w.lower()) for w in whitelist):
+        sender_domain = sender_lower.split("@")[-1] if "@" in sender_lower else sender_lower
+        if not any(sender_domain == w.lower() or sender_domain.endswith("." + w.lower()) for w in whitelist):
             logger.debug("Skipping email from %s — sender not in whitelist", sender)
             return None
 
