@@ -39,6 +39,8 @@ FINGERPRINTS = [
         "checks": [
             {"type": "img_src_contains", "value": "squarecdn.com"},
             {"type": "text_contains",    "value": "cash.app"},
+            {"type": "domain_in_link",   "value": "cash.app"},
+            {"type": "text_contains",    "value": "cash app"},
         ],
         "match": "any",
     },
@@ -143,27 +145,41 @@ def detect_parser(soup: BeautifulSoup):
 def parse_cashapp(soup: BeautifulSoup, msg) -> dict | None:
     result = {"sender_name": "", "amount": "", "currency": "USD",
               "transaction_id": "", "note": ""}
-    name_td = soup.find("td", style=lambda s: s and "font-size:32px" in s)
+    name_td = soup.find("td", style=lambda s: s and "font-size:32px" in s.replace(" ", ""))
     if name_td:
         result["sender_name"] = name_td.get_text(strip=True)
-    amount_td = soup.find("td", style=lambda s: s and "font-size:48px" in s)
+    amount_td = soup.find("td", style=lambda s: s and "font-size:48px" in s.replace(" ", ""))
     if amount_td:
         result["amount"] = amount_td.get_text(strip=True).lstrip("+")
+
     grey_tds = soup.find_all(
         "td",
-        style=lambda s: s and "color:#666666" in s and "font-size:16px" in s,
+        style=lambda s: s and "color:#666666" in s.replace(" ", "") and "font-size:16px" in s.replace(" ", ""),
     )
+    if not grey_tds:
+        grey_tds = soup.find_all("td", class_=lambda c: c and "profile-description" in c)
     notes = [td.get_text(strip=True) for td in grey_tds if td.get_text(strip=True)]
     if len(notes) >= 2:
         result["note"] = notes[1]
     elif len(notes) == 1:
         result["note"] = notes[0]
-    txn_re = re.compile(r"#[A-Z0-9]{1,2}-[A-Z0-9]+")
+
+    # Look for exact transaction ID cell first, then fallback with word boundary \b
+    txn_exact_re = re.compile(r"^#[A-Z0-9]{1,2}-[A-Z0-9]+$")
     for td in soup.find_all("td"):
-        m = txn_re.search(td.get_text(strip=True))
-        if m:
-            result["transaction_id"] = m.group()
+        t = td.get_text(strip=True)
+        if txn_exact_re.match(t):
+            result["transaction_id"] = t
             break
+
+    if not result["transaction_id"]:
+        txn_re = re.compile(r"#[A-Z0-9]{1,2}-[A-Z0-9]+\b")
+        for td in soup.find_all("td"):
+            m = txn_re.search(td.get_text(" ", strip=True))
+            if m:
+                result["transaction_id"] = m.group()
+                break
+
     if not result["sender_name"] or not result["amount"]:
         return None
     return result
