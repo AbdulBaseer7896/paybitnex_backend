@@ -343,6 +343,9 @@ def weekly_monday_report(request):
     if err is not None:
         return err
 
+    has_explicit_range = bool(
+        request.query_params.get("date_from") or request.query_params.get("date_to")
+    )
     date_from = _parse_date(request.query_params.get("date_from"))
     date_to = _parse_date(request.query_params.get("date_to"))
     if not date_to:
@@ -359,12 +362,18 @@ def weekly_monday_report(request):
     if date_from > date_to:
         date_from, date_to = date_to, date_from
 
-    range_start = week_start_for(date_from, start_day)
-    range_end = week_start_for(date_to, start_day) + timedelta(days=6)
-    if ((range_end - range_start).days // 7) + 1 > MAX_WEEKS:
-        range_start = week_start_for(range_end, start_day) - timedelta(
-            days=7 * (MAX_WEEKS - 1)
-        )
+    # When explicit date_from or date_to are provided (e.g. calendar month Oct 1-31 or custom dates),
+    # respect the exact date range. Only snap to whole weekly cycles when defaulting via `weeks_back`.
+    if has_explicit_range:
+        range_start = date_from
+        range_end = date_to
+    else:
+        range_start = week_start_for(date_from, start_day)
+        range_end = week_start_for(date_to, start_day) + timedelta(days=6)
+        if ((range_end - range_start).days // 7) + 1 > MAX_WEEKS:
+            range_start = week_start_for(range_end, start_day) - timedelta(
+                days=7 * (MAX_WEEKS - 1)
+            )
 
     qs = qs.filter(tx_date__gte=range_start, tx_date__lte=range_end)
 
