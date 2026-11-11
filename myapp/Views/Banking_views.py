@@ -10,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView
+from rest_framework.exceptions import ValidationError
 
 from myapp.Models.Auth_models import UserRole
 from myapp.Models.Audit_models import AuditLog
@@ -144,6 +145,15 @@ class _OwnerScopedAuditedMixin:
     # ---- DELETE ----
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+
+        # A primary account cannot be removed. The customer must set another
+        # account as primary first; they can still edit this account's details.
+        if getattr(instance, "is_primary", False):
+            raise ValidationError(
+                "You cannot remove your primary bank account. Set another "
+                "account as primary first, or edit this account's details instead."
+            )
+
         before = _snapshot(instance, self.snapshot_fields)
         label = str(instance)
         instance.delete()
