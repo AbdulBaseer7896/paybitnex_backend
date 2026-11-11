@@ -479,6 +479,7 @@ X_FRAME_OPTIONS               = "SAMEORIGIN"  # allows same-origin document/PDF 
 
 # Only enable HSTS + cookie flags in production (DEBUG=False).
 # Enabling in dev would break plain-http localhost flows.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 if not DEBUG:
     SECURE_SSL_REDIRECT             = True
     SESSION_COOKIE_SECURE           = True

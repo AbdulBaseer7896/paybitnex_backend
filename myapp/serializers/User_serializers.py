@@ -5,6 +5,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 
+import phonenumbers
+from phonenumbers import NumberParseException, PhoneNumberFormat
+
 from myapp.Models.Auth_models import User, UserRole
 
 
@@ -252,6 +255,45 @@ def clean_and_validate_full_name(value, required=True):
             raise serializers.ValidationError("Full name is required and cannot be 'undefined' or blank.")
         return ""
     return val
+
+
+# Default region for a number that arrives without a country code. During KYC
+# onboarding the mobile app trims the "+92" before sending, so a bare local
+# number is assumed to be Pakistani.
+PHONE_DEFAULT_REGION = "PK"
+
+def validate_phone_number(value, required=False):
+    """Validate a phone number with the `phonenumbers` library before storing.
+
+    Normalises to E.164 first (via normalize_phone, which mirrors the
+    frontend), then checks the number is an actually valid, dialable number.
+    Returns the canonical E.164 string (e.g. "+923001234567"), or "" when the
+    value is empty and not required.
+
+    Raises serializers.ValidationError when the value is not a valid phone
+    number in the format the backend expects (E.164 with country code).
+    """
+    normalized = normalize_phone(value)
+    if not normalized:
+        if required:
+            raise serializers.ValidationError("Phone number is required.")
+        return ""
+    try:
+        # A normalized value starts with "+", so the country code gives the
+        # region; fall back to PK only for any leftover local-only form.
+        region = None if normalized.startswith("+") else PHONE_DEFAULT_REGION
+        parsed = phonenumbers.parse(normalized, region)
+    except NumberParseException:
+        raise serializers.ValidationError(
+            "Enter a valid phone number including the country code "
+            "(e.g. +923001234567)."
+        )
+    if not phonenumbers.is_valid_number(parsed):
+        raise serializers.ValidationError(
+            "Enter a valid phone number including the country code "
+            "(e.g. +923001234567)."
+        )
+    return phonenumbers.format_number(parsed, PhoneNumberFormat.E164)
 
 
 class AdminCreateUserSerializer(serializers.ModelSerializer):

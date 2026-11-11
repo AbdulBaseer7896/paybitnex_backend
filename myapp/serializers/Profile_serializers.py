@@ -90,6 +90,16 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     def validate_full_name(self, value):
         from myapp.serializers.User_serializers import clean_and_validate_full_name
         return clean_and_validate_full_name(value, required=True)
+    
+
+    def validate_phone(self, value):
+    # KYC onboarding sends the mobile number (the app trims the country
+    # code). Validate it here, before it reaches the DB: reject anything
+    # that isn't a real phone number and store it canonically as E.164.
+        from myapp.serializers.User_serializers import validate_phone_number
+        return validate_phone_number(value, required=False)
+
+
 
     def validate_cnic_number(self, value):
         if not value:
