@@ -4,7 +4,7 @@ Banking views — customer manages their PK + foreign bank accounts.
 Every mutation (create/update/delete/make-primary) is audit-logged so the
 admin can see exactly what the customer changed and when.
 """
-from django.db import transaction as dbtx
+from django.db import transaction as dbtx, connection, IntegrityError
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -166,6 +166,19 @@ class _OwnerScopedAuditedMixin:
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _lock_primary_scope(model, customer_id):
+    """Lock this customer's account rows for the rest of the transaction, in a
+    stable pk order, so concurrent "make primary" / updates from different
+    devices serialize instead of racing (which could deadlock or leave two
+    primaries). On a backend without row locking (SQLite dev) this is a plain
+    read — SQLite's single writer already serializes writes.
+    """
+    qs = model.objects.filter(customer_id=customer_id).order_by("pk")
+    if connection.features.has_select_for_update:
+        qs = qs.select_for_update()
+    list(qs)  # force evaluation → acquire the locks now
+
+
 class CustomerBankAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     queryset = CustomerBankAccount.objects.select_related("bank").all()
@@ -175,11 +188,15 @@ class CustomerBankAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelViewSet
 
     def perform_update(self, serializer):
         with dbtx.atomic():
-            instance = serializer.save()
+            customer_id = serializer.instance.customer_id
+            _lock_primary_scope(CustomerBankAccount, customer_id)
             if serializer.validated_data.get("is_primary"):
+                # Demote others BEFORE saving this one primary, so the partial
+                # unique constraint never sees two primaries at once.
                 CustomerBankAccount.objects.filter(
-                    customer=instance.customer,
-                ).exclude(pk=instance.pk).update(is_primary=False)
+                    customer_id=customer_id,
+                ).exclude(pk=serializer.instance.pk).update(is_primary=False)
+            serializer.save()
 
     def partial_update(self, request, *args, **kwargs):
         """PATCH endpoint for editing customer bank records."""
@@ -189,15 +206,21 @@ class CustomerBankAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelViewSet
     @action(detail=True, methods=["post"])
     def make_primary(self, request, pk=None):
         acct = self.get_object()
-        with dbtx.atomic():
-            # Un-set any other primary for this customer
-            CustomerBankAccount.objects.filter(
-                customer=acct.customer,
-            ).exclude(pk=acct.pk).update(is_primary=False)
-            was_primary = acct.is_primary
-            acct.is_primary = True
-            acct.is_active = True  # re-activate if it was soft-disabled
-            acct.save(update_fields=["is_primary", "is_active", "updated_at"])
+        was_primary = acct.is_primary
+        try:
+            with dbtx.atomic():
+                _lock_primary_scope(CustomerBankAccount, acct.customer_id)
+                # Un-set any other primary for this customer, then set this one.
+                CustomerBankAccount.objects.filter(
+                    customer=acct.customer,
+                ).exclude(pk=acct.pk).update(is_primary=False)
+                acct.is_primary = True
+                acct.is_active = True  # re-activate if it was soft-disabled
+                acct.save(update_fields=["is_primary", "is_active", "updated_at"])
+        except IntegrityError:
+            raise ValidationError(
+                "Couldn't set this account as primary — please try again."
+            )
         if not was_primary:
             AuditLog.record(
                 user=request.user, action=AuditLog.ACTION_UPDATE, target=acct,
@@ -217,18 +240,24 @@ class CustomerMerchantAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelVie
     @action(detail=True, methods=["post"])
     def make_primary(self, request, pk=None):
         acct = self.get_object()
-        with dbtx.atomic():
-            CustomerMerchantAccount.objects.filter(
-                customer=acct.customer,
-            ).exclude(pk=acct.pk).update(is_primary=False)
-            was_primary = acct.is_primary
-            acct.is_primary = True
-            acct.is_active = True
-            acct.save(update_fields=["is_primary", "is_active", "updated_at"])
+        was_primary = acct.is_primary
+        try:
+            with dbtx.atomic():
+                _lock_primary_scope(CustomerMerchantAccount, acct.customer_id)
+                CustomerMerchantAccount.objects.filter(
+                    customer=acct.customer,
+                ).exclude(pk=acct.pk).update(is_primary=False)
+                acct.is_primary = True
+                acct.is_active = True
+                acct.save(update_fields=["is_primary", "is_active", "updated_at"])
+        except IntegrityError:
+            raise ValidationError(
+                "Couldn't set this account as primary — please try again."
+            )
         if not was_primary:
             AuditLog.record(
                 user=request.user, action=AuditLog.ACTION_UPDATE, target=acct,
                 description=f"Merchant account set as primary: {acct}",
                 before={"is_primary": False}, after={"is_primary": True},
             )
-        return Response(self.get_serializer(acct).data)
+        return Response(self.get_serializer(acct).data)s
