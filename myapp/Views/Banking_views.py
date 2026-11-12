@@ -260,4 +260,4 @@ class CustomerMerchantAccountViewSet(_OwnerScopedAuditedMixin, viewsets.ModelVie
                 description=f"Merchant account set as primary: {acct}",
                 before={"is_primary": False}, after={"is_primary": True},
             )
-        return Response(self.get_serializer(acct).data)s
+        return Response(self.get_serializer(acct).data)
