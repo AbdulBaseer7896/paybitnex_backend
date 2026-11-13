@@ -277,6 +277,27 @@ class AuditLogListView(ListAPIView):
 
 
 @api_view(["GET"])
+@permission_classes([IsAdminOrAccountant])
+def stale_config(request):
+    """Resolved stale / auto-confirm thresholds for the Awaiting-confirmation
+    page. [B14]
+
+    The page used to read the raw ``/core/settings/<key>/`` rows, but that
+    endpoint is admin-only (an accountant got 403) and the rows may be
+    unseeded (404) — both showed a bare dash even though the backend enforces
+    a real default. This returns the SAME values the Celery tasks resolve, so
+    the page is bound to the rule actually in force, for accountants too.
+    """
+    from myapp.Utils.stale_payment_tasks import (
+        _resolve_threshold_minutes, _resolve_auto_confirm_minutes,
+    )
+    return Response({
+        "stale_threshold_minutes": _resolve_threshold_minutes(),
+        "auto_confirm_minutes": _resolve_auto_confirm_minutes(),
+    })
+
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard_summary(request):
     u = request.user
