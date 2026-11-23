@@ -98,10 +98,13 @@ def notify_payment_status_updated(payment, old_status: str, new_status: str, not
     # Pre-build payload contract for mobile
     payload = {
         "type": NotificationType.PAYMENT_STATUS_UPDATED,
+        "event": NotificationType.PAYMENT_STATUS_UPDATED,
         "notification_id": None,  # Filled after DB save
         "payment_id": str(payment.id),
+        "reference": getattr(payment, "reference", ""),
         "old_status": str(old_status or ""),
         "new_status": str(new_status),
+        "status": str(new_status),
         "title": title,
         "message": message,
         "created_at": now_iso,
@@ -157,10 +160,13 @@ def notify_payment_received_confirmed(payment, old_status: str, new_status: str,
 
     payload = {
         "type": NotificationType.PAYMENT_RECEIVED_CONFIRMED,
+        "event": NotificationType.PAYMENT_RECEIVED_CONFIRMED,
         "notification_id": None,
         "payment_id": str(payment.id),
+        "reference": getattr(payment, "reference", ""),
         "old_status": str(old_status or ""),
         "new_status": str(new_status),
+        "status": str(new_status),
         "customer_id": customer_id,
         "customer_name": customer_name,
         "title": title,

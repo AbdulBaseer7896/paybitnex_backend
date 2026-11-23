@@ -1,185 +1,339 @@
-# PaidiX: Real-Time Notifications System — Architecture, API & Deployment Documentation
+# PaidiX: Real-Time Notifications System — Complete Technical & Event Specification
 
-**Author / Contributor:** Backend Team  
 **Branch:** `feature/realtime-notifications`  
 **Repository:** [AbdulBaseer7896/paybitnex_backend](https://github.com/AbdulBaseer7896/paybitnex_backend)  
-**Pull Request:** [Create PR](https://github.com/AbdulBaseer7896/paybitnex_backend/pull/new/feature/realtime-notifications)  
-**Status:** Complete, Tested (12/12 Unit Tests Passed), Verified Live on ASGI/Daphne  
+**Pull Request:** [Create Pull Request](https://github.com/AbdulBaseer7896/paybitnex_backend/pull/new/feature/realtime-notifications)  
+**Core Stack:** Django 6.1.3, Channels 4.3.2, Daphne 4.1.2, Redis 5.2.1 / channels_redis 4.2.1, SimpleJWT 5.3.1  
+**Verification:** 12/12 Automated Tests Passing (100%), Verified Live on Daphne ASGI  
 
 ---
 
-## 1. Executive Summary
-
-This feature implements an enterprise-grade, real-time notification engine for the PaidiX platform using **Django Channels (ASGI)**, **WebSockets**, and a supporting **REST API**. 
-
-### Core Capabilities:
-1. **Customer Real-Time Alerts:** When an Admin, Accountant, or system task updates payment status (e.g., from `under_review` to `verified`, `pkr_sent`, `on_hold`, `completed`, or `rejected`), the customer receives an instant WebSocket push on mobile.
-2. **Admin Real-Time Alerts:** When a customer marks "I received my PKR" (`customer_confirm`), all online admins and accountants receive an instant WebSocket alert.
-3. **Dual Persistence & Sync:** Every event is persisted in the database *before* dispatching over WebSockets via `transaction.on_commit()`. If a user is offline or the mobile app is closed, they can fetch missed notifications via the REST API or sync badge counters.
-4. **Resilient Local & Production Dual-Mode:** Works out-of-the-box locally with `USE_INMEMORY_CHANNEL_LAYER="1"` and automatically bridges multi-process workers (Celery, Daphne, Gunicorn) via Redis in production.
-
----
-
-## 2. System Architecture
+## 1. System Architecture Overview
 
 ```
-                               Mobile Client / Web Client
-                                         │
-                         ┌───────────────┴───────────────┐
-                         │ WebSocket / HTTPS (Port 443)  │
-                         └───────────────┬───────────────┘
-                                         ▼
-                                   Nginx Reverse Proxy
-                                         │
-                 ┌───────────────────────┴───────────────────────┐
-                 │                                               │
-       /api/* (HTTP REST)                               /ws/* (WebSocket)
-                 ▼                                               ▼
-         Gunicorn / WSGI                                  Daphne ASGI (Port 8001)
-                 │                                               │
-                 ├───────────────────────┬───────────────────────┤
-                 ▼                       ▼                       ▼
-           SQLite / Postgres        Redis (Pub/Sub)         Celery Worker
-           (Database WAL)         (Channel Layer 6379)    (Background Sweeps)
+                               Mobile Client / Web Frontend
+                                             │
+                             ┌───────────────┴───────────────┐
+                             │ WebSocket / HTTPS (Port 443)  │
+                             └───────────────┬───────────────┘
+                                             ▼
+                                    Nginx Reverse Proxy
+                                             │
+                     ┌───────────────────────┴───────────────────────┐
+                     │                                               │
+           /api/* (HTTP REST)                               /ws/* (WebSocket)
+                     ▼                                               ▼
+             Gunicorn / WSGI                                  Daphne ASGI (Port 8001)
+                     │                                               │
+                     ├───────────────────────┬───────────────────────┤
+                     ▼                       ▼                       ▼
+               SQLite / Postgres        Redis (Pub/Sub)         Celery Worker
+               (Database WAL)         (Channel Layer 6379)    (Background Sweeps)
 ```
 
 ---
 
-## 3. WebSocket Specifications
+## 2. Connection, Authentication & Channels
 
-- **WebSocket URL (Production):** `wss://api.paidix.com/ws/notifications/`
-- **WebSocket URL (Development):** `ws://localhost:8000/ws/notifications/`
+### 2.1 WebSocket Endpoints
+- **Production:** `wss://api.paidix.com/ws/notifications/`
+- **Development:** `ws://localhost:8000/ws/notifications/`
 
-### 3.1 Authentication
-Uses the exact same SimpleJWT access tokens as the REST API:
-1. **Query parameter (Standard for mobile/Postman):**
-   ```text
-   ws://localhost:8000/ws/notifications/?token=<ACCESS_TOKEN>
-   ```
-2. **Handshake Header:**
-   ```http
-   Authorization: Bearer <ACCESS_TOKEN>
-   ```
-- **Rejection Code `4401`:** If the token is missing, expired, or invalid, the socket immediately closes with code `4401`. The client must refresh its token and reconnect.
-- **Zero Token Leakage:** Tokens are never logged to console or logging backends.
+### 2.2 JWT Authentication Flow
+Authentication uses the standard PaidiX SimpleJWT access token (`/api/v1/auth/login/`):
+- **Query Parameter (Primary / Mobile Recommended):**
+  ```text
+  wss://api.paidix.com/ws/notifications/?token=<ACCESS_TOKEN>
+  ```
+- **Handshake Header:**
+  ```http
+  Authorization: Bearer <ACCESS_TOKEN>
+  ```
+- **Security & Rejection Code `4401`:** If the token is missing, expired, or invalid, the socket immediately closes with code `4401` (mirroring HTTP 401). The mobile client must catch code `4401`, refresh the access token, and reconnect.
+- **Zero Token Leakage:** Authentication tokens are stripped and never printed in logs or exceptions.
 
-### 3.2 Channel Groups & Permissions
-- **Customer:** Automatically placed into their isolated personal group: `user_<customer_id>`. Customers **never** receive notifications belonging to other users or internal staff.
-- **Admin / Accountant:** Placed into their personal group `user_<admin_id>` **AND** the broadcast group `admins`.
-
-### 3.3 Heartbeat (Ping / Pong)
-To maintain TCP keep-alive and detect mobile network transitions:
-- **Client sends:** `{"type": "ping"}`
-- **Server replies:** `{"type": "pong"}`
+### 2.3 Channel Layer & Role-Based Group Routing
+- **Customer:** Joins strictly isolated personal group `user_<customer_id>`. Customers **never** receive notifications belonging to other customers or internal administrative channels.
+- **Admin & Accountant:** Join personal group `user_<admin_id>` **AND** the broadcast group `admins`.
+- **Dual Mode (Dev / Prod):**
+  - **Local Dev:** Set `USE_INMEMORY_CHANNEL_LAYER="1"` to run without Redis.
+  - **Production:** Redis channel layer bridges separate worker processes (Daphne, Gunicorn, Celery workers) via Redis Pub/Sub.
 
 ---
 
-## 4. Real-Time Event Contracts (Payloads)
+## 3. Defined WebSocket Events Specification
 
-All event payloads are flat, stable, and backwards-compatible JSON objects:
+This section defines every single event payload emitted by the WebSocket server across all payment lifecycle transitions.
 
-### Event A: `payment_status_updated` (Dispatched to Customer)
+### 3.1 Field-by-Field Payload Schema
+Every notification pushed over the socket contains the following standard contract:
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | Primary event identifier (e.g. `"payment_status_updated"` or `"payment_received_confirmed"`). |
+| `event` | `string` | Event alias for frontend/mobile routers expecting `data.event`. Matches `type`. |
+| `notification_id` | `integer` | Unique ID of the persisted database notification (`Notification.id`). |
+| `payment_id` | `string (UUID)` | UUID of the associated `IncomingPayment`. |
+| `reference` | `string` | Human-readable payment reference (e.g. `"PBX-2026-000123"`). |
+| `old_status` | `string` | Previous status code before this transition (e.g. `"under_review"`). |
+| `new_status` | `string` | New current status code (e.g. `"verified"`). |
+| `status` | `string` | Current status code alias. Matches `new_status`. |
+| `title` | `string` | Human-readable alert title suitable for in-app banners / OS push headers. |
+| `message` | `string` | Detailed message describing the status update (includes note if provided). |
+| `created_at` | `string (ISO 8601)` | Timestamp in UTC format (`"2026-11-23T17:45:19.629308+00:00"`). |
+| `customer_id` | `string (UUID)` | *(Admin events only)* UUID of the customer confirming payment. |
+| `customer_name` | `string` | *(Admin events only)* Full name or email of the customer. |
+
+---
+
+### 3.2 Event: `payment_status_updated` (Customer Channel)
+Dispatched to `user_<customer_id>` whenever an admin, accountant, or system sweep changes payment status.
+
+Below are the exact payloads received by the mobile client for each status transition:
+
+#### Transition 1: Status changed to `under_review`
+Triggered when compliance / accountant starts reviewing submitted proof documents:
 ```json
 {
   "type": "payment_status_updated",
-  "notification_id": 13,
+  "event": "payment_status_updated",
+  "notification_id": 101,
   "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "old_status": "on_hold",
+  "reference": "PBX-2026-000101",
+  "old_status": "submitted",
   "new_status": "under_review",
+  "status": "under_review",
   "title": "Payment Under Review",
-  "message": "Status for payment PBX-TEST-001 updated from on_hold to under_review. (Testing real-time notification)",
-  "created_at": "2026-11-23T17:45:19.629308+00:00"
+  "message": "Status for payment PBX-2026-000101 updated from submitted to under_review.",
+  "created_at": "2026-11-23T17:40:00.000000+00:00"
 }
 ```
 
-### Event B: `payment_received_confirmed` (Dispatched to Admins)
+#### Transition 2: Status changed to `verified`
+Triggered when accountant verifies sender proof and locks the exchange rate & fee:
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 102,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "verified",
+  "status": "verified",
+  "title": "Payment Verified",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to verified. (Sender bank document verified)",
+  "created_at": "2026-11-23T17:42:00.000000+00:00"
+}
+```
+
+#### Transition 3: Status changed to `pkr_sent`
+Triggered when accountant dispatches the outgoing PKR transfer to the customer's bank account:
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 103,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "verified",
+  "new_status": "pkr_sent",
+  "status": "pkr_sent",
+  "title": "PKR Sent to Your Account",
+  "message": "PKR has been sent for payment PBX-2026-000101. Please verify in your bank account.",
+  "created_at": "2026-11-23T17:45:00.000000+00:00"
+}
+```
+
+#### Transition 4: Status changed to `completed` (Manual Customer Confirm)
+Triggered when customer confirms receipt of PKR in their local account:
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 104,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "pkr_sent",
+  "new_status": "completed",
+  "status": "completed",
+  "title": "Payment Completed",
+  "message": "Payment PBX-2026-000101 is now completed. Thank you!",
+  "created_at": "2026-11-23T17:48:00.000000+00:00"
+}
+```
+
+#### Transition 5: Status changed to `completed` (Auto-Confirmed Stale Payment)
+Triggered by Celery beat sweep when customer hasn't confirmed within the 48-hour deadline:
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 105,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "pkr_sent",
+  "new_status": "completed",
+  "status": "completed",
+  "title": "Payment Auto-Confirmed",
+  "message": "Payment PBX-2026-000101 was automatically confirmed and marked completed.",
+  "created_at": "2026-11-23T18:00:00.000000+00:00"
+}
+```
+
+#### Transition 6: Status changed to `on_hold`
+Triggered when an admin places payment on hold (e.g. requesting additional KYC / transaction documents):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 106,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "on_hold",
+  "status": "on_hold",
+  "title": "Payment On Hold",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to on_hold. (Awaiting clear selfie / sender verification)",
+  "created_at": "2026-11-23T18:15:00.000000+00:00"
+}
+```
+
+#### Transition 7: Status changed to `rejected`
+Triggered when payment is rejected:
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 107,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "rejected",
+  "status": "rejected",
+  "title": "Payment Rejected",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to rejected. (Third-party sender transfer rejected)",
+  "created_at": "2026-11-23T18:30:00.000000+00:00"
+}
+```
+
+---
+
+### 3.3 Event: `payment_received_confirmed` (Admin & Accountant Broadcast)
+Dispatched to the shared Channels group `admins` whenever a customer confirms receipt:
+
 ```json
 {
   "type": "payment_received_confirmed",
-  "notification_id": 14,
+  "event": "payment_received_confirmed",
+  "notification_id": 108,
   "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
   "old_status": "pkr_sent",
   "new_status": "completed",
+  "status": "completed",
   "customer_id": "f6e0cf82-1ca8-4a20-9ebc-57825d17d293",
-  "customer_name": "Test Customer",
+  "customer_name": "Inza Sandhu",
   "title": "Customer Confirmed Receipt",
-  "message": "Test Customer confirmed PKR receipt for payment PBX-TEST-001.",
-  "created_at": "2026-11-23T17:46:00.123456+00:00"
+  "message": "Inza Sandhu confirmed receipt for payment PBX-2026-000101. Note: Received in Meezan Bank",
+  "created_at": "2026-11-23T18:45:00.000000+00:00"
 }
 ```
 
 ---
 
-## 5. Database Schema & Migration
+### 3.4 Keep-Alive Ping / Pong
+The client sends a ping frame every 25 seconds:
+- **Client Frame:** `{"type": "ping"}`
+- **Server Response:** `{"type": "pong"}`
 
-### Model: `Notification` (`myapp/notifications/models.py`)
-- `recipient`: ForeignKey (`AUTH_USER_MODEL`, on_delete=CASCADE, related_name="notifications")
-- `type`: CharField (`payment_status_updated` | `payment_received_confirmed` | `generic`)
-- `payment`: ForeignKey (`IncomingPayment`, null=True, blank=True)
-- `title`: CharField(255)
-- `message`: TextField()
-- `payload`: JSONField(default=dict)
-- `is_read`: BooleanField(default=False)
-- `read_at`: DateTimeField(null=True, blank=True)
-- `created_at`: DateTimeField(auto_now_add=True)
-
-### Composite Index
-```python
-indexes = [
-    models.Index(fields=["recipient", "is_read", "-created_at"]),
-]
-```
-Optimized for the high-frequency query: *"Fetch user's unread notifications ordered by newest first"*.
-
-**Migration:** `myapp/migrations/0072_notification.py` (applied and included in branch).
+If pong is not received within 5 seconds, the client should trigger reconnect logic.
 
 ---
 
-## 6. Integration Trigger Points in Codebase
+## 4. Mobile Client Integration Pattern (React Native / Flutter / iOS / Android)
 
-Dispatches are executed in `myapp/notifications/services.py` wrapped inside `dbtx.on_commit(...)` to prevent events on failed/rolled back database transactions:
+When the mobile app connects to `wss://api.paidix.com/ws/notifications/?token=<TOKEN>`:
 
-1. **`myapp/Views/Transaction_views.py` (`_record_status_change`)**:
-   - Triggers `notify_payment_status_updated` whenever status changes.
-   - Skips self-notification if the actor is the customer.
-2. **`myapp/Views/Transaction_views.py` (`customer_confirm`)**:
-   - Triggers `notify_payment_received_confirmed` to notify online admins and accountants.
-3. **`myapp/Utils/stale_payment_tasks.py` (`auto_confirm_stale_payments`)**:
-   - Dispatches auto-completion notifications to customer.
+```typescript
+// Example WebSocket message handler in mobile app:
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
 
----
+  if (data.type === "pong") {
+    // Keep-alive acknowledgment
+    return;
+  }
 
-## 7. REST API Endpoints
+  if (data.type === "payment_status_updated") {
+    // 1. Update UI badge / unread counter
+    badgeCountStore.increment();
 
-All endpoints require `Authorization: Bearer <JWT_ACCESS_TOKEN>`:
+    // 2. Update active transaction in local store (Redux / Zustand / Riverpod)
+    paymentStore.updatePaymentStatus(data.payment_id, data.new_status);
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/v1/notifications/` | Paginated list of notifications for the authenticated user (supports `?unread=true`). |
-| `GET` | `/api/v1/notifications/unread-count/` | Returns unread badge count: `{"unread_count": 3}`. |
-| `POST` | `/api/v1/notifications/<id>/read/` | Marks a single notification as read. |
-| `POST` | `/api/v1/notifications/read-all/` | Marks all notifications of the user as read: `{"marked_read": 5}`. |
+    // 3. Display user-friendly in-app notification banner
+    showInAppBanner({
+      title: data.title,
+      body: data.message,
+      paymentId: data.payment_id,
+    });
+  }
 
----
-
-## 8. Automated Testing & Verification
-
-Unit & Integration test suite located in `myapp/notifications/tests.py`:
-- `NotificationConsumerTestCase`: Tests successful JWT query param auth, bearer header auth, invalid token code `4401`, ping/pong, and isolated group dispatch.
-- `NotificationServiceTestCase`: Tests customer status notification creation, skip-on-same-status, admin broadcast creation, and safe exception isolation.
-- `NotificationAPITestCase`: Tests listing own notifications, tenant isolation (user B cannot see user A's notifications), unread counts, single mark-as-read, and mark-all-as-read.
-
-**Result:**
-```
-Ran 12 tests in 1.384s
-OK (100% Passing)
+  if (data.type === "payment_received_confirmed") {
+    // Admin dashboard real-time table refresh
+    adminDashboard.refreshLiveFeed(data);
+  }
+};
 ```
 
 ---
 
-## 9. Production Deployment Setup
+## 5. Offline Synchronization via REST API
 
-### 9.1 Daphne Systemd Unit (`/etc/systemd/system/paybitnex-daphne.service`)
+Whenever the mobile app launches, wakes from background, or recovers from network drop, it calls the REST API to synchronize missed notifications:
+
+1. **Get Unread Count (for Tab Badges):**
+   ```http
+   GET /api/v1/notifications/unread-count/
+   Authorization: Bearer <TOKEN>
+   ```
+   **Response:** `{"unread_count": 3}`
+
+2. **Fetch Notifications List (Paginated):**
+   ```http
+   GET /api/v1/notifications/?unread=true
+   Authorization: Bearer <TOKEN>
+   ```
+
+3. **Mark Single Notification as Read:**
+   ```http
+   POST /api/v1/notifications/{id}/read/
+   Authorization: Bearer <TOKEN>
+   ```
+
+4. **Mark All Notifications as Read:**
+   ```http
+   POST /api/v1/notifications/read-all/
+   Authorization: Bearer <TOKEN>
+   ```
+
+---
+
+## 6. Dependencies & Requirements (`requirements.txt`)
+
+The following packages are installed and pinned in `requirements.txt`:
+```ini
+daphne==4.1.2
+channels==4.3.2
+channels_redis==4.2.1
+```
+
+---
+
+## 7. Production Deployment (Daphne & Nginx)
+
+### Daphne Systemd Unit (`/etc/systemd/system/paybitnex-daphne.service`)
 ```ini
 [Unit]
 Description=PaidiX Daphne ASGI Server
@@ -198,7 +352,7 @@ RestartSec=5s
 WantedBy=multi-user.target
 ```
 
-### 9.2 Nginx WebSocket Upstream Block (`/etc/nginx/sites-available/paybitnex`)
+### Nginx WebSocket Proxy (`/etc/nginx/sites-available/paybitnex`)
 ```nginx
 upstream daphne_backend {
     server 127.0.0.1:8001;
@@ -232,11 +386,4 @@ server {
         proxy_buffering off;
     }
 }
-```
-
-### 9.3 Environment Configuration (`.env`)
-```ini
-# Production Redis layer connecting Celery & Daphne
-REDIS_URL=redis://127.0.0.1:6379/0
-USE_INMEMORY_CHANNEL_LAYER=0
 ```

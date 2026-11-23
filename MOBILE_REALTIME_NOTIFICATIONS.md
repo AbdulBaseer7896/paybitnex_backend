@@ -33,52 +33,169 @@ Pass the token via:
 
 ---
 
-## 3. Event JSON Payload Specifications
+## 3. Defined WebSocket Event Payloads
 
-All WebSocket events are delivered as flat, stable JSON objects.
+All WebSocket events are delivered as flat, stable JSON objects. Every event contains both `type` and `event` keys so your mobile routers can match either.
 
-### Event 1: Payment Status Updated (`payment_status_updated`)
-Sent to the **Customer** whenever an admin/accountant or background process changes the payment status.
+### 3.1 Schema & Field Reference
 
-```json
-{
-  "type": "payment_status_updated",
-  "notification_id": 142,
-  "payment_id": "4b68c2aa-d450-482a-bc74-1293c66f54c2",
-  "old_status": "verified",
-  "new_status": "pkr_sent",
-  "title": "PKR Sent to Your Account",
-  "message": "PKR has been sent for payment PBX-2026-000123. Please verify in your bank account.",
-  "created_at": "2026-11-23T10:15:30.123456+00:00"
-}
-```
-
-#### Status Values:
-- `submitted`
-- `under_review`
-- `verified`
-- `pkr_sent`
-- `completed`
-- `on_hold`
-- `rejected`
+| Key | Type | Description |
+|---|---|---|
+| `type` / `event` | `string` | `"payment_status_updated"` or `"payment_received_confirmed"` |
+| `notification_id` | `integer` | Persistent database notification ID |
+| `payment_id` | `string (UUID)` | ID of the payment |
+| `reference` | `string` | Human-readable payment reference (e.g. `"PBX-2026-000101"`) |
+| `old_status` | `string` | Previous status |
+| `new_status` / `status` | `string` | Current updated status |
+| `title` | `string` | Title for OS notifications / in-app snackbars |
+| `message` | `string` | Detailed message with note if attached |
+| `created_at` | `string (ISO 8601)` | Timestamp in UTC |
 
 ---
 
-### Event 2: Payment Received Confirmed (`payment_received_confirmed`)
-Sent to **Admins and Accountants** whenever a customer marks "I received my PKR".
+### 3.2 Event: `payment_status_updated` (Dispatched to Customer)
+
+Sent to the **Customer** whenever an admin/accountant or background process changes payment status:
+
+#### 1. Under Review (`under_review`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 101,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "submitted",
+  "new_status": "under_review",
+  "status": "under_review",
+  "title": "Payment Under Review",
+  "message": "Status for payment PBX-2026-000101 updated from submitted to under_review.",
+  "created_at": "2026-11-23T17:40:00.000000+00:00"
+}
+```
+
+#### 2. Verified (`verified`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 102,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "verified",
+  "status": "verified",
+  "title": "Payment Verified",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to verified. (Sender bank document verified)",
+  "created_at": "2026-11-23T17:42:00.000000+00:00"
+}
+```
+
+#### 3. PKR Sent (`pkr_sent`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 103,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "verified",
+  "new_status": "pkr_sent",
+  "status": "pkr_sent",
+  "title": "PKR Sent to Your Account",
+  "message": "PKR has been sent for payment PBX-2026-000101. Please verify in your bank account.",
+  "created_at": "2026-11-23T17:45:00.000000+00:00"
+}
+```
+
+#### 4. Completed (`completed`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 104,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "pkr_sent",
+  "new_status": "completed",
+  "status": "completed",
+  "title": "Payment Completed",
+  "message": "Payment PBX-2026-000101 is now completed. Thank you!",
+  "created_at": "2026-11-23T17:48:00.000000+00:00"
+}
+```
+
+#### 5. Auto-Confirmed Stale Payment (`completed`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 105,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "pkr_sent",
+  "new_status": "completed",
+  "status": "completed",
+  "title": "Payment Auto-Confirmed",
+  "message": "Payment PBX-2026-000101 was automatically confirmed and marked completed.",
+  "created_at": "2026-11-23T18:00:00.000000+00:00"
+}
+```
+
+#### 6. On Hold (`on_hold`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 106,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "on_hold",
+  "status": "on_hold",
+  "title": "Payment On Hold",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to on_hold. (Awaiting proof)",
+  "created_at": "2026-11-23T18:15:00.000000+00:00"
+}
+```
+
+#### 7. Rejected (`rejected`):
+```json
+{
+  "type": "payment_status_updated",
+  "event": "payment_status_updated",
+  "notification_id": 107,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
+  "old_status": "under_review",
+  "new_status": "rejected",
+  "status": "rejected",
+  "title": "Payment Rejected",
+  "message": "Status for payment PBX-2026-000101 updated from under_review to rejected.",
+  "created_at": "2026-11-23T18:30:00.000000+00:00"
+}
+```
+
+---
+
+### 3.3 Event: `payment_received_confirmed` (Admin Broadcast)
+Sent to **Admins and Accountants** whenever a customer marks "I received my PKR":
 
 ```json
 {
   "type": "payment_received_confirmed",
-  "notification_id": 143,
-  "payment_id": "4b68c2aa-d450-482a-bc74-1293c66f54c2",
+  "event": "payment_received_confirmed",
+  "notification_id": 108,
+  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
+  "reference": "PBX-2026-000101",
   "old_status": "pkr_sent",
   "new_status": "completed",
-  "customer_id": "b3e94208-8b5e-4a69-897b-1cb81036811f",
-  "customer_name": "Muhammad Ali",
+  "status": "completed",
+  "customer_id": "f6e0cf82-1ca8-4a20-9ebc-57825d17d293",
+  "customer_name": "Inza Sandhu",
   "title": "Customer Confirmed Receipt",
-  "message": "Muhammad Ali confirmed receipt for payment PBX-2026-000123. Note: Received in HBL",
-  "created_at": "2026-11-23T10:18:45.654321+00:00"
+  "message": "Inza Sandhu confirmed receipt for payment PBX-2026-000101. Note: Received in Meezan Bank",
+  "created_at": "2026-11-23T18:45:00.000000+00:00"
 }
 ```
 
@@ -86,67 +203,22 @@ Sent to **Admins and Accountants** whenever a customer marks "I received my PKR"
 
 ## 4. Heartbeat (Ping / Pong)
 
-To detect broken network sockets (e.g. WiFi-to-cellular handover, app backgrounding), the mobile client should send a heartbeat ping every 25–30 seconds:
+To detect broken network sockets, send a heartbeat ping every 25–30 seconds:
 
-**Client Send:**
-```json
-{"type": "ping"}
-```
-
-**Server Reply:**
-```json
-{"type": "pong"}
-```
-
-If the client does not receive `{"type": "pong"}` within 5 seconds of sending ping, it should terminate the socket and trigger reconnect logic.
+**Client Send:** `{"type": "ping"}`  
+**Server Reply:** `{"type": "pong"}`
 
 ---
 
-## 5. Reconnection & Offline Synchronization
+## 5. Offline Synchronization via REST API
 
-### Auto-Reconnect Strategy
-- Implement exponential backoff with jitter (e.g., retry after 1s, 2s, 4s, 8s, up to 30s max).
-- If connection closes with **`4401`**, do not auto-reconnect with the old token. Refresh the access token first, then reconnect.
+Whenever the mobile app launches or recovers from offline state:
 
-### Syncing Missed Notifications via REST API
-WebSocket events are **always persisted in the database** before being pushed over the wire. If the app was closed or disconnected, sync unread notifications upon reconnect using the REST API:
-
-1. **Get Unread Count (For Tab / App Icon Badges):**
-   ```http
-   GET /api/v1/notifications/unread-count/
-   Authorization: Bearer <TOKEN>
-   ```
-   **Response:**
-   ```json
-   {
-     "unread_count": 3
-   }
-   ```
-
-2. **Fetch Notifications List:**
-   ```http
-   GET /api/v1/notifications/?unread=true
-   Authorization: Bearer <TOKEN>
-   ```
-   *(Supports standard pagination with `page` and `page_size` parameters).*
-
-3. **Mark Notification As Read:**
-   ```http
-   PATCH /api/v1/notifications/<notification_id>/read/
-   Authorization: Bearer <TOKEN>
-   ```
-
-4. **Mark All Notifications As Read:**
-   ```http
-   POST /api/v1/notifications/read-all/
-   Authorization: Bearer <TOKEN>
-   ```
-
----
-
-## 6. Background Push Notification (FCM / APNs) Integration
-
-WebSockets disconnect when mobile apps go into background or device sleeps.
-
-- The backend service `myapp/notifications/services.py` contains explicit commented integration points (`[FCM Integration Point]`).
-- Background notifications should wake up the app when closed, prompting the user to open it, at which point the WebSocket reconnects and synchronizes via `/api/v1/notifications/`.
+1. **Unread Badge Count:**
+   `GET /api/v1/notifications/unread-count/` -> `{"unread_count": 3}`
+2. **Notifications List:**
+   `GET /api/v1/notifications/?unread=true`
+3. **Mark As Read:**
+   `POST /api/v1/notifications/{id}/read/`
+4. **Mark All Read:**
+   `POST /api/v1/notifications/read-all/`
