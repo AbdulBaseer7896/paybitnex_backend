@@ -197,6 +197,7 @@ def auto_confirm_stale_payments():
                         f"response within {minutes} minutes of the payment "
                         "entering Awaiting Customer Confirmation."
                     ),
+                    is_auto_confirm=True,
                 )
                 distribute_fee_for_payment(payment)
                 AuditLog.record(

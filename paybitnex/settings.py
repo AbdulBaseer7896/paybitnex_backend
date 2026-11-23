@@ -16,6 +16,7 @@ ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=Csv(
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
 
 INSTALLED_APPS = [
+    "daphne",                          # ASGI server — must be FIRST so runserver uses ASGI
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -36,6 +37,7 @@ INSTALLED_APPS = [
     # so legacy code paths that still import it don't crash —
     # they're just never selected as the default storage anymore.
     "storages",
+    "channels",                        # Django Channels (WebSocket support)
     "drf_spectacular",
     "django_extensions",
     "anymail",
@@ -329,13 +331,46 @@ CLOUDINARY_STORAGE = {
 
 # Redis + Celery
 REDIS_URL = config("REDIS_URL", default="redis://localhost:6379/0")
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+if config("USE_INMEMORY_CHANNEL_LAYER", default=False, cast=bool) or config("USE_LOCMEM_CACHE", default=False, cast=bool):
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "paidix-local-dev-cache",
+        }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
+        }
+    }
+
+# ── Django Channels — channel layer ─────────────────────────────────────
+# Production MUST use the Redis backend so that Celery workers (separate
+# processes) can push events to WebSocket consumers served by Daphne.
+# InMemoryChannelLayer only works inside a single process (runserver) and
+# is strictly for local development without Redis.
+#
+# Set USE_INMEMORY_CHANNEL_LAYER=1 in your env / shell when running
+# locally without Redis.  NEVER use InMemory in production — Celery-
+# triggered notifications will silently fail to reach connected sockets.
+if config("USE_INMEMORY_CHANNEL_LAYER", default=False, cast=bool):
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [REDIS_URL],
+            },
+        }
+    }
 
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
@@ -480,8 +515,8 @@ X_FRAME_OPTIONS               = "SAMEORIGIN"  # allows same-origin document/PDF 
 # Only enable HSTS + cookie flags in production (DEBUG=False).
 # Enabling in dev would break plain-http localhost flows.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-if not DEBUG:
-    SECURE_SSL_REDIRECT             = True
+SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=not DEBUG, cast=bool)
+if not DEBUG and SECURE_SSL_REDIRECT:
     SESSION_COOKIE_SECURE           = True
     CSRF_COOKIE_SECURE              = True
     SECURE_HSTS_SECONDS             = 31536000    # 1 year

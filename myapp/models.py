@@ -39,6 +39,7 @@ from myapp.Models.Dispatch_models import (
 )
 from myapp.Models.BankAudit_models import BankAudit, BankAuditFile, BankStatementRecord, BankSyncJob
 from myapp.Models.BankEmail_models import BankAlertEmail, BankAlertStatus
+from myapp.notifications.models import Notification, NotificationType
 
 __all__ = [
     "User", "UserRole",
@@ -67,4 +68,6 @@ __all__ = [
     "BankAudit", "BankAuditFile", "BankStatementRecord", "BankSyncJob",
     # Bank alert email module
     "BankAlertEmail", "BankAlertStatus",
+    # Notifications module
+    "Notification", "NotificationType",
 ]
