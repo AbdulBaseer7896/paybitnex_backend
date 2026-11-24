@@ -524,6 +524,10 @@ if not DEBUG and SECURE_SSL_REDIRECT:
     SECURE_HSTS_PRELOAD             = True
     SECURE_REFERRER_POLICY          = "strict-origin-when-cross-origin"
 
+# Firebase Cloud Messaging (FCM Push Notifications)
+FIREBASE_CREDENTIALS_PATH = config("FIREBASE_CREDENTIALS_PATH", default="")
+FIREBASE_CREDENTIALS_JSON = config("FIREBASE_CREDENTIALS_JSON", default="")
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
