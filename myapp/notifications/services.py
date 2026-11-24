@@ -349,6 +349,7 @@ def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: 
         message = f"Your KYC verification status has been updated to {new_status}."
 
     now_iso = timezone.now().isoformat()
+    target_route = "/app/settings?section=profile" if new_status in ("approved", "verified") else "/app/onboarding"
 
     payload = {
         "type": NotificationType.KYC_STATUS_UPDATED,
@@ -362,6 +363,8 @@ def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: 
         "message": message,
         "body": message,
         "notes": str(notes or ""),
+        "route": target_route,
+        "click_action_route": target_route,
         "click_action": "FLUTTER_NOTIFICATION_CLICK",
         "created_at": now_iso,
     }
