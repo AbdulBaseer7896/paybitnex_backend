@@ -1,63 +1,70 @@
-# Mobile Real-Time Notifications Integration Guide
+# Mobile Real-Time Notifications & Push Guide (WebSocket + FCM)
 
-This document describes the real-time notification system implemented in PaidiX using **Django Channels (WebSocket)** and the supporting **REST API**.
-
----
-
-## 1. WebSocket Endpoint & Connection
-
-- **URL (Production):** `wss://api.paidix.com/ws/notifications/`
-- **URL (Development):** `ws://localhost:8000/ws/notifications/`
-
-### Authentication
-Authentication uses the exact same JWT access token as the REST API (`/api/v1/auth/login/`).
-
-Pass the token via:
-1. **Query parameter (Recommended for mobile):**
-   ```text
-   wss://api.paidix.com/ws/notifications/?token=<ACCESS_TOKEN>
-   ```
-2. **Handshake Header (If supported by client):**
-   ```http
-   Authorization: Bearer <ACCESS_TOKEN>
-   ```
-
-> **Security Note:** If the token is missing, expired, or invalid, the server immediately closes the socket with close code **`4401`** (mirroring HTTP 401). When your mobile app receives code `4401`, refresh your token or prompt the user to re-authenticate.
+This guide provides the complete mobile integration contract for **Django Channels WebSockets** (active in-app delivery) and **Firebase Cloud Messaging (FCM)** (killed-app / lock-screen delivery).
 
 ---
 
-## 2. Groups & Security
+## 1. Process States: WebSocket vs. FCM Push
 
-- **Customer Connections:** Automatically join group `user_<user_id>`. A customer will **never** receive notifications belonging to another customer or internal admin channels.
-- **Admin Connections:** Users with role `admin` or `accountant` join group `user_<user_id>` AND the shared `admins` broadcast group.
-
----
-
-## 3. Defined WebSocket Event Payloads
-
-All WebSocket events are delivered as flat, stable JSON objects. Every event contains both `type` and `event` keys so your mobile routers can match either.
-
-### 3.1 Schema & Field Reference
-
-| Key | Type | Description |
+| Process State | Delivery Channel | Behavior |
 |---|---|---|
-| `type` / `event` | `string` | `"payment_status_updated"` or `"payment_received_confirmed"` |
-| `notification_id` | `integer` | Persistent database notification ID |
-| `payment_id` | `string (UUID)` | ID of the payment |
-| `reference` | `string` | Human-readable payment reference (e.g. `"PBX-2026-000101"`) |
-| `old_status` | `string` | Previous status |
-| `new_status` / `status` | `string` | Current updated status |
-| `title` | `string` | Title for OS notifications / in-app snackbars |
-| `message` | `string` | Detailed message with note if attached |
-| `created_at` | `string (ISO 8601)` | Timestamp in UTC |
+| **App Open (Foreground)** | **WebSocket (`/ws/notifications/`)** | Instant sub-second event over persistent socket. Update UI live, refresh tables, show snackbar. |
+| **App Closed (Killed / Swiped away)** | **Firebase Cloud Messaging (FCM)** | Google Play Services / APNs displays notification banner on device lock screen. |
+| **App Re-launched** | **REST API (`/api/v1/notifications/`)** | Fetches any unread notifications and badge counters missed while offline. |
 
 ---
 
-### 3.2 Event: `payment_status_updated` (Dispatched to Customer)
+## 2. Registering for FCM Push Notifications
 
-Sent to the **Customer** whenever an admin/accountant or background process changes payment status:
+When your mobile app launches and obtains an FCM device token:
 
-#### 1. Under Review (`under_review`):
+### 2.1 Register Device Token
+- **POST** `/api/v1/notifications/devices/`
+- **Headers:** `Authorization: Bearer <TOKEN>`
+- **Request Body:**
+  ```json
+  {
+    "token": "<FCM_REGISTRATION_TOKEN>",
+    "device_type": "android"
+  }
+  ```
+  *(device_type: `"android"`, `"ios"`, or `"web"`)*
+
+- **Response (200 / 201):**
+  ```json
+  {
+    "message": "Device token registered successfully.",
+    "created": true,
+    "device_type": "android"
+  }
+  ```
+
+### 2.2 Unregister on Logout
+When the user logs out:
+- **POST** `/api/v1/notifications/devices/unregister/`
+- **Headers:** `Authorization: Bearer <TOKEN>`
+- **Request Body:**
+  ```json
+  {
+    "token": "<FCM_REGISTRATION_TOKEN>"
+  }
+  ```
+
+---
+
+## 3. WebSocket Endpoint & Connection
+
+- **URL:** `wss://api.paidix.com/ws/notifications/?token=<ACCESS_TOKEN>`
+- **Heartbeat:** Send `{"type": "ping"}` every 25s, receive `{"type": "pong"}`.
+- **Rejection Code `4401`:** If token is invalid or expired, socket closes with code `4401`. Refresh token and reconnect.
+
+---
+
+## 4. Defined Event Specifications
+
+### 4.1 Payment Status Updated (`payment_status_updated`)
+Delivered to Customer when payment changes state:
+
 ```json
 {
   "type": "payment_status_updated",
@@ -65,127 +72,27 @@ Sent to the **Customer** whenever an admin/accountant or background process chan
   "notification_id": 101,
   "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
   "reference": "PBX-2026-000101",
-  "old_status": "submitted",
-  "new_status": "under_review",
-  "status": "under_review",
-  "title": "Payment Under Review",
-  "message": "Status for payment PBX-2026-000101 updated from submitted to under_review.",
-  "created_at": "2026-11-23T17:40:00.000000+00:00"
-}
-```
-
-#### 2. Verified (`verified`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 102,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
   "old_status": "under_review",
   "new_status": "verified",
   "status": "verified",
   "title": "Payment Verified",
   "message": "Status for payment PBX-2026-000101 updated from under_review to verified. (Sender bank document verified)",
-  "created_at": "2026-11-23T17:42:00.000000+00:00"
+  "created_at": "2026-11-24T10:05:00.000000+00:00"
 }
 ```
 
-#### 3. PKR Sent (`pkr_sent`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 103,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
-  "old_status": "verified",
-  "new_status": "pkr_sent",
-  "status": "pkr_sent",
-  "title": "PKR Sent to Your Account",
-  "message": "PKR has been sent for payment PBX-2026-000101. Please verify in your bank account.",
-  "created_at": "2026-11-23T17:45:00.000000+00:00"
-}
-```
-
-#### 4. Completed (`completed`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 104,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
-  "old_status": "pkr_sent",
-  "new_status": "completed",
-  "status": "completed",
-  "title": "Payment Completed",
-  "message": "Payment PBX-2026-000101 is now completed. Thank you!",
-  "created_at": "2026-11-23T17:48:00.000000+00:00"
-}
-```
-
-#### 5. Auto-Confirmed Stale Payment (`completed`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 105,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
-  "old_status": "pkr_sent",
-  "new_status": "completed",
-  "status": "completed",
-  "title": "Payment Auto-Confirmed",
-  "message": "Payment PBX-2026-000101 was automatically confirmed and marked completed.",
-  "created_at": "2026-11-23T18:00:00.000000+00:00"
-}
-```
-
-#### 6. On Hold (`on_hold`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 106,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
-  "old_status": "under_review",
-  "new_status": "on_hold",
-  "status": "on_hold",
-  "title": "Payment On Hold",
-  "message": "Status for payment PBX-2026-000101 updated from under_review to on_hold. (Awaiting proof)",
-  "created_at": "2026-11-23T18:15:00.000000+00:00"
-}
-```
-
-#### 7. Rejected (`rejected`):
-```json
-{
-  "type": "payment_status_updated",
-  "event": "payment_status_updated",
-  "notification_id": 107,
-  "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
-  "reference": "PBX-2026-000101",
-  "old_status": "under_review",
-  "new_status": "rejected",
-  "status": "rejected",
-  "title": "Payment Rejected",
-  "message": "Status for payment PBX-2026-000101 updated from under_review to rejected.",
-  "created_at": "2026-11-23T18:30:00.000000+00:00"
-}
-```
+**Status codes:** `submitted`, `under_review`, `verified`, `pkr_sent`, `completed`, `on_hold`, `rejected`.
 
 ---
 
-### 3.3 Event: `payment_received_confirmed` (Admin Broadcast)
-Sent to **Admins and Accountants** whenever a customer marks "I received my PKR":
+### 4.2 Customer PKR Receipt Confirmed (`payment_received_confirmed`)
+Delivered to Admins & Accountants:
 
 ```json
 {
   "type": "payment_received_confirmed",
   "event": "payment_received_confirmed",
-  "notification_id": 108,
+  "notification_id": 107,
   "payment_id": "4df0d5a6-13a2-4df3-877d-1c5e517d48a5",
   "reference": "PBX-2026-000101",
   "old_status": "pkr_sent",
@@ -195,30 +102,92 @@ Sent to **Admins and Accountants** whenever a customer marks "I received my PKR"
   "customer_name": "Inza Sandhu",
   "title": "Customer Confirmed Receipt",
   "message": "Inza Sandhu confirmed receipt for payment PBX-2026-000101. Note: Received in Meezan Bank",
-  "created_at": "2026-11-23T18:45:00.000000+00:00"
+  "created_at": "2026-11-24T10:30:00.000000+00:00"
 }
 ```
 
 ---
 
-## 4. Heartbeat (Ping / Pong)
+### 4.3 KYC Verification Updated (`kyc_status_updated`)
+Delivered to Customer when their KYC is reviewed:
 
-To detect broken network sockets, send a heartbeat ping every 25–30 seconds:
+#### Approved:
+```json
+{
+  "type": "kyc_status_updated",
+  "event": "kyc_status_updated",
+  "notification_id": 108,
+  "kyc_status": "approved",
+  "status": "approved",
+  "old_status": "pending",
+  "profile_id": "89b3f021-3a05-4b08-9df5-60bca9a128e4",
+  "title": "KYC Approved",
+  "message": "Your PaidiX account has been verified! You can now send and receive payments.",
+  "notes": "",
+  "created_at": "2026-11-24T10:35:00.000000+00:00"
+}
+```
 
-**Client Send:** `{"type": "ping"}`  
-**Server Reply:** `{"type": "pong"}`
+#### Objections Raised:
+```json
+{
+  "type": "kyc_status_updated",
+  "event": "kyc_status_updated",
+  "notification_id": 109,
+  "kyc_status": "objections",
+  "status": "objections",
+  "old_status": "pending",
+  "profile_id": "89b3f021-3a05-4b08-9df5-60bca9a128e4",
+  "title": "KYC Objections Raised",
+  "message": "Action required: Objections raised on your KYC documents. Notes: Selfie is blurry.",
+  "notes": "Selfie is blurry.",
+  "created_at": "2026-11-24T10:40:00.000000+00:00"
+}
+```
+
+#### Rejected:
+```json
+{
+  "type": "kyc_status_updated",
+  "event": "kyc_status_updated",
+  "notification_id": 110,
+  "kyc_status": "rejected",
+  "status": "rejected",
+  "old_status": "pending",
+  "profile_id": "89b3f021-3a05-4b08-9df5-60bca9a128e4",
+  "title": "KYC Verification Rejected",
+  "message": "Your PaidiX KYC verification was rejected. Reason: Invalid document.",
+  "notes": "Invalid document.",
+  "created_at": "2026-11-24T10:45:00.000000+00:00"
+}
+```
 
 ---
 
-## 5. Offline Synchronization via REST API
+### 4.4 KYC Submitted Alert (`kyc_submitted`)
+Delivered to Admins & Accountants:
 
-Whenever the mobile app launches or recovers from offline state:
+```json
+{
+  "type": "kyc_submitted",
+  "event": "kyc_submitted",
+  "notification_id": 111,
+  "kyc_status": "pending",
+  "status": "pending",
+  "profile_id": "89b3f021-3a05-4b08-9df5-60bca9a128e4",
+  "customer_id": "f6e0cf82-1ca8-4a20-9ebc-57825d17d293",
+  "customer_name": "Inza Sandhu",
+  "title": "KYC Submitted",
+  "message": "Customer Inza Sandhu submitted KYC documents for review.",
+  "created_at": "2026-11-24T10:50:00.000000+00:00"
+}
+```
 
-1. **Unread Badge Count:**
-   `GET /api/v1/notifications/unread-count/` -> `{"unread_count": 3}`
-2. **Notifications List:**
-   `GET /api/v1/notifications/?unread=true`
-3. **Mark As Read:**
-   `POST /api/v1/notifications/{id}/read/`
-4. **Mark All Read:**
-   `POST /api/v1/notifications/read-all/`
+---
+
+## 5. REST Sync Endpoints
+
+- `GET /api/v1/notifications/unread-count/` → `{"unread_count": 3}`
+- `GET /api/v1/notifications/?unread=true` → List of unread notifications
+- `PATCH /api/v1/notifications/{id}/read/` → Mark single notification as read
+- `POST /api/v1/notifications/read-all/` → Mark all notifications as read

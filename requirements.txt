@@ -24,6 +24,7 @@ django-redis==5.4.0
 daphne==4.1.2
 channels==4.3.2
 channels_redis==4.2.1
+firebase-admin==6.6.0
 httpx==0.28.1
 # Async SMTP client used by myapp.Utils.email_tasks for OTP and
 # transactional email delivery. Replaces the previous Celery-based

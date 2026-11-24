@@ -283,3 +283,85 @@ class NotificationRESTAPITests(TestCase):
 
         # User 2's notification should still be unread
         self.assertFalse(Notification.objects.get(id=self.n3.id).is_read)
+
+    def test_device_token_registration_and_unregistration(self):
+        """Test POST /api/v1/notifications/devices/ and unregister."""
+        self.client.force_authenticate(user=self.user1)
+        resp = self.client.post(
+            "/api/v1/notifications/devices/",
+            {"token": "fcm_test_token_12345", "device_type": "android"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        from myapp.notifications.models import DeviceToken
+        self.assertTrue(DeviceToken.objects.filter(token="fcm_test_token_12345", user=self.user1, is_active=True).exists())
+
+        # Unregister
+        resp_unreg = self.client.post(
+            "/api/v1/notifications/devices/unregister/",
+            {"token": "fcm_test_token_12345"},
+            format="json",
+        )
+        self.assertEqual(resp_unreg.status_code, status.HTTP_200_OK)
+        self.assertFalse(DeviceToken.objects.get(token="fcm_test_token_12345").is_active)
+
+
+class KYCNotificationTests(TestCase):
+    """Tests for KYC status update and submission notification service."""
+
+    def setUp(self):
+        self.customer = User.objects.create(
+            email="kyc_cust@example.com",
+            role=UserRole.CUSTOMER,
+            full_name="KYC Customer",
+            is_active=True,
+            email_verified=True,
+        )
+        self.admin = User.objects.create(
+            email="kyc_admin@example.com",
+            role=UserRole.ADMIN,
+            is_active=True,
+            email_verified=True,
+        )
+        from myapp.Models.Profile_models import CustomerProfile
+        self.profile = CustomerProfile.objects.create(
+            user=self.customer,
+            full_name="KYC Customer",
+            kyc_status="pending",
+        )
+
+    def test_notify_kyc_status_updated_approved(self):
+        from myapp.notifications.services import notify_kyc_status_updated
+        with dbtx.atomic():
+            notif = notify_kyc_status_updated(self.profile, old_status="pending", new_status="approved")
+
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.recipient, self.customer)
+        self.assertEqual(notif.type, NotificationType.KYC_STATUS_UPDATED)
+        self.assertEqual(notif.title, "KYC Approved")
+        self.assertEqual(notif.payload["status"], "approved")
+
+    def test_notify_kyc_status_updated_objections(self):
+        from myapp.notifications.services import notify_kyc_status_updated
+        with dbtx.atomic():
+            notif = notify_kyc_status_updated(
+                self.profile,
+                old_status="pending",
+                new_status="objections",
+                notes="Selfie is blurred",
+            )
+
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.title, "KYC Objections Raised")
+        self.assertIn("Selfie is blurred", notif.message)
+        self.assertEqual(notif.payload["status"], "objections")
+
+    def test_notify_kyc_submitted(self):
+        from myapp.notifications.services import notify_kyc_submitted
+        with dbtx.atomic():
+            notif_id = notify_kyc_submitted(self.profile, is_resubmission=False)
+
+        self.assertIsNotNone(notif_id)
+        admin_notif = Notification.objects.filter(recipient=self.admin, type=NotificationType.KYC_SUBMITTED).first()
+        self.assertIsNotNone(admin_notif)
+        self.assertEqual(admin_notif.title, "KYC Submitted")

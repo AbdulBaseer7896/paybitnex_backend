@@ -454,6 +454,11 @@ class CustomerProfileView(AsyncAPIView):
                 path="/kyc",
                 reply_to=[target_user.email] if target_user.email else None,
             )
+            try:
+                from myapp.notifications.services import notify_kyc_submitted
+                notify_kyc_submitted(profile, is_resubmission=False)
+            except Exception:
+                pass
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data,
@@ -602,6 +607,11 @@ class CustomerProfileView(AsyncAPIView):
                 path="/kyc",
                 reply_to=[request.user.email] if request.user.email else None,
             )
+            try:
+                from myapp.notifications.services import notify_kyc_submitted
+                notify_kyc_submitted(profile, is_resubmission=True)
+            except Exception:
+                pass
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data
@@ -696,6 +706,17 @@ class KYCReviewView(AsyncAPIView):
             before={"kyc_status": before},
             after={"kyc_status": profile.kyc_status},
         )
+
+        try:
+            from myapp.notifications.services import notify_kyc_status_updated
+            notify_kyc_status_updated(
+                profile,
+                old_status=before,
+                new_status=profile.kyc_status,
+                notes=profile.kyc_notes or "",
+            )
+        except Exception:
+            log.exception("Failed to trigger KYC status notification for profile=%s", profile_id)
 
         # Customer-facing email on approval ONLY (objections are handled
         # by the separate KYCRaiseObjectionsView below). No admin/accountant
@@ -828,6 +849,17 @@ class KYCRaiseObjectionsView(AsyncAPIView):
                 "objections": new_items,
             },
         )
+
+        try:
+            from myapp.notifications.services import notify_kyc_status_updated
+            notify_kyc_status_updated(
+                profile,
+                old_status=before_status,
+                new_status=CustomerProfile.KYC_OBJECTIONS,
+                notes=notes,
+            )
+        except Exception:
+            log.exception("Failed to trigger KYC objections notification for profile=%s", profile_id)
 
         # Send a notification email to the customer with the list of
         # objections and a link to update their profile. Previously this
