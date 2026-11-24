@@ -10,6 +10,7 @@ Account views:
 import logging
 
 from adrf.views import APIView as AsyncAPIView
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 from django.db import IntegrityError
 from django.db.models import Q
@@ -456,7 +457,9 @@ class CustomerProfileView(AsyncAPIView):
             )
             try:
                 from myapp.notifications.services import notify_kyc_submitted
-                notify_kyc_submitted(profile, is_resubmission=False)
+                await sync_to_async(notify_kyc_submitted, thread_sensitive=True)(
+                    profile, is_resubmission=False
+                )
             except Exception:
                 pass
 
@@ -609,7 +612,9 @@ class CustomerProfileView(AsyncAPIView):
             )
             try:
                 from myapp.notifications.services import notify_kyc_submitted
-                notify_kyc_submitted(profile, is_resubmission=True)
+                await sync_to_async(notify_kyc_submitted, thread_sensitive=True)(
+                    profile, is_resubmission=True
+                )
             except Exception:
                 pass
 
@@ -709,7 +714,7 @@ class KYCReviewView(AsyncAPIView):
 
         try:
             from myapp.notifications.services import notify_kyc_status_updated
-            notify_kyc_status_updated(
+            await sync_to_async(notify_kyc_status_updated, thread_sensitive=True)(
                 profile,
                 old_status=before,
                 new_status=profile.kyc_status,
@@ -852,7 +857,7 @@ class KYCRaiseObjectionsView(AsyncAPIView):
 
         try:
             from myapp.notifications.services import notify_kyc_status_updated
-            notify_kyc_status_updated(
+            await sync_to_async(notify_kyc_status_updated, thread_sensitive=True)(
                 profile,
                 old_status=before_status,
                 new_status=CustomerProfile.KYC_OBJECTIONS,

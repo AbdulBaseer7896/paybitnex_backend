@@ -105,7 +105,7 @@ def send_fcm_push_to_users(users, title: str, message: str, data: dict = None):
 
 
 def send_fcm_push_to_tokens(tokens: list[str], title: str, message: str, data: dict = None):
-    """Direct multicast dispatch with stale token cleanup."""
+    """Direct multicast dispatch with 500-token batching and stale token cleanup."""
     if not tokens:
         return 0
 
@@ -145,36 +145,45 @@ def send_fcm_push_to_tokens(tokens: list[str], title: str, message: str, data: d
             ),
         )
 
-        multicast_msg = messaging.MulticastMessage(
-            tokens=tokens,
-            notification=messaging.Notification(title=title, body=message),
-            data=string_data,
-            android=android_config,
-            apns=apns_config,
-        )
+        total_success = 0
+        stale_tokens = []
 
-        response = messaging.send_each_for_multicast(multicast_msg)
-        logger.info(
-            "FCM multicast: %d success, %d failure of %d tokens",
-            response.success_count,
-            response.failure_count,
-            len(tokens),
-        )
+        # Firebase hard limit: 500 tokens per send_each_for_multicast call
+        for i in range(0, len(tokens), 500):
+            batch_tokens = tokens[i : i + 500]
+            multicast_msg = messaging.MulticastMessage(
+                tokens=batch_tokens,
+                notification=messaging.Notification(title=title, body=message),
+                data=string_data,
+                android=android_config,
+                apns=apns_config,
+            )
 
-        # Handle deactivated or invalid tokens
-        if response.failure_count > 0:
-            stale_tokens = []
-            for idx, resp in enumerate(response.responses):
-                if not resp.success and resp.exception:
-                    exc_code = getattr(resp.exception, "code", "")
-                    if "registration-token-not-registered" in str(resp.exception) or exc_code == "UNREGISTERED":
-                        stale_tokens.append(tokens[idx])
+            response = messaging.send_each_for_multicast(multicast_msg)
+            total_success += response.success_count
+            logger.info(
+                "FCM multicast batch: %d success, %d failure of %d tokens",
+                response.success_count,
+                response.failure_count,
+                len(batch_tokens),
+            )
 
-            if stale_tokens:
-                logger.info("Deactivating %d stale FCM tokens", len(stale_tokens))
-                DeviceToken.objects.filter(token__in=stale_tokens).update(is_active=False)
+            # Handle deactivated or invalid tokens in this batch
+            if response.failure_count > 0:
+                for idx, resp in enumerate(response.responses):
+                    if not resp.success and resp.exception:
+                        exc_code = getattr(resp.exception, "code", "")
+                        if (
+                            "registration-token-not-registered" in str(resp.exception)
+                            or exc_code == "UNREGISTERED"
+                        ):
+                            stale_tokens.append(batch_tokens[idx])
 
-        return response.success_count
+        if stale_tokens:
+            logger.info("Deactivating %d stale FCM tokens", len(stale_tokens))
+            DeviceToken.objects.filter(token__in=stale_tokens).update(is_active=False)
+
+        return total_success
     except Exception as exc:
         logger.error("Failed to send FCM push notification: %s", exc, exc_info=True)
         return 0
