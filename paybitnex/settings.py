@@ -536,3 +536,5 @@ LOGGING = {
         "myapp": {"handlers": ["console"], "level": "DEBUG" if DEBUG else "INFO"},
     },
 }
+FIREBASE_CREDENTIALS_PATH = config('FIREBASE_CREDENTIALS_PATH', default='')
+FIREBASE_CREDENTIALS_JSON = config('FIREBASE_CREDENTIALS_JSON', default='')

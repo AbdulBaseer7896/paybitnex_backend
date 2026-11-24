@@ -48,4 +48,6 @@ htmlcov/
 .mypy_cache/
 
 # Bank statement exports
-Bank_statments/
+Bank_statments/firebase-service-account.json
+
+firebase-service-account.json

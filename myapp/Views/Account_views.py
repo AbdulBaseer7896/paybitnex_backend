@@ -550,6 +550,30 @@ class CustomerProfileView(AsyncAPIView):
             for file_field in ("selfie", "cnic_front", "cnic_back"):
                 if file_field in request.FILES:
                     changed_items.append(file_field)
+
+            # If staff changed kyc_status via profile edit, update and trigger real-time notification
+            if "kyc_status" in request.data:
+                new_kyc_val = request.data.get("kyc_status")
+                if new_kyc_val and new_kyc_val != profile.kyc_status:
+                    old_kyc_val = profile.kyc_status
+                    profile.kyc_status = new_kyc_val
+                    staff_fields = ["kyc_status", "updated_at"]
+                    if "kyc_notes" in request.data:
+                        profile.kyc_notes = request.data.get("kyc_notes", "")
+                        staff_fields.append("kyc_notes")
+                    await profile.asave(update_fields=staff_fields)
+                    try:
+                        from myapp.notifications.services import notify_kyc_status_updated
+                        await sync_to_async(notify_kyc_status_updated, thread_sensitive=True)(
+                            profile,
+                            old_status=old_kyc_val,
+                            new_status=new_kyc_val,
+                            notes=profile.kyc_notes or "",
+                            force=True,
+                        )
+                    except Exception:
+                        pass
+
             await AuditLog.arecord(
                 user=request.user, action=AuditLog.ACTION_UPDATE, target=profile,
                 description=(
@@ -617,6 +641,24 @@ class CustomerProfileView(AsyncAPIView):
                 )
             except Exception:
                 pass
+        elif (not is_staff) and profile.kyc_status == CustomerProfile.KYC_DRAFT:
+            if profile.cnic_front and profile.cnic_back:
+                profile.kyc_status = CustomerProfile.KYC_PENDING
+                await profile.asave(update_fields=["kyc_status", "updated_at"])
+                await anotify_staff(
+                    subject=f"KYC awaiting review — {profile.full_name or target_user.email}",
+                    template="staff/kyc_pending",
+                    context=_kyc_alert_context(profile, target_user),
+                    path="/kyc",
+                    reply_to=[target_user.email] if target_user.email else None,
+                )
+                try:
+                    from myapp.notifications.services import notify_kyc_submitted
+                    await sync_to_async(notify_kyc_submitted, thread_sensitive=True)(
+                        profile, is_resubmission=False
+                    )
+                except Exception:
+                    pass
 
         return Response(
             CustomerProfileSerializer(profile, context={"request": request}).data
@@ -719,6 +761,7 @@ class KYCReviewView(AsyncAPIView):
                 old_status=before,
                 new_status=profile.kyc_status,
                 notes=profile.kyc_notes or "",
+                force=True,
             )
         except Exception:
             log.exception("Failed to trigger KYC status notification for profile=%s", profile_id)
@@ -862,6 +905,7 @@ class KYCRaiseObjectionsView(AsyncAPIView):
                 old_status=before_status,
                 new_status=CustomerProfile.KYC_OBJECTIONS,
                 notes=notes,
+                force=True,
             )
         except Exception:
             log.exception("Failed to trigger KYC objections notification for profile=%s", profile_id)

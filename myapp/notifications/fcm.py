@@ -124,20 +124,37 @@ def send_fcm_push_to_tokens(tokens: list[str], title: str, message: str, data: d
                 if v is not None:
                     string_data[str(k)] = str(v)
 
-        # Android & iOS payload configuration for maximum wake-up reliability
+        string_data.setdefault("title", str(title or ""))
+        string_data.setdefault("message", str(message or ""))
+        string_data.setdefault("body", str(message or ""))
+        string_data.setdefault("click_action", "FLUTTER_NOTIFICATION_CLICK")
+
+        notification_tag = f"paidix_{string_data.get('type', 'alert')}_{string_data.get('notification_id', '')}"
+
+        # Android & iOS payload configuration for maximum wake-up and tray display reliability
         android_config = messaging.AndroidConfig(
             priority="high",
             notification=messaging.AndroidNotification(
+                title=title,
+                body=message,
                 sound="default",
                 channel_id="paidix_alerts",
-                priority="high",
+                priority="max",
                 click_action="FLUTTER_NOTIFICATION_CLICK",
+                default_sound=True,
+                default_vibrate_timings=True,
+                visibility="public",
+                tag=notification_tag,
             ),
         )
-        apns_config = messaging.ApnsConfig(
+        apns_config = messaging.APNSConfig(
             headers={"apns-priority": "10"},
-            payload=messaging.ApnsPayload(
+            payload=messaging.APNSPayload(
                 aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title=title,
+                        body=message,
+                    ),
                     sound="default",
                     content_available=True,
                     badge=1,

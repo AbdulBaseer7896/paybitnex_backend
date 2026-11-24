@@ -508,6 +508,20 @@ class OnboardingStepView(AsyncAPIView):
 
         await profile.asave(update_fields=list(set(updated_fields)))
 
+        # If customer reached step 4 with identity documents, transition KYC from draft to pending and notify staff
+        raw_step_val = request.data.get("onboarding_step")
+        if (user.onboarding_step == 4 or raw_step_val in (4, "4")) and profile.kyc_status == CustomerProfile.KYC_DRAFT:
+            if profile.cnic_front and profile.cnic_back:
+                profile.kyc_status = CustomerProfile.KYC_PENDING
+                await profile.asave(update_fields=["kyc_status", "updated_at"])
+                try:
+                    from myapp.notifications.services import notify_kyc_submitted
+                    await sync_to_async(notify_kyc_submitted, thread_sensitive=True)(
+                        profile, is_resubmission=False
+                    )
+                except Exception:
+                    pass
+
         # Also sync user.full_name and user.phone if changed
         user_sync = []
         if "full_name" in request.data:

@@ -4,14 +4,11 @@ Notification service for PaidiX.
 Core responsibilities:
   1. Creates and persists a Notification model instance in the database.
   2. Dispatches real-time WebSocket events to the channel layer using
-     `transaction.on_commit()` so rollbacks never push events.
-  3. Never raises an uncaught exception: channel-layer errors are logged
-     and swallowed so core payment workflows never break.
-
-Push notifications (FCM / APNs) note:
-  This service is the exact plug-in point for background mobile push
-  notifications when the app is closed or in the background. In the future,
-  call your FCM task right after `async_to_sync(channel_layer.group_send)`.
+     `transaction.on_commit()` or direct dispatch if outside an atomic block.
+  3. Dispatches high-priority lock-screen push notifications via Firebase Cloud
+     Messaging (FCM) when the app is in background or completely killed.
+  4. Never raises an uncaught exception: channel-layer and FCM errors are logged
+     and swallowed so core payment and KYC workflows never break.
 """
 import logging
 from asgiref.sync import async_to_sync
@@ -33,6 +30,20 @@ STATUS_TITLES = {
     "on_hold": "Payment On Hold",
     "rejected": "Payment Rejected",
 }
+
+
+def _safe_dispatch(fn):
+    """
+    Execute callback safely on transaction commit, or immediately if outside
+    an atomic transaction block (e.g. within an async view or thread pool).
+    """
+    try:
+        if dbtx.get_connection().in_atomic_block:
+            dbtx.on_commit(fn)
+        else:
+            fn()
+    except Exception as exc:
+        logger.error("Failed to dispatch notification callback: %s", exc, exc_info=True)
 
 
 def _send_to_channel_layer(group_name: str, payload: dict):
@@ -66,7 +77,7 @@ def notify_payment_status_updated(payment, old_status: str, new_status: str, not
 
     - Old status must differ from new status.
     - Saves Notification row in DB.
-    - Uses transaction.on_commit() to push to `user_<customer_id>` group.
+    - Pushes real-time WebSocket event and FCM lock-screen push.
     """
     if old_status == new_status:
         return None
@@ -108,6 +119,8 @@ def notify_payment_status_updated(payment, old_status: str, new_status: str, not
         "status": str(new_status),
         "title": title,
         "message": message,
+        "body": message,
+        "click_action": "FLUTTER_NOTIFICATION_CLICK",
         "created_at": now_iso,
     }
 
@@ -125,16 +138,16 @@ def notify_payment_status_updated(payment, old_status: str, new_status: str, not
         notification.payload = payload
         notification.save(update_fields=["payload"])
 
-        # Push to customer's personal WebSocket group on transaction commit
+        # Push to customer's personal WebSocket group
         group_name = f"user_{customer.pk}"
-        dbtx.on_commit(lambda: _send_to_channel_layer(group_name, payload))
+        _safe_dispatch(lambda: _send_to_channel_layer(group_name, payload))
 
-        # Push to customer's device lock screen via FCM (delivered even when app is killed)
-        dbtx.on_commit(lambda: send_fcm_push_to_user(customer, title, message, payload))
+        # Push to customer's lock screen via FCM
+        _safe_dispatch(lambda: send_fcm_push_to_user(customer, title, message, payload))
 
         return notification
     except Exception as exc:
-        logger.error("Failed to create customer status notification: %s", exc, exc_info=True)
+        logger.error("Failed to create payment status notification: %s", exc, exc_info=True)
         return None
 
 
@@ -204,11 +217,16 @@ def notify_payment_submitted(payment):
         return None
 
 
-def notify_payment_received_confirmed(payment, old_status: str, new_status: str, confirmed_by_note: str = ""):
+def notify_payment_received_confirmed(
+    payment,
+    confirmed_by_note: str = "",
+    old_status: str = "pkr_sent",
+    new_status: str = "",
+):
     """
-    Notify all admins/accountants when a customer confirms PKR receipt.
+    Notify staff when a customer clicks "I have received PKR" in the mobile app.
 
-    - Saves Notification for each admin/accountant or handles broadcast.
+    - Saves Notification for each admin/accountant.
     - Sends to the 'admins' Channels group.
     - Sends FCM push to admin devices.
     """
@@ -225,6 +243,8 @@ def notify_payment_received_confirmed(payment, old_status: str, new_status: str,
         message += f" Note: {confirmed_by_note}"
 
     now_iso = timezone.now().isoformat()
+    old_status = old_status or "pkr_sent"
+    new_status = new_status or getattr(payment, "status", "completed")
 
     payload = {
         "type": NotificationType.PAYMENT_RECEIVED_CONFIRMED,
@@ -239,13 +259,14 @@ def notify_payment_received_confirmed(payment, old_status: str, new_status: str,
         "customer_name": customer_name,
         "title": title,
         "message": message,
+        "body": message,
+        "click_action": "FLUTTER_NOTIFICATION_CLICK",
         "created_at": now_iso,
     }
 
     try:
         from myapp.Models.Auth_models import User, UserRole
 
-        # Save notifications for admin and accountant recipients
         staff_users = list(
             User.objects.filter(role__in=[UserRole.ADMIN, UserRole.ACCOUNTANT], is_active=True)
         )
@@ -266,11 +287,11 @@ def notify_payment_received_confirmed(payment, old_status: str, new_status: str,
         if notification_id:
             payload["notification_id"] = notification_id
 
-        # Broadcast to all connected admins via the 'admins' group on commit
-        dbtx.on_commit(lambda: _send_to_channel_layer("admins", payload))
+        # Broadcast to all connected admins via the 'admins' group
+        _safe_dispatch(lambda: _send_to_channel_layer("admins", payload))
 
         # Push to admin device lock screens via FCM
-        dbtx.on_commit(lambda: send_fcm_push_to_users(staff_users, title, message, payload))
+        _safe_dispatch(lambda: send_fcm_push_to_users(staff_users, title, message, payload))
 
         return notification_id
     except Exception as exc:
@@ -278,19 +299,28 @@ def notify_payment_received_confirmed(payment, old_status: str, new_status: str,
         return None
 
 
-def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: str = ""):
+def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: str = "", force: bool = False):
     """
-    Notify customer when their KYC verification status changes (Approved / Rejected / Objections).
+    Notify customer when their KYC verification status changes (Approved / Rejected / Objections / Review).
 
     - Saves Notification in DB.
-    - Sends real-time WebSocket event to customer's personal group.
+    - Sends real-time WebSocket event to customer's personal group (`user_<customer_id>`).
     - Sends lock-screen push notification to customer's device via FCM.
     """
-    if old_status == new_status:
+    is_objection_update = (new_status == "objections")
+    has_notes_diff = bool(notes)
+    if not force and old_status == new_status and not (is_objection_update or has_notes_diff):
+        logger.debug("Skipping KYC notification: old_status (%s) == new_status (%s)", old_status, new_status)
         return None
 
     user = getattr(profile, "user", None)
     if not user:
+        user_id = getattr(profile, "user_id", None)
+        if user_id:
+            from myapp.Models.Auth_models import User
+            user = User.objects.filter(pk=user_id).first()
+    if not user:
+        logger.warning("Cannot notify KYC status: no user associated with profile %s", getattr(profile, "id", None))
         return None
 
     if new_status == "approved":
@@ -306,6 +336,14 @@ def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: 
         message = "Action required: Objections raised on your KYC documents. Please review and resubmit."
         if notes:
             message += f" Notes: {notes}"
+    elif new_status in ("pending", "under_review"):
+        title = "KYC Under Review"
+        message = "Your KYC documents are pending review by our compliance team."
+        if notes:
+            message += f" Notes: {notes}"
+    elif new_status == "resubmitted":
+        title = "KYC Resubmitted"
+        message = "Your updated KYC documents have been received and are awaiting review."
     else:
         title = f"KYC Status: {new_status.replace('_', ' ').title()}"
         message = f"Your KYC verification status has been updated to {new_status}."
@@ -322,7 +360,9 @@ def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: 
         "profile_id": str(getattr(profile, "id", "")),
         "title": title,
         "message": message,
+        "body": message,
         "notes": str(notes or ""),
+        "click_action": "FLUTTER_NOTIFICATION_CLICK",
         "created_at": now_iso,
     }
 
@@ -339,13 +379,20 @@ def notify_kyc_status_updated(profile, old_status: str, new_status: str, notes: 
         notification.payload = payload
         notification.save(update_fields=["payload"])
 
-        # Push to customer's personal WebSocket group on transaction commit
+        # Push to customer's personal WebSocket group
         group_name = f"user_{user.pk}"
-        dbtx.on_commit(lambda: _send_to_channel_layer(group_name, payload))
+        _safe_dispatch(lambda: _send_to_channel_layer(group_name, payload))
 
         # Push to customer's lock screen via FCM
-        dbtx.on_commit(lambda: send_fcm_push_to_user(user, title, message, payload))
+        _safe_dispatch(lambda: send_fcm_push_to_user(user, title, message, payload))
 
+        logger.info(
+            "KYC status notification dispatched: profile=%s user=%s status=%s -> %s",
+            getattr(profile, "id", ""),
+            user.email,
+            old_status,
+            new_status,
+        )
         return notification
     except Exception as exc:
         logger.error("Failed to create KYC status notification: %s", exc, exc_info=True)
@@ -361,6 +408,12 @@ def notify_kyc_submitted(profile, is_resubmission: bool = False):
     - Sends lock-screen push notification to staff devices via FCM.
     """
     user = getattr(profile, "user", None)
+    if not user:
+        user_id = getattr(profile, "user_id", None)
+        if user_id:
+            from myapp.Models.Auth_models import User
+            user = User.objects.filter(pk=user_id).first()
+
     customer_name = (
         (getattr(profile, "full_name", "") or getattr(user, "full_name", "") or getattr(user, "email", ""))
         if user else "Customer"
@@ -371,18 +424,21 @@ def notify_kyc_submitted(profile, is_resubmission: bool = False):
     message = f"Customer {customer_name} {action_label} KYC documents for review."
 
     now_iso = timezone.now().isoformat()
+    current_status = str(getattr(profile, "kyc_status", "pending"))
 
     payload = {
         "type": NotificationType.KYC_SUBMITTED,
         "event": NotificationType.KYC_SUBMITTED,
         "notification_id": None,
-        "kyc_status": str(getattr(profile, "kyc_status", "pending")),
-        "status": str(getattr(profile, "kyc_status", "pending")),
+        "kyc_status": current_status,
+        "status": current_status,
         "profile_id": str(getattr(profile, "id", "")),
         "customer_id": str(user.id) if user else "",
         "customer_name": customer_name,
         "title": title,
         "message": message,
+        "body": message,
+        "click_action": "FLUTTER_NOTIFICATION_CLICK",
         "created_at": now_iso,
     }
 
@@ -410,11 +466,17 @@ def notify_kyc_submitted(profile, is_resubmission: bool = False):
             payload["notification_id"] = notification_id
 
         # Broadcast to admins WebSocket group
-        dbtx.on_commit(lambda: _send_to_channel_layer("admins", payload))
+        _safe_dispatch(lambda: _send_to_channel_layer("admins", payload))
 
         # Push to admin devices via FCM
-        dbtx.on_commit(lambda: send_fcm_push_to_users(staff_users, title, message, payload))
+        _safe_dispatch(lambda: send_fcm_push_to_users(staff_users, title, message, payload))
 
+        logger.info(
+            "KYC submission notification dispatched: customer=%s is_resubmission=%s notified_staff=%d",
+            customer_name,
+            is_resubmission,
+            len(staff_users),
+        )
         return notification_id
     except Exception as exc:
         logger.error("Failed to notify KYC submission: %s", exc, exc_info=True)
