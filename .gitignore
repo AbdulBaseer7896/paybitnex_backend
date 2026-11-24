@@ -49,3 +49,7 @@ htmlcov/
 
 # Bank statement exports
 Bank_statments/
+
+# Firebase Service Account
+*firebase*.json
+firebase-service-account.json
