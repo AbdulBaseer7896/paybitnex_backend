@@ -25,6 +25,7 @@ api_v1 = [
     path("bank-audit/", include("myapp.Urls.BankAudit_urls")),
     path("statement/", include("myapp.Urls.Statement_urls")),
     path("vendor/", include("myapp.Urls.Vendor_urls")),
+    path("notifications/", include("myapp.notifications.urls")),
 ]
 
 # Public (no-auth) endpoints — share-token invoice view. Mounted at

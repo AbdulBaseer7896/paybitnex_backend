@@ -49,6 +49,10 @@ from myapp.Utils.partner_ledger import distribute_fee_for_payment
 
 from myapp.Utils.email_tasks import send_email_async
 from myapp.Utils.staff_alerts import notify_staff
+from myapp.notifications.services import (
+    notify_payment_status_updated,
+    notify_payment_received_confirmed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +81,7 @@ STATUS_NEXT_STEP = {
 }
 
 
-def _record_status_change(payment, from_status, to_status, user, note=""):
+def _record_status_change(payment, from_status, to_status, user, note="", is_auto_confirm=False):
     TransactionStatusHistory.objects.create(
         payment=payment,
         from_status=from_status,
@@ -90,6 +94,26 @@ def _record_status_change(payment, from_status, to_status, user, note=""):
         description=f"{payment.reference}: {from_status} → {to_status}",
         before={"status": from_status}, after={"status": to_status},
     )
+
+    # Real-time WebSocket + DB notification:
+    # Do NOT notify customer if the change was made by the customer himself (avoid self-notification).
+    # When changed_by is admin, accountant, or system (user is None / Celery), notify customer.
+    if from_status and to_status != from_status:
+        is_customer_acting = bool(user and getattr(user, "role", None) == UserRole.CUSTOMER)
+        if not is_customer_acting:
+            try:
+                notify_payment_status_updated(
+                    payment=payment,
+                    old_status=from_status,
+                    new_status=to_status,
+                    note=note,
+                    is_auto_confirm=is_auto_confirm,
+                )
+            except Exception:
+                log.exception(
+                    "real-time notification failed: payment=%s %s → %s",
+                    payment.reference, from_status, to_status,
+                )
 
     # Customer-facing email — ONLY sent when a staff member changed the
     # status, not when the payment was first submitted (from_status="").
@@ -1160,6 +1184,13 @@ class IncomingPaymentViewSet(viewsets.ModelViewSet):
                 user=request.user,
                 note=("Customer confirmed receipt"
                       + (f" — {note}" if note else "")),
+            )
+            # Real-time WebSocket event: notify all connected admins/accountants
+            notify_payment_received_confirmed(
+                payment=payment,
+                old_status=before_status,
+                new_status=TransactionStatus.COMPLETED,
+                confirmed_by_note=note,
             )
             # After commit: fee distribution below runs in the same block,
             # and staff shouldn't be told the books closed until they have.

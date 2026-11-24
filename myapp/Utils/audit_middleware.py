@@ -7,7 +7,7 @@ performing each database write.
 
 Supports both sync and async views transparently.
 """
-from asgiref.sync import iscoroutinefunction
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from myapp.Utils.activity_signals import set_current_request
 
 
@@ -27,6 +27,8 @@ class AuditMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
         self._is_async = iscoroutinefunction(get_response)
+        if self._is_async:
+            markcoroutinefunction(self)
 
     def __call__(self, request):
         if self._is_async:
