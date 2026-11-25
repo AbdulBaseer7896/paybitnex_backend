@@ -138,6 +138,72 @@ def notify_payment_status_updated(payment, old_status: str, new_status: str, not
         return None
 
 
+def notify_payment_submitted(payment):
+    """
+    Notify all admins/accountants when a customer submits a new payment.
+
+    - Saves Notification for each active admin/accountant.
+    - Sends to the 'admins' Channels group on commit.
+    - Sends FCM push to admin/accountant devices on commit.
+    """
+    customer = getattr(payment, "customer", None)
+    customer_id = str(customer.id) if customer else ""
+    customer_name = (
+        (getattr(customer, "full_name", "") or getattr(customer, "email", ""))
+        if customer else "Customer"
+    )
+
+    title = "New Payment Submitted"
+    message = f"{customer_name} submitted payment {payment.reference} ({payment.amount} {payment.currency_id}) for review."
+    now_iso = timezone.now().isoformat()
+
+    payload = {
+        "type": NotificationType.PAYMENT_SUBMITTED,
+        "event": NotificationType.PAYMENT_SUBMITTED,
+        "notification_id": None,
+        "payment_id": str(payment.id),
+        "reference": getattr(payment, "reference", ""),
+        "old_status": "",
+        "new_status": str(getattr(payment, "status", "submitted")),
+        "status": str(getattr(payment, "status", "submitted")),
+        "customer_id": customer_id,
+        "customer_name": customer_name,
+        "title": title,
+        "message": message,
+        "created_at": now_iso,
+    }
+
+    try:
+        from myapp.Models.Auth_models import User, UserRole
+
+        staff_users = list(
+            User.objects.filter(role__in=[UserRole.ADMIN, UserRole.ACCOUNTANT], is_active=True)
+        )
+
+        notification_id = None
+        for staff in staff_users:
+            notif = Notification.objects.create(
+                recipient=staff,
+                type=NotificationType.PAYMENT_SUBMITTED,
+                payment=payment,
+                title=title,
+                message=message,
+                payload=payload,
+            )
+            if notification_id is None:
+                notification_id = notif.id
+
+        if notification_id:
+            payload["notification_id"] = notification_id
+
+        dbtx.on_commit(lambda: _send_to_channel_layer("admins", payload))
+        dbtx.on_commit(lambda: send_fcm_push_to_users(staff_users, title, message, payload))
+        return notification_id
+    except Exception as exc:
+        logger.error("Failed to create admin payment submitted notification: %s", exc, exc_info=True)
+        return None
+
+
 def notify_payment_received_confirmed(payment, old_status: str, new_status: str, confirmed_by_note: str = ""):
     """
     Notify all admins/accountants when a customer confirms PKR receipt.

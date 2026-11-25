@@ -52,6 +52,7 @@ from myapp.Utils.staff_alerts import notify_staff
 from myapp.notifications.services import (
     notify_payment_status_updated,
     notify_payment_received_confirmed,
+    notify_payment_submitted,
 )
 
 log = logging.getLogger(__name__)
@@ -183,6 +184,10 @@ def _notify_admins_new_payment(payment, submitted_by=""):
         # proof or a wrong amount.
         reply_to=[payment.customer.email] if payment.customer.email else None,
     )
+    try:
+        notify_payment_submitted(payment)
+    except Exception:
+        pass
 
 
 def _notify_admins_payment_confirmed(payment, confirmed_by=""):
