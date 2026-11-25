@@ -8,6 +8,7 @@ from django.utils import timezone
 class NotificationType(models.TextChoices):
     PAYMENT_STATUS_UPDATED = "payment_status_updated", "Payment Status Updated"
     PAYMENT_RECEIVED_CONFIRMED = "payment_received_confirmed", "Payment Received Confirmed"
+    PAYMENT_SUBMITTED = "payment_submitted", "Payment Submitted"
     KYC_STATUS_UPDATED = "kyc_status_updated", "KYC Status Updated"
     KYC_SUBMITTED = "kyc_submitted", "KYC Submitted"
 
