@@ -21,13 +21,16 @@
           {# ─── Brand header band ─── #}
           <tr>
             <td style="background:#022F32; padding:20px 28px; color:#ffffff;">
+              {% if frontend_url %}
+              <img src="{{ frontend_url }}/paidix-logo-full.png"
+                   alt="{{ company_name|default:'PaidiX' }}"
+                   height="36"
+                   style="display:block; height:36px; width:auto; border:0;" />
+              {% else %}
               <div style="font-size:18px; font-weight:700; letter-spacing:0.5px;">
                 {{ company_name|default:"PaidiX" }}
               </div>
-              <div style="font-size:11px; opacity:0.75; margin-top:2px;
-                          text-transform:uppercase; letter-spacing:1.2px;">
-                Move Money. Build Trust.
-              </div>
+              {% endif %}
             </td>
           </tr>
 
