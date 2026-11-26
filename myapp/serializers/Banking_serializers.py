@@ -8,7 +8,7 @@ from myapp.Models.Banking_models import (
 
 _PK_IBAN_RE = re.compile(r"^PK\d{2}[A-Z0-9]{4}\d{16}$")
 _GEN_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
-_PK_ACC_RE = re.compile(r"^\d{11,24}$")
+_PK_ACC_RE = re.compile(r"^\d{11,17}$")
 _MERCHANT_ACC_RE = re.compile(r"^[A-Za-z0-9]{6,34}$")
 
 
@@ -96,7 +96,7 @@ class CustomerBankAccountSerializer(serializers.ModelSerializer):
         cleaned = re.sub(r"[\s-]+", "", (value or ""))
         if not _PK_ACC_RE.match(cleaned):
             raise serializers.ValidationError(
-                "Account number must be 11 to 24 digits only."
+                "Account number must be 11 to 17 digits only."
             )
         user = self.context.get("request").user if self.context.get("request") else None
         return _check_unique_or_blank(
