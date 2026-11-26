@@ -173,13 +173,29 @@ class MeView(AsyncAPIView):
             "phone": user.phone,
             "had_picture": bool(user.profile_picture),
         }
+        from myapp.serializers.User_serializers import (
+            clean_and_validate_full_name, validate_phone_number,
+        )
         updated_fields = []
+        errors = {}
         if "full_name" in request.data:
-            user.full_name = request.data["full_name"]
-            updated_fields.append("full_name")
+            try:
+                user.full_name = clean_and_validate_full_name(
+                    request.data["full_name"], required=True,
+                )
+                updated_fields.append("full_name")
+            except serializers.ValidationError as exc:
+                errors["full_name"] = exc.detail
         if "phone" in request.data:
-            user.phone = request.data["phone"]
-            updated_fields.append("phone")
+            try:
+                user.phone = validate_phone_number(
+                    request.data["phone"], required=False,
+                )
+                updated_fields.append("phone")
+            except serializers.ValidationError as exc:
+                errors["phone"] = exc.detail
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
         # File upload
         if "profile_picture" in request.FILES:
             user.profile_picture = request.FILES["profile_picture"]

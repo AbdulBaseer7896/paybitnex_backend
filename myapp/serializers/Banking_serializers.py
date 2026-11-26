@@ -1,9 +1,48 @@
 """Banking serializers: bank lookups + customer bank/merchant accounts."""
+import re
 from rest_framework import serializers
 from myapp.Models.Banking_models import (
     PakistaniBank, ForeignBank,
     CustomerBankAccount, CustomerMerchantAccount,
 )
+
+_PK_IBAN_RE = re.compile(r"^PK\d{2}[A-Z0-9]{4}\d{16}$")
+_GEN_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
+_PK_ACC_RE = re.compile(r"^\d{8,24}$")
+_MERCHANT_ACC_RE = re.compile(r"^[A-Za-z0-9]{6,34}$")
+
+
+def _iban_mod97_valid(iban: str) -> bool:
+    """ISO 13616 Mod-97 checksum validation."""
+    rearranged = iban[4:] + iban[:4]
+    numeric = "".join(
+        str(ord(ch) - 55) if ch.isalpha() else ch
+        for ch in rearranged
+    )
+    try:
+        return int(numeric) % 97 == 1
+    except ValueError:
+        return False
+
+
+def _validate_iban_value(value: str, pakistani: bool = False) -> str:
+    cleaned = re.sub(r"[\s-]+", "", (value or "")).upper()
+    if not cleaned:
+        return ""
+    if pakistani:
+        if not _PK_IBAN_RE.match(cleaned):
+            raise serializers.ValidationError(
+                "Pakistani IBAN must be 24 characters (e.g. PK36SCBL0000001123456702)."
+            )
+    elif not _GEN_IBAN_RE.match(cleaned):
+        raise serializers.ValidationError(
+            "Enter a valid IBAN (15–34 alphanumeric characters starting with country code)."
+        )
+    if not _iban_mod97_valid(cleaned):
+        raise serializers.ValidationError(
+            "Invalid IBAN checksum. Please double-check the IBAN digits."
+        )
+    return cleaned
 
 
 class PakistaniBankSerializer(serializers.ModelSerializer):
@@ -54,15 +93,21 @@ class CustomerBankAccountSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "customer", "bank_name", "created_at", "updated_at"]
 
     def validate_account_number(self, value):
+        cleaned = re.sub(r"[\s-]+", "", (value or ""))
+        if not _PK_ACC_RE.match(cleaned):
+            raise serializers.ValidationError(
+                "Account number must be 8 to 24 digits only."
+            )
         user = self.context.get("request").user if self.context.get("request") else None
         return _check_unique_or_blank(
-            CustomerBankAccount, "account_number", value, self.instance, user=user,
+            CustomerBankAccount, "account_number", cleaned, self.instance, user=user,
         )
 
     def validate_iban(self, value):
+        cleaned = _validate_iban_value(value, pakistani=True)
         user = self.context.get("request").user if self.context.get("request") else None
         return _check_unique_or_blank(
-            CustomerBankAccount, "iban", value, self.instance, user=user,
+            CustomerBankAccount, "iban", cleaned, self.instance, user=user,
         )
 
 
@@ -85,11 +130,17 @@ class CustomerMerchantAccountSerializer(serializers.ModelSerializer):
         ]
 
     def validate_account_number(self, value):
+        cleaned = re.sub(r"[\s-]+", "", (value or "")).upper()
+        if not _MERCHANT_ACC_RE.match(cleaned):
+            raise serializers.ValidationError(
+                "Account number must be 6 to 34 alphanumeric characters."
+            )
         return _check_unique_or_blank(
-            CustomerMerchantAccount, "account_number", value, self.instance,
+            CustomerMerchantAccount, "account_number", cleaned, self.instance,
         )
 
     def validate_iban(self, value):
+        cleaned = _validate_iban_value(value, pakistani=False)
         return _check_unique_or_blank(
-            CustomerMerchantAccount, "iban", value, self.instance,
+            CustomerMerchantAccount, "iban", cleaned, self.instance,
         )
