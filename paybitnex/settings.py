@@ -367,7 +367,13 @@ else:
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
-                "hosts": [REDIS_URL],
+                "hosts": [
+                    {
+                        "address": REDIS_URL,
+                        "socket_timeout": None,
+                        "socket_connect_timeout": 5,
+                    }
+                ],
             },
         }
     }
