@@ -82,8 +82,10 @@ DATABASES = {
     "default": dj_database_url.parse(
         config("DATABASE_URL", default="sqlite:///db.sqlite3"),
         conn_max_age=600,
+        conn_health_checks=True,
     )
 }
+DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
 # SQLite production tuning — only applied when we're actually using SQLite.
 # Django's SQLite backend doesn't accept `init_command` in OPTIONS (that's
