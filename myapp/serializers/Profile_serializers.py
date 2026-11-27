@@ -17,7 +17,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
     # Declare cnic_number WITHOUT the auto UniqueValidator (it's sync
     # and would crash async views). We check uniqueness manually below.
     cnic_number = serializers.CharField(
-        max_length=15, validators=[CNIC_VALIDATOR],
+        max_length=15, required=False, allow_blank=True, allow_null=True,
     )
     cnic_front = serializers.ImageField(validators=[validate_image_file], required=False)
     cnic_back  = serializers.ImageField(validators=[validate_image_file], required=False)
@@ -102,16 +102,21 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
 
 
     def validate_cnic_number(self, value):
-        if not value:
-            return value
-        qs = CustomerProfile.objects.filter(cnic_number=value)
+        cleaned = (value or "").strip()
+        if not cleaned:
+            if not getattr(self, "partial", False):
+                raise serializers.ValidationError("CNIC number is required.")
+            # Preserve existing CNIC on partial PATCH if sent blank, or store None
+            return self.instance.cnic_number if self.instance else None
+        CNIC_VALIDATOR(cleaned)
+        qs = CustomerProfile.objects.filter(cnic_number=cleaned)
         if self.instance is not None:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
             raise serializers.ValidationError(
                 "This CNIC is already registered to another account."
             )
-        return value
+        return cleaned
 
     def to_internal_value(self, data):
         ret = super().to_internal_value(data)
@@ -144,6 +149,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         return ret
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
         # Once KYC is approved, profile is locked — customer edits are blocked, but staff can override.
         request = self.context.get("request")
         user = getattr(request, "user", None) if request else None
@@ -152,6 +158,9 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Profile is locked after KYC approval and cannot be edited."
             )
+
+        if self.instance is None and not attrs.get("cnic_number"):
+            raise serializers.ValidationError({"cnic_number": "CNIC number is required."})
 
         is_partial = getattr(self, "partial", False)
         if not is_partial:

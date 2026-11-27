@@ -350,7 +350,7 @@ def send_email_async(
     """
     ctx = {
         "subject": subject,
-        "frontend_url": getattr(settings, "FRONTEND_URL", ""),
+        "frontend_url": (getattr(settings, "FRONTEND_URL", "") or "").rstrip("/"),
         "company_name": getattr(settings, "EMAIL_FROM_NAME", "PaidiX"),
         **(context or {}),
     }
