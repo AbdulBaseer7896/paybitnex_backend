@@ -20,6 +20,7 @@ from django.core.cache import cache
 
 from myapp.serializers.User_serializers import (
     CustomTokenObtainPairSerializer, UserSerializer, ChangePasswordSerializer,
+    clean_and_validate_full_name, validate_phone_number,
 )
 from myapp.Models.Audit_models import AuditLog
 from myapp.Models.EmailOTP_models import EmailOTP, OTPPurpose
@@ -173,9 +174,6 @@ class MeView(AsyncAPIView):
             "phone": user.phone,
             "had_picture": bool(user.profile_picture),
         }
-        from myapp.serializers.User_serializers import (
-            clean_and_validate_full_name, validate_phone_number,
-        )
         updated_fields = []
         errors = {}
         if "full_name" in request.data:

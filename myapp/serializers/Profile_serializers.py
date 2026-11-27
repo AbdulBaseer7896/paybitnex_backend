@@ -149,6 +149,7 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         return ret
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
         # Once KYC is approved, profile is locked — customer edits are blocked, but staff can override.
         request = self.context.get("request")
         user = getattr(request, "user", None) if request else None
@@ -157,6 +158,9 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Profile is locked after KYC approval and cannot be edited."
             )
+
+        if self.instance is None and not attrs.get("cnic_number"):
+            raise serializers.ValidationError({"cnic_number": "CNIC number is required."})
 
         is_partial = getattr(self, "partial", False)
         if not is_partial:
